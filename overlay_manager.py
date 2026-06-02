@@ -3,7 +3,12 @@ from tkinter import messagebox
 import time
 from logger import log_debug
 from ui_elements import ResizableMovableFrame
-from pyside_overlay import get_pyside_manager, is_pyside_available
+from modern_ui import style_selection_window
+
+
+def _get_pyside_api():
+    from pyside_overlay import get_pyside_manager, is_pyside_available
+    return get_pyside_manager, is_pyside_available
 
 def _hex_to_rgba_om(hex_color, opacity):
     """Helper to convert #RRGGBB hex and opacity float to rgba(r,g,b,a) string."""
@@ -24,6 +29,7 @@ def _select_screen_area_interactive(app, prompt_text, is_target=False):
         sel_win.attributes("-fullscreen", True)
         sel_win.attributes("-alpha", 0.6)
         sel_win.configure(cursor="crosshair")
+        selection_palette = style_selection_window(sel_win, getattr(app, "md3_palette", None))
         
         sel_win.attributes("-topmost", True)
         sel_win.update_idletasks()
@@ -34,7 +40,23 @@ def _select_screen_area_interactive(app, prompt_text, is_target=False):
         sel_win.grab_set()
         sel_win.update()
         
-        tk.Label(sel_win, text=prompt_text + "\n(Esc to cancel)", font=("Arial", 16, "bold"), bg="black", fg="white").place(relx=0.5, rely=0.1, anchor="center")
+        prompt_card = tk.Frame(
+            sel_win,
+            bg=selection_palette["surface"],
+            highlightthickness=1,
+            highlightbackground=selection_palette["outline"],
+        )
+        prompt_card.place(relx=0.5, rely=0.1, anchor="center")
+        tk.Label(
+            prompt_card,
+            text=prompt_text + "\n(Esc to cancel)",
+            font=("Segoe UI", 15, "bold"),
+            bg=selection_palette["surface"],
+            fg=selection_palette["text"],
+            padx=24,
+            pady=14,
+            bd=0,
+        ).pack()
         canvas = tk.Canvas(sel_win, highlightthickness=0, bg=sel_win['bg'])
         canvas.pack(fill=tk.BOTH, expand=True)
         
@@ -276,11 +298,15 @@ def create_target_overlay_om(app, skip_preservation=False):
             font_size = int(app.target_font_size_var.get())
         except Exception:
             font_size = int(app.config['Settings'].get('default_font_size', '14'))
+        try:
+            font_family = app.target_font_type_var.get() or "Arial"
+        except Exception:
+            font_family = "Arial"
 
         pad_x = int(app.config['Settings'].get('target_text_pad_x', '5'))
         pad_y = int(app.config['Settings'].get('target_text_pad_y', '5'))
         top_bar_height = int(app.config['Settings'].get('target_top_bar_height', '10'))
-        border_px = int(app.config['Settings'].get('target_border_px', '0'))
+        border_px = int(app.config['Settings'].get('target_border_px', '1'))
 
         # Background opacity - prefer app variable over config
         try:
@@ -294,6 +320,7 @@ def create_target_overlay_om(app, skip_preservation=False):
         except (AttributeError, tk.TclError):
             text_opacity = float(app.config['Settings'].get('target_text_opacity', '1.0'))
 
+        get_pyside_manager, is_pyside_available = _get_pyside_api()
         if is_pyside_available():
             log_debug("OverlayManager: PySide6 available, attempting to create PySide overlay")
             pyside_manager = get_pyside_manager()
@@ -305,9 +332,10 @@ def create_target_overlay_om(app, skip_preservation=False):
                 top_bar_height=top_bar_height,
                 text_padding=(pad_x, pad_y),
                 font_size=font_size,
-                font_family="Arial",
+                font_family=font_family,
                 border_px=border_px,
-                opacity=opacity
+                opacity=opacity,
+                corner_radius=16
             )
 
             if app.target_overlay:
@@ -366,7 +394,7 @@ def create_target_overlay_om(app, skip_preservation=False):
                     wrap=tk.WORD,
                     bg=target_color,
                     fg=app.target_text_colour_var.get(),
-                    font=("Arial", font_size),
+                    font=(font_family, font_size),
                     bd=border_px,
                     relief="flat",
                     padx=pad_x,
@@ -413,6 +441,9 @@ def create_target_overlay_om(app, skip_preservation=False):
 
 
 def toggle_source_visibility_om(app):
+    if (not app.source_overlay or not app.source_overlay.winfo_exists()) and app.source_area:
+        create_source_overlay_om(app)
+
     if app.source_overlay and app.source_overlay.winfo_exists():
         app.source_overlay.toggle_visibility()
         action = "hidden" if not app.source_overlay.winfo_viewable() else "shown"
@@ -422,6 +453,9 @@ def toggle_source_visibility_om(app):
         log_debug("OverlayManager: Toggle source visibility failed: Overlay does not exist.")
 
 def toggle_target_visibility_om(app):
+    if (not app.target_overlay or not app.target_overlay.winfo_exists()) and app.target_area:
+        create_target_overlay_om(app)
+
     if app.target_overlay and app.target_overlay.winfo_exists():
         if hasattr(app.target_overlay, 'update_color'):
             app.target_overlay.update_color(app.target_colour_var.get())
@@ -441,7 +475,7 @@ def load_areas_from_config_om(app):
         y2 = int(app.config['Settings'].get('source_area_y2', '100'))
         app.source_area = [x1, y1, x2, y2]
 
-        if not app.source_overlay or not app.source_overlay.winfo_exists():
+        if (not app.source_overlay or not app.source_overlay.winfo_exists()) and app.config['Settings'].getboolean('source_area_visible', fallback=False):
             create_source_overlay_om(app)
             log_debug(f"OverlayManager: Created source overlay from config: {app.source_area}")
 
@@ -451,7 +485,7 @@ def load_areas_from_config_om(app):
         target_y2 = int(app.config['Settings'].get('target_area_y2', '400'))
         app.target_area = [target_x1, target_y1, target_x2, target_y2]
 
-        if not app.target_overlay or not app.target_overlay.winfo_exists():
+        if (not app.target_overlay or not app.target_overlay.winfo_exists()) and app.config['Settings'].getboolean('target_area_visible', fallback=False):
             create_target_overlay_om(app)
             log_debug(f"OverlayManager: Created target overlay from config: {app.target_area}")
 

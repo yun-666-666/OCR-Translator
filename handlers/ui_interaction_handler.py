@@ -4,8 +4,6 @@ import time
 import re
 import tkinter as tk
 from tkinter import messagebox, colorchooser
-import cv2 
-from PIL import Image 
 from config_manager import save_app_config 
 from logger import log_debug
 import traceback
@@ -121,12 +119,18 @@ class UIInteractionHandler:
                 elif not show and is_gridded: 
                     widget.grid_remove()
         
-        is_google = (selected_model_ui_code == 'google_api')
-        is_deepl = (selected_model_ui_code == 'deepl_api')
-        is_gemini = (selected_model_ui_code == 'gemini_api')
-        is_openai = self.app.is_openai_model(self.app.translation_model_display_var.get())
+        is_custom = (selected_model_ui_code == 'custom_ai')
+        is_google = False
+        is_deepl = False
+        is_gemini = False
+        is_openai = False
         is_marian = (selected_model_ui_code == 'marianmt')
-        is_api_model = is_google or is_deepl or is_gemini or is_openai
+        is_api_model = is_custom
+
+        if hasattr(self.app, 'custom_ai_latency_mode_label'):
+            manage_grid(self.app.custom_ai_latency_mode_label, show=is_custom)
+        if hasattr(self.app, 'custom_ai_latency_mode_combobox'):
+            manage_grid(self.app.custom_ai_latency_mode_combobox, show=is_custom)
 
         # Manage "Keep Linebreaks" checkbox state
         if hasattr(self.app, 'keep_linebreaks_checkbox'):
@@ -208,14 +212,12 @@ class UIInteractionHandler:
             for lbl in self.app.marian_explanation_labels:
                 manage_grid(lbl, show=is_marian)
         
-        # Update statistics when respective models are selected
-        if is_gemini and hasattr(self.app, 'update_gemini_stats'):
-            # Use after_idle to ensure all GUI elements are ready
-            self.app.root.after_idle(self.app.update_gemini_stats)
-        
-        if is_deepl and hasattr(self.app, 'update_deepl_usage'):
-            # Use after_idle to ensure all GUI elements are ready
-            self.app.root.after_idle(self.app.update_deepl_usage)
+        if hasattr(self.app, 'ai_profiles_frame'):
+            manage_grid(self.app.ai_profiles_frame, show=True)
+        if hasattr(self.app, 'translation_profiles_frame'):
+            manage_grid(self.app.translation_profiles_frame, show=False)
+        if hasattr(self.app, 'ocr_profiles_frame'):
+            manage_grid(self.app.ocr_profiles_frame, show=False)
     
     def update_ocr_model_ui(self):
         """Update UI visibility for OCR model-specific settings."""
@@ -374,7 +376,7 @@ class UIInteractionHandler:
             
             # Update API language dropdowns
             active_model = self.app.translation_model_var.get()
-            if active_model in ['google_api', 'deepl_api', 'gemini_api', 'openai_api']:
+            if active_model in ['custom_ai', 'google_api', 'deepl_api', 'gemini_api', 'openai_api']:
                 self._update_language_dropdowns_for_model(active_model)
             
             # Update MarianMT models dropdown
@@ -437,6 +439,49 @@ class UIInteractionHandler:
         
         # Get current UI language
         ui_language_for_lookup = self.get_current_ui_language_for_lookup()
+
+        if active_model_code == 'custom_ai':
+            def localized_names(language_pairs, provider):
+                values = []
+                for _, code in language_pairs:
+                    values.append(lm.get_localized_language_name(code, provider, ui_language_for_lookup))
+                if "Auto" in values:
+                    values.remove("Auto")
+                    values = lm.sort_polish_names(values) if ui_language_for_lookup == 'polish' else sorted(values)
+                    values.insert(0, "Auto")
+                else:
+                    values = lm.sort_polish_names(values) if ui_language_for_lookup == 'polish' else sorted(values)
+                return values
+
+            def set_display(var, code, values, fallback):
+                display_name = lm.get_localized_language_name(code, 'google', ui_language_for_lookup)
+                if display_name in values:
+                    var.set(display_name)
+                elif fallback in values:
+                    var.set(fallback)
+                elif values:
+                    var.set(values[0])
+                else:
+                    var.set("")
+
+            source_names_list = localized_names(lm.google_source_languages, 'google')
+            target_names_list = localized_names(lm.google_target_languages, 'google')
+
+            if hasattr(self.app, 'source_lang_combobox') and self.app.source_lang_combobox.winfo_exists():
+                self.app.source_lang_combobox['values'] = source_names_list
+                set_display(self.app.source_display_var, self.app.custom_source_lang, source_names_list, "Auto")
+
+            if hasattr(self.app, 'target_lang_combobox') and self.app.target_lang_combobox.winfo_exists():
+                self.app.target_lang_combobox['values'] = target_names_list
+                set_display(self.app.target_display_var, self.app.custom_target_lang, target_names_list, "English")
+
+            self.app.source_lang_var.set(self.app.custom_source_lang)
+            self.app.target_lang_var.set(self.app.custom_target_lang)
+            log_debug(
+                f"Updated language dropdowns for custom_ai: "
+                f"{self.app.custom_source_lang} -> {self.app.custom_target_lang} [UI: {ui_language_for_lookup}]"
+            )
+            return
         
         source_names_list, current_source_api_code_from_app = [], 'auto'
         if active_model_code == 'google_api':
@@ -867,25 +912,11 @@ class UIInteractionHandler:
                 selected_display_name_from_ui = self.app.translation_model_display_var.get()
                 
                 # Determine the model type based on the selected display name
-                newly_selected_model_code = None
-                
-                # Check if it's a Gemini model
-                if (self.app.GEMINI_API_AVAILABLE and 
-                    selected_display_name_from_ui in self.app.gemini_models_manager.get_translation_model_names()):
-                    newly_selected_model_code = 'gemini_api'
-                    # Store the specific Gemini model selection
-                    self.app.gemini_translation_model_var.set(selected_display_name_from_ui)
-                    log_debug(f"Selected Gemini translation model: {selected_display_name_from_ui}")
-                # Check if it's an OpenAI model
-                elif (self.app.OPENAI_API_AVAILABLE and 
-                      selected_display_name_from_ui in self.app.openai_models_manager.get_translation_model_names()):
-                    newly_selected_model_code = 'openai_api'
-                    # Store the specific OpenAI model selection
-                    self.app.openai_translation_model_var.set(selected_display_name_from_ui)
-                    log_debug(f"Selected OpenAI translation model: {selected_display_name_from_ui}")
-                else:
-                    # Use the existing lookup for non-Gemini/OpenAI models
-                    newly_selected_model_code = self.app.translation_model_values.get(selected_display_name_from_ui, 'google_api')
+                newly_selected_model_code = 'custom_ai'
+                for profile in self.app.custom_ai_profiles.list_profiles(enabled_only=True):
+                    if profile["name"] == selected_display_name_from_ui:
+                        self.app.custom_ai_profiles.set_active_profile("translation", profile["id"])
+                        break
                 
                 # Track model change
                 previous_model = self.app.translation_model_var.get()
@@ -903,14 +934,11 @@ class UIInteractionHandler:
             model_to_configure_for = self.app.translation_model_var.get()
             
             # Update display name if needed
-            if model_to_configure_for == 'gemini_api':
-                # For Gemini, use the specific model name
-                expected_display_name = self.app.gemini_translation_model_var.get()
-            elif model_to_configure_for == 'openai_api':
-                # For OpenAI, use the specific model name
-                expected_display_name = self.app.openai_translation_model_var.get()
-            else:
-                expected_display_name = self.app.translation_model_names.get(model_to_configure_for)
+            if model_to_configure_for != 'custom_ai':
+                model_to_configure_for = 'custom_ai'
+                self.app.translation_model_var.set('custom_ai')
+            active_profile = self.app.custom_ai_profiles.get_active_profile("translation")
+            expected_display_name = active_profile["name"] if active_profile else self.app.ui_lang.get_label("custom_ai_no_profiles", "Add an AI model profile")
                 
             if expected_display_name and self.app.translation_model_display_var.get() != expected_display_name:
                 self.app.translation_model_display_var.set(expected_display_name)
@@ -919,24 +947,10 @@ class UIInteractionHandler:
             
             self.update_translation_model_ui() 
 
-            if model_to_configure_for in ['google_api', 'deepl_api', 'gemini_api', 'openai_api']:
+            if model_to_configure_for == 'custom_ai':
                 self._update_language_dropdowns_for_model(model_to_configure_for)
-                if model_to_configure_for == 'google_api':
-                    self.app.source_lang_var.set(self.app.google_source_lang)
-                    self.app.target_lang_var.set(self.app.google_target_lang)
-                elif model_to_configure_for == 'deepl_api':
-                    self.app.source_lang_var.set(self.app.deepl_source_lang)
-                    self.app.target_lang_var.set(self.app.deepl_target_lang)
-                    # Update DeepL model type options for beta language restriction
-                    if hasattr(self.app, 'update_deepl_model_type_for_language'):
-                        self.app.update_deepl_model_type_for_language()
-                elif model_to_configure_for == 'gemini_api':
-                    self.app.source_lang_var.set(self.app.gemini_source_lang)
-                    self.app.target_lang_var.set(self.app.gemini_target_lang)
-                    # Session will be created/resumed automatically on first translation
-                elif model_to_configure_for == 'openai_api':
-                    self.app.source_lang_var.set(self.app.openai_source_lang)
-                    self.app.target_lang_var.set(self.app.openai_target_lang)
+                self.app.source_lang_var.set(self.app.custom_source_lang)
+                self.app.target_lang_var.set(self.app.custom_target_lang)
             elif model_to_configure_for == 'marianmt':
                 if self.app.MARIANMT_AVAILABLE and self.app.marian_translator is None and (preload or not initial_setup):
                     self.app.translation_handler.initialize_marian_translator()
@@ -1069,7 +1083,7 @@ class UIInteractionHandler:
             log_file = 'translator_debug.log'
             if os.path.exists(log_file):
                 try:
-                    with open(log_file, 'r', encoding='utf-8') as f: log_lines = f.readlines()
+                    with open(log_file, 'r', encoding='utf-8-sig') as f: log_lines = f.readlines()
                     start_index = max(0, len(log_lines) - 200)
                     for line in log_lines[start_index:]: self.app.log_text.insert(tk.END, line)
                     self.app.log_text.see(tk.END)
@@ -1080,6 +1094,8 @@ class UIInteractionHandler:
 
     def save_debug_images(self):
         try:
+            import cv2
+
             if not self.app.ocr_debugging_var.get():
                 messagebox.showinfo("Debug", "OCR Debugging disabled.", parent=self.app.root); return
             if self.app.last_screenshot is None:
@@ -1144,6 +1160,8 @@ class UIInteractionHandler:
             gemini_target = self.app.gemini_target_lang
             openai_source = self.app.openai_source_lang
             openai_target = self.app.openai_target_lang
+            custom_source = self.app.custom_source_lang
+            custom_target = self.app.custom_target_lang
             
             # Basic validation: codes should be short and not contain spaces
             def is_valid_code(code):
@@ -1208,11 +1226,27 @@ class UIInteractionHandler:
                 log_debug(f"Saving OpenAI target lang: {openai_target}")
             else:
                 log_debug(f"ERROR: Invalid OpenAI target lang code '{openai_target}' - not saving")
+
+            if is_valid_code(custom_source):
+                cfg['custom_source_lang'] = custom_source
+                log_debug(f"Saving Custom AI source lang: {custom_source}")
+            else:
+                log_debug(f"ERROR: Invalid Custom AI source lang code '{custom_source}' - not saving")
+
+            if is_valid_code(custom_target):
+                cfg['custom_target_lang'] = custom_target
+                log_debug(f"Saving Custom AI target lang: {custom_target}")
+            else:
+                log_debug(f"ERROR: Invalid Custom AI target lang code '{custom_target}' - not saving")
+            cfg['custom_ai_profiles_file'] = self.app.config['Settings'].get('custom_ai_profiles_file', 'custom_ai_profiles.json')
             
             cfg['marian_model'] = self.app.marian_model_var.get() 
 
             cfg['tesseract_path'] = self.app.tesseract_path_var.get()
             cfg['scan_interval'] = str(self.app.scan_interval_var.get())
+            cfg['capture_backend'] = self.app.capture_backend_var.get()
+            cfg['ocr_frame_cache_size'] = str(self.app.ocr_frame_cache_size_var.get())
+            cfg['enable_instant_cache_display'] = str(self.app.enable_instant_cache_display_var.get())
             cfg['stability_threshold'] = str(self.app.stability_var.get())
             cfg['clear_translation_timeout'] = str(self.app.clear_translation_timeout_var.get())
             cfg['image_preprocessing_mode'] = self.app.preprocessing_mode_var.get()
@@ -1231,7 +1265,6 @@ class UIInteractionHandler:
             cfg['target_text_opacity'] = str(self.app.target_text_opacity_var.get())
             cfg['gui_language'] = self.app.gui_language_var.get()
             cfg['ocr_model'] = self.app.ocr_model_var.get()  # OCR Model Selection (Phase 2)
-            cfg['check_for_updates_on_startup'] = 'yes' if self.app.check_for_updates_on_startup_var.get() else 'no'
             cfg['keep_linebreaks'] = str(self.app.keep_linebreaks_var.get()) # Add this line
             
             cfg['google_translate_api_key'] = self.app.google_api_key_var.get()
@@ -1250,6 +1283,8 @@ class UIInteractionHandler:
             # OpenAI-specific settings
             cfg['openai_api_key'] = self.app.openai_api_key_var.get()
             cfg['openai_context_window'] = str(self.app.openai_context_window_var.get())
+            cfg['custom_context_window'] = str(self.app.custom_context_window_var.get())
+            cfg['custom_ai_latency_mode'] = self.app.get_custom_ai_latency_mode() if hasattr(self.app, 'get_custom_ai_latency_mode') else self.app.custom_ai_latency_mode_var.get()
             cfg['openai_file_cache'] = str(self.app.openai_file_cache_var.get())
             cfg['openai_api_log_enabled'] = str(self.app.openai_api_log_enabled_var.get())
             cfg['openai_translation_model'] = self.app.openai_translation_model_var.get()
@@ -1311,7 +1346,7 @@ class UIInteractionHandler:
     def clear_debug_log(self):
         try:
             log_filename = 'translator_debug.log' 
-            with open(log_filename, 'w', encoding='utf-8') as f:
+            with open(log_filename, 'w', encoding='utf-8-sig') as f:
                 f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Debug log cleared by user.\n")
             self.refresh_debug_log()
             if hasattr(self.app, 'status_label') and self.app.status_label.winfo_exists():

@@ -42,7 +42,11 @@ class GeminiOCRProvider(AbstractOCRProvider):
         return GENAI_AVAILABLE
 
     def _initialize_client(self, api_key):
-        """Initialize the Gemini API client."""
+        """Initialize the Gemini API client.
+        
+        Args:
+            api_key: The Gemini API key
+        """
         if not GENAI_AVAILABLE:
             log_debug("Google Gen AI libraries not available for Gemini OCR session")
             self.client = None
@@ -52,11 +56,13 @@ class GeminiOCRProvider(AbstractOCRProvider):
             self._force_client_refresh()
 
         try:
-            log_debug("Creating new Gemini client for OCR")
+            log_debug("Creating new Gemini client for OCR with default API version")
             self.client = genai.Client(api_key=api_key)
+            
             self.session_api_key = api_key
             self.client_created_time = time.time()
             self.api_call_count = 0
+            self._current_api_version = 'v1beta'
             return self.client is not None
         except Exception as e:
             log_debug(f"Failed to initialize Gemini OCR client: {e}")
@@ -75,16 +81,60 @@ class GeminiOCRProvider(AbstractOCRProvider):
         ocr_model_api_name = self.app.get_current_gemini_model_for_ocr() or 'gemini-2.5-flash-lite'
         
         # Configure the OCR request
-        ocr_config = types.GenerateContentConfig(
-            temperature=0.0,
-            max_output_tokens=512,
-            media_resolution="MEDIA_RESOLUTION_MEDIUM",
-            safety_settings=[
+        ocr_model_lower = ocr_model_api_name.lower()
+        
+        # Get media resolution from model config
+        # Use gemini_ocr_model_var which contains the full display name (e.g., "Gemini 3 Flash (Low)")
+        # Note: ocr_model_var only contains the provider type ("gemini")
+        ocr_model_display_name = self.app.gemini_ocr_model_var.get()
+        media_resolution_str = self.app.gemini_models_manager.get_model_media_resolution(ocr_model_display_name)
+        
+        # Check if we need v1alpha API for per-Part media resolution (required for LOW resolution on Gemini 3)
+        # needs_alpha_api = (media_resolution_str == 'LOW' and 'gemini-3' in ocr_model_lower)
+        current_api_version = getattr(self, '_current_api_version', 'v1beta')
+        
+        log_debug(f"OCR Resolution check: display_name='{ocr_model_display_name}', resolution='{media_resolution_str}', model_lower='{ocr_model_lower}', current_api='{current_api_version}'")
+        
+        # We now use global media resolution for all models (including Gemini 3), so we stay on v1beta
+        # Re-initialization logic for alpha API removed.
+        
+        # Store for logging
+        self._current_media_resolution = media_resolution_str
+        
+        # Map string to enum value
+        media_resolution_map = {
+            'LOW': types.MediaResolution.MEDIA_RESOLUTION_LOW,
+            'MEDIUM': types.MediaResolution.MEDIA_RESOLUTION_MEDIUM,
+            'HIGH': types.MediaResolution.MEDIA_RESOLUTION_HIGH,
+            'ULTRA_HIGH': types.MediaResolution.MEDIA_RESOLUTION_HIGH  # Fallback, no ULTRA_HIGH in base enum
+        }
+        media_resolution = media_resolution_map.get(media_resolution_str, types.MediaResolution.MEDIA_RESOLUTION_MEDIUM)
+        
+        # Base arguments
+        config_args = {
+            "temperature": 0.0,
+            "max_output_tokens": 512,
+            "media_resolution": media_resolution,
+            "safety_settings": [
                 types.SafetySetting(category=c, threshold='BLOCK_NONE') 
                 for c in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 
                          'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
             ]
-        )
+        }
+        
+        # Add model-specific thinking config
+        try:
+            if "gemini-3" in ocr_model_lower:
+                # Gemini 3 requires thinking_level instead of defaulting (or strict budget)
+                config_args["thinking_config"] = types.ThinkingConfig(thinking_level="MINIMAL")
+            # For Gemini 2.5, we don't set thinking_budget for OCR to keep it standard/fast unless needed, 
+            # but usually OCR doesn't trigger severe thinking unless requested. 
+            # If we wanted to be strict for G2.5 OCR too, we could add thinking_budget=0 here, 
+            # but let's stick to G3 requirement as per prompt.
+        except Exception as e:
+            log_debug(f"Error setting thinking config for OCR: {e}")
+
+        ocr_config = types.GenerateContentConfig(**config_args)
         
         # OCR prompt optimized for text transcription
         if self.app.keep_linebreaks_var.get():
@@ -96,9 +146,17 @@ class GeminiOCRProvider(AbstractOCRProvider):
         
         # Make the API call
         api_call_start_time = time.time()
+        
+        # Use simple Part without per-part media_resolution (relies on global config)
+        # This applies to all models now (Gemini 2.x and Gemini 3)
+        image_part = types.Part.from_bytes(
+            data=image_data, 
+            mime_type='image/webp'
+        )
+        
         response = self.client.models.generate_content(
             model=ocr_model_api_name,
-            contents=[types.Part.from_bytes(data=image_data, mime_type='image/webp'), prompt],
+            contents=[image_part, prompt],
             config=ocr_config
         )
         call_duration = time.time() - api_call_start_time
@@ -135,8 +193,8 @@ class GeminiOCRProvider(AbstractOCRProvider):
         
         try:
             if response.usage_metadata:
-                input_tokens = response.usage_metadata.prompt_token_count
-                output_tokens = response.usage_metadata.candidates_token_count
+                input_tokens = response.usage_metadata.prompt_token_count or 0
+                output_tokens = response.usage_metadata.candidates_token_count or 0
             
             # Get model name for logging from API response
             model_name_for_logging = "unknown"
@@ -149,10 +207,15 @@ class GeminiOCRProvider(AbstractOCRProvider):
             model_name_for_logging = model_name_for_costing # Fallback
         
         if self._is_logging_enabled():
+            # Get stored values for logging
+            api_version = getattr(self, '_current_api_version', 'v1beta')
+            media_resolution = getattr(self, '_current_media_resolution', 'MEDIUM')
+            
             self._log_complete_ocr_call(
                 prompt, image_size, ocr_result, parsed_text, 
                 call_duration, input_tokens, output_tokens, self._current_source_lang,
-                model_name_for_costing, model_name_for_logging, model_source
+                model_name_for_costing, model_name_for_logging, model_source,
+                api_version, media_resolution
             )
         
         log_debug(f"Gemini OCR result: '{parsed_text}' (took {call_duration:.3f}s)")
@@ -169,7 +232,8 @@ class GeminiOCRProvider(AbstractOCRProvider):
 
     def _log_complete_ocr_call(self, prompt, image_size, raw_response, parsed_response, 
                               call_duration, input_tokens, output_tokens, source_lang, 
-                              model_name_for_costing, model_name_for_logging, model_source):
+                              model_name_for_costing, model_name_for_logging, model_source,
+                              api_version='v1beta', media_resolution='MEDIUM'):
         """Log the complete OCR call with detailed information."""
         try:
             with self._log_lock:
@@ -214,6 +278,8 @@ REQUEST PROMPT:
 
 RESPONSE RECEIVED:
 Model: {model_name_for_logging} ({model_source})
+Requested version: {api_version}
+Requested media resolution: {media_resolution}
 Cost: input {input_cost_str}, output {output_cost_str} (per 1M)
 Timestamp: {call_end_time}
 Call Duration: {call_duration:.3f} seconds
@@ -238,7 +304,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
 
 """
                 # Write to main log file
-                with open(self.main_log_file, 'a', encoding='utf-8') as f:
+                with open(self.main_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(log_entry)
                 
                 # Write to short log
@@ -282,7 +348,7 @@ Result:
 --------------------------------------------------
 
 """
-            with open(self.short_log_file, 'a', encoding='utf-8') as f:
+            with open(self.short_log_file, 'a', encoding='utf-8-sig') as f:
                 f.write(log_entry)
                 
         except Exception as e:
@@ -304,7 +370,7 @@ Result:
         cost_regex = re.compile(r"^\s*-\s*Total OCR Cost \(so far\):\s*\$([0-9.]+)")
         
         try:
-            with open(self.main_log_file, 'r', encoding='utf-8') as f:
+            with open(self.main_log_file, 'r', encoding='utf-8-sig') as f:
                 for line in f:
                     if m := input_token_regex.match(line):
                         total_input = int(m.group(1))

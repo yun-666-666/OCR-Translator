@@ -41,6 +41,11 @@ class UnifiedTranslationCache:
             params_str = f"_model{kwargs['model_type']}"
         elif provider == "google_api" and "format" in kwargs:
             params_str = f"_fmt{kwargs['format']}"
+        elif provider == "custom_ai":
+            profile_id = kwargs.get("profile_id", "")
+            base_url = kwargs.get("base_url", "")
+            model = kwargs.get("model", "")
+            params_str = f"_profile{profile_id}_url{base_url}_model{model}"
         # Add more provider-specific parameters as needed
         
         params_hash = hashlib.md5(params_str.encode('utf-8')).hexdigest()[:8] if params_str else ""

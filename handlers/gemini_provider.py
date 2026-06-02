@@ -57,58 +57,6 @@ class GeminiProvider(AbstractLLMProvider):
             self.client = None
             return
             
-        if hasattr(self, 'client') and self._should_refresh_client():
-            self._force_client_refresh()
-            
-        try:
-            self.client = genai.Client(api_key=api_key)
-            self.session_api_key = api_key
-            self.client_created_time = time.time()
-            self.api_call_count = 0
-            
-            model_temperature = float(self.app.config['Settings'].get('gemini_model_temp', '0.0'))
-            
-            try:
-                self.generation_config = types.GenerateContentConfig(
-                    temperature=model_temperature,
-                    max_output_tokens=1024,
-                    candidate_count=1,
-                    top_p=0.95,
-                    top_k=40,
-                    response_mime_type="text/plain",
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    safety_settings=[
-                        types.SafetySetting(category=c, threshold='BLOCK_NONE')
-                        for c in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
-                    ]
-                )
-                log_debug("Gemini session initialized with thinking_budget=0 for non-thinking mode")
-            except (AttributeError, TypeError):
-                self.generation_config = types.GenerateContentConfig(
-                    temperature=model_temperature,
-                    max_output_tokens=1024,
-                    candidate_count=1,
-                    top_p=0.95,
-                    top_k=40,
-                    response_mime_type="text/plain",
-                    safety_settings=[
-                        types.SafetySetting(category=c, threshold='BLOCK_NONE')
-                        for c in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
-                    ]
-                )
-            
-            self._clear_context()
-            log_debug(f"Gemini client initialized for {source_lang}->{target_lang}")
-            
-        except Exception as e:
-            log_debug(f"Failed to initialize Gemini client: {e}")
-            self.client = None
-        """Initialize Gemini client session."""
-        if not GENAI_AVAILABLE:
-            log_debug("Google Gen AI libraries not available for Gemini session")
-            self.client = None
-            return
-            
         # Force refresh if needed
         if hasattr(self, 'client') and self._should_refresh_client():
             self._force_client_refresh()
@@ -202,9 +150,39 @@ class GeminiProvider(AbstractLLMProvider):
             # Fallback to config if no specific model selected
             translation_model_api_name = self.app.config['Settings'].get('gemini_model_name', 'gemini-2.5-flash-lite')
         
+        # Determine strictness/thought configuration based on model version
+        # Gemini 3.0 uses 'thinking_level', Gemini 2.5 uses 'thinking_budget'
+        current_config = self.generation_config
+        
+        try:
+            if "gemini-3" in translation_model_api_name.lower():
+                # Gemini 3 specific config: Temperature 0, Minimal Thinking
+                if GENAI_AVAILABLE:
+                    from google.genai import types
+                    current_config = types.GenerateContentConfig(
+                        temperature=0.0,  # Strict temperature for Gemini 3
+                        max_output_tokens=1024,
+                        candidate_count=1,
+                        top_p=0.95,
+                        top_k=40,
+                        response_mime_type="text/plain",
+                        thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"), # Use MINIMAL for Gemini 3
+                        safety_settings=[
+                            types.SafetySetting(category=c, threshold='BLOCK_NONE')
+                            for c in ['HARM_CATEGORY_HARASSMENT', 'HARM_CATEGORY_HATE_SPEECH', 
+                                     'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'HARM_CATEGORY_DANGEROUS_CONTENT']
+                        ]
+                    )
+            else:
+                 # Default config (already set in __init__ with thinking_budget=0 if supported)
+                 pass
+        except Exception as e:
+            log_debug(f"Error configuring specific settings for model {translation_model_api_name}: {e}")
+            # Fallback to default self.generation_config
+        
         return {
             'api_name': translation_model_api_name,
-            'config': self.generation_config
+            'config': current_config
         }
     
     def _make_api_call(self, message_content, model_config):
@@ -230,8 +208,8 @@ class GeminiProvider(AbstractLLMProvider):
         
         try:
             if response.usage_metadata:
-                input_tokens = response.usage_metadata.prompt_token_count
-                output_tokens = response.usage_metadata.candidates_token_count
+                input_tokens = response.usage_metadata.prompt_token_count or 0
+                output_tokens = response.usage_metadata.candidates_token_count or 0
             
             # Get the model name for logging from the actual API response
             model_name_for_logging = "unknown"

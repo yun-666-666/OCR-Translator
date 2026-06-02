@@ -177,7 +177,7 @@ class LanguageManager:
     def get_code_from_name(self, name_to_find, service_type, lang_direction="source"):
         """Gets API code from display name for a specific service."""
         lst = None
-        if service_type == 'google_api':
+        if service_type in ('google_api', 'custom_ai'):
             lst = self.google_source_languages if lang_direction == "source" else self.google_target_languages
         elif service_type == 'deepl_api':
             lst = self.deepl_source_languages if lang_direction == "source" else self.deepl_target_languages
@@ -195,7 +195,7 @@ class LanguageManager:
     def get_name_from_code(self, code_to_find, service_type, lang_direction="source"):
         """Gets display name from API code for a specific service."""
         lst = None
-        if service_type == 'google_api':
+        if service_type in ('google_api', 'custom_ai'):
             lst = self.google_source_languages if lang_direction == "source" else self.google_target_languages
         elif service_type == 'deepl_api':
             lst = self.deepl_source_languages if lang_direction == "source" else self.deepl_target_languages
@@ -332,6 +332,8 @@ class LanguageManager:
             
             # Normalize provider name for consistent lookup
             provider_normalized = provider.lower().replace('_api', '')  # 'google_api' -> 'google'
+            if provider_normalized == 'custom_ai':
+                provider_normalized = 'google'
             
             for entry in self.language_display_names:
                 if entry['provider'].lower() == provider_normalized or entry['provider'] == provider:
@@ -352,6 +354,8 @@ class LanguageManager:
             fallback_provider = provider
             if provider == 'google_api':
                 fallback_provider = 'google_api'
+            elif provider == 'custom_ai':
+                fallback_provider = 'custom_ai'
             elif provider == 'deepl_api':
                 fallback_provider = 'deepl_api'
             

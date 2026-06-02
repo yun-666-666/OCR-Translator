@@ -3,7 +3,6 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import re # Not used directly here, but ui_interaction_handler uses it
-import sys
 from logger import log_debug
 from config_manager import load_main_window_geometry, save_main_window_geometry # Correct imports
 from resource_handler import get_resource_path

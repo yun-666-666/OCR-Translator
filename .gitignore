@@ -26,8 +26,14 @@ OCR_images/
 
 # Application specific files
 translator_debug*.log
+*.log
 marian_models_cache/
 debug_images/
+artifacts/
+backups/
+RUST/
+rust2/
+photo/
 *.png
 !screenshots/*.png
 !docs/screenshots/*.png
@@ -38,6 +44,10 @@ deepl_cache*.txt
 gemini_cache*.txt
 openai_cache*.txt
 *_log*.txt
+*_Log.txt
+*_LOG.txt
+*API*Log*.txt
+*API*log*.txt
 
 # API Keys and sensitive information
 api_keys.json
@@ -78,6 +88,7 @@ GPU_chat/
 prompts/
 
 # Development and backup files
+_codex_git/
 *_backup.py
 build_and_copy_resources.*
 compile_app.bat
@@ -92,6 +103,7 @@ sync_to_github_fixed.bat
 
 # Configuration files (user-generated)
 ocr_translator_config.ini
+!ocr_translator_config.example.ini
 
 # Download statistics files
 downloads.py
@@ -100,3 +112,8 @@ downloads.html
 # Obsolete files (no longer used)
 bundled_app.py
 GameChangingTranslator_Alternative.spec
+
+# User excluded scripts
+run.bat
+run_python_compiler.bat
+sync_to_github.ps1

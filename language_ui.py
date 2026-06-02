@@ -26,7 +26,8 @@ class UILanguageManager:
                         # Map language codes to display names
                         display_name = {
                             "eng": "English",
-                            "pol": "polski"
+                            "pol": "polski",
+                            "zh": "中文",
                         }.get(lang_code, lang_code.capitalize())
                         languages[lang_code] = display_name
             else:
@@ -39,7 +40,8 @@ class UILanguageManager:
                             lang_code = filename[4:-4]
                             display_name = {
                                 "eng": "English",
-                                "pol": "polski"
+                                "pol": "polski",
+                                "zh": "中文",
                             }.get(lang_code, lang_code.capitalize())
                             languages[lang_code] = display_name
             

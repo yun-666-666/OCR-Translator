@@ -155,6 +155,7 @@ ocr-translator/
 ├── googletrans_cache.txt          # Cached translations from Google Translate API
 ├── gemini_cache.txt               # Cached translations from Gemini API
 ├── openai_cache.txt               # Cached translations from OpenAI API
+├── custom_prompt.txt              # User-defined custom prompt prefix *[NEW]*
 ├── Gemini_API_call_logs.txt       # Detailed Gemini API call logging with cost tracking
 ├── OpenAI_API_call_logs.txt       # Detailed OpenAI API call logging with cost tracking
 ├── GEMINI_API_OCR_short_log.txt   # Short log for Gemini OCR API usage statistics *[NEW]*
@@ -238,7 +239,8 @@ The `AbstractOCRProvider` class contains all common functionality shared across 
 - Migrated from legacy `TranslationHandler._gemini_ocr_only()` method
 - Uses Google's Gen AI library with advanced AI-powered text recognition
 - Superior accuracy for challenging subtitle scenarios
-- Supports multiple Gemini models (2.5 Flash-Lite, 2.0 Flash, etc.)
+- Supports multiple Gemini models (Gemini 3 Flash, 2.5 Flash-Lite, etc.)
+- **Media Resolution Support**: Configurable image resolution (LOW, MEDIUM) via `gemini_models.csv` to optimize performance/cost
 - Comprehensive debugging with image saving capabilities
 - Integrated with `GeminiModelsManager` for dynamic model configuration
 
@@ -369,6 +371,7 @@ The `AbstractLLMProvider` class contains all common functionality shared across 
 **Context Window Management:**
 - Sliding context window with configurable size (0-2 previous subtitles)
 - Unified context string building with identical format across providers
+- **Custom Prompt Support**: Capability to inject user-defined instructions (`custom_prompt.txt`) as a prefix to the system prompt
 - Language-aware context updates with duplicate detection
 
 **Comprehensive Logging System:**
@@ -390,8 +393,10 @@ The `AbstractLLMProvider` class contains all common functionality shared across 
 #### Provider-Specific Implementations
 
 **GeminiProvider (`gemini_provider.py`):**
-- Uses Google's Gen AI library with client-based approach
-- Supports both thinking and non-thinking modes via `thinking_budget` configuration
+- Uses Google's Gen AI library (`google-genai`) with fallback support for `google-generativeai`
+- **Dual Thinking Configuration**:
+    - **Gemini 2.x**: Uses `thinking_budget` (configured to 0 for standard translation)
+    - **Gemini 3.x**: Uses `thinking_level` (configured to `MINIMAL` for standard translation)
 - Handles multiple response formats and model types
 - Integrated with `GeminiModelsManager` for dynamic model configuration
 
@@ -484,7 +489,7 @@ The system maintains multiple log levels for different use cases:
 
 ### Gemini API Integration and Logging
 
-The application features sophisticated Gemini API integration with comprehensive logging and cost tracking capabilities designed for the Gemini 2.5 Flash-Lite model and other Gemini models.
+The application features sophisticated Gemini API integration with comprehensive logging and cost tracking capabilities designed for the Gemini 3 Flash, Gemini 2.5 Flash-Lite, and other Gemini models.
 
 #### Gemini API Call Logging System (`Gemini_API_call_logs.txt`)
 
@@ -646,10 +651,10 @@ The GeminiModelsManager class provides centralized management of Gemini model co
 
 **Configuration File Format (`gemini_models.csv`):**
 ```csv
-Model Name,API Name,Input Cost per 1M,Output Cost per 1M,Translation,OCR
-Gemini 2.5 Flash-Lite,gemini-2.5-flash-lite,0.1,0.4,yes,yes
-Gemini 2.0 Flash,gemini-2.0-flash-001,0.1,0.4,yes,yes
-Gemini 2.0 Flash-Lite,gemini-2.0-flash-lite-001,0.075,0.3,no,yes
+Model Name,API Name,Input Cost per 1M,Output Cost per 1M,Translation,OCR,Media Resolution
+Gemini 3 Flash,gemini-3-flash-preview,0.5,3.0,yes,no,MEDIUM
+Gemini 3 Flash (Low),gemini-3-flash-preview,0.5,3.0,no,yes,LOW
+Gemini 2.5 Flash-Lite,gemini-2.5-flash-lite,0.1,0.4,yes,yes,MEDIUM
 ```
 
 **Key Methods:**

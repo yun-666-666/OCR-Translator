@@ -1,9 +1,6 @@
 import tkinter as tk
 from tkinter import font
 import time
-import cv2
-import numpy as np
-from PIL import Image, ImageTk
 from logger import log_debug
 
 # RTL Text Processing Architecture:
@@ -326,6 +323,10 @@ class DisplayManager:
             processed_img_cv_udd: Processed image as OpenCV numpy array
             ocr_text_content_udd: OCR extracted text content
         """
+        import cv2
+        import numpy as np
+        from PIL import Image, ImageTk
+
         # Check if debugging is enabled and the widgets still exist
         if not self.app.ocr_debugging_var.get(): 
             return

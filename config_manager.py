@@ -8,6 +8,9 @@ from resource_handler import get_resource_path
 DEFAULT_CONFIG_SETTINGS = {
     'tesseract_path': r'C:\Program Files\Tesseract-OCR\tesseract.exe',
     'scan_interval': '300', 
+    'capture_backend': 'auto',
+    'ocr_frame_cache_size': '64',
+    'enable_instant_cache_display': 'True',
     'stability_threshold': '0',
     'clear_translation_timeout': '3',
     'image_preprocessing_mode': 'none',
@@ -36,7 +39,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'main_window_height': '728',
     'main_window_x': '6',
     'main_window_y': '23',
-    'translation_model': 'marianmt', # Default model
+    'translation_model': 'custom_ai', # Default model
     'marian_models_file': '', # Will be set dynamically in load_app_config
     'marian_model': 'Helsinki-NLP/opus-mt-fr-en', # Default MarianMT model
     'google_file_cache': 'True',
@@ -50,7 +53,11 @@ DEFAULT_CONFIG_SETTINGS = {
     'deepl_model_type': 'latency_optimized', # Default to classic model for compatibility
     'gui_language':'English',
     # OCR Model Selection (Phase 1 - Gemini OCR)
-    'ocr_model': 'tesseract',  # 'tesseract' or 'gemini'
+    'ocr_model': 'tesseract',  # 'tesseract' or 'custom_ai'
+    'custom_ai_profiles_file': 'custom_ai_profiles.json',
+    'custom_source_lang': 'auto',
+    'custom_target_lang': 'en',
+    'custom_ai_latency_mode': 'safe',
     # Adaptive thresholding parameters
     'adaptive_block_size': '41',
     'adaptive_c': '-60',
@@ -67,8 +74,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'gemini_translation_model': 'Gemini 2.5 Flash-Lite',
     'gemini_ocr_model': 'Gemini 2.5 Flash-Lite',
     'keep_linebreaks': 'False',
-    # Auto-update settings
-    'check_for_updates_on_startup': 'yes'
+    'custom_context_window': '5'
 }
 
 
@@ -121,6 +127,12 @@ def load_app_config():
         config_settings['image_preprocessing_mode'] = 'none'
         settings_changed = True
         log_debug(f"Config: Invalid preprocessing mode '{current_mode}' changed to 'none'")
+
+    current_latency_mode = config_settings.get('custom_ai_latency_mode', 'safe')
+    if current_latency_mode not in ['none', 'safe', 'stream', 'race']:
+        config_settings['custom_ai_latency_mode'] = 'safe'
+        settings_changed = True
+        log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")
 
     if settings_changed or not os.path.exists(config_path):
          try:

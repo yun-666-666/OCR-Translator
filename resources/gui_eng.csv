@@ -1,4 +1,4 @@
-key,value
+﻿key,value
 main_tab_title,Home
 select_source_btn,Select Source Area (OCR)
 select_target_btn,Select Target Area (Translation)
@@ -27,7 +27,12 @@ translation_model_label,Translation Model:
 translation_model_marianmt_offline,MarianMT (offline and free)
 ocr_model_label,OCR Model:
 ocr_model_tesseract,Tesseract (offline)
+ocr_model_windows,"Windows OCR (fast, offline)"
 ocr_model_gemini,Gemini API (online)
+capture_backend_label,Capture Backend:
+capture_backend_auto,Auto (fastest available)
+capture_backend_mss,MSS (fast)
+capture_backend_pyautogui,PyAutoGUI (compatible)
 source_lang_label,Source Language:
 target_lang_label,Target Language:
 marian_model_label,MarianMT Model:
@@ -57,6 +62,12 @@ deepl_context_window_0,0 (Disabled)
 deepl_context_window_1,1 (Last subtitle)
 deepl_context_window_2,2 (Two subtitles)
 deepl_context_window_3,3 (Three subtitles)
+custom_context_window_label,Custom AI context subtitles:
+custom_ai_latency_mode_label,Custom AI response mode:
+custom_ai_latency_mode_none,None
+custom_ai_latency_mode_safe,Stable low latency
+custom_ai_latency_mode_stream,Streaming subtitles
+custom_ai_latency_mode_race,Fastest endpoint
 models_file_label,MarianMT Model List:
 beam_size_label,Translation Beam Size (MarianMT):
 tesseract_path_label,Tesseract Path:
@@ -105,7 +116,6 @@ preprocessing_none,None
 preprocessing_binary,Binary
 preprocessing_binary_inv,Binary Inverted
 preprocessing_adaptive,Adaptive
-about_tab_title,About
 settings_saved,Status: Settings Saved
 no_image_captured,No image captured yet
 no_image_processed,No image processed yet
@@ -141,80 +151,8 @@ gemini_reset_log_button,Reset
 gemini_refresh_stats_button,Refresh
 deepl_usage_label,Free Monthly Usage
 deepl_usage_loading,Loading...
-api_usage_tab_title,API Usage
-api_usage_section_gemini_ocr,📊 Gemini OCR Statistics
-api_usage_section_gemini_translation,🔄 Gemini Translation Statistics
-api_usage_section_gemini_combined,💰 Combined Gemini Statistics
-api_usage_section_openai_ocr,📊 OpenAI OCR Statistics
-api_usage_section_openai_translation,🔄 OpenAI Translation Statistics
-api_usage_section_openai_combined,💰 Combined OpenAI Statistics
-api_usage_section_deepl,📈 DeepL Usage Tracker
-api_usage_total_ocr_calls,Total OCR Calls:
-api_usage_median_duration_ocr,Median Duration:
-api_usage_avg_cost_per_call,Average Cost per Call:
-api_usage_avg_cost_per_minute,Average Cost per Minute:
-api_usage_avg_cost_per_hour,Average Cost per Hour:
-api_usage_total_ocr_cost,Total OCR Cost:
-api_usage_total_translation_calls,Total Translation Calls:
-api_usage_total_words_translated,Total Words Translated:
-api_usage_median_duration_translation,Median Duration:
-api_usage_words_per_minute,Average Words per Minute:
-api_usage_avg_cost_per_word,Average Cost per Word:
-api_usage_total_translation_cost,Total Translation Cost:
-api_usage_combined_cost_per_minute,Combined Cost per Minute:
-api_usage_combined_cost_per_hour,Combined Cost per Hour:
-api_usage_total_api_cost,Total API Cost:
-api_usage_refresh_btn,Refresh Statistics
-api_usage_export_csv_btn,Export to CSV
-api_usage_export_text_btn,Export to Text
-api_usage_copy_btn,Copy
-api_usage_no_data,No data available
-api_usage_info_note,"ℹ️ Note: These statistics are based on short log files (Short_Log). Statistics will be reset if these files are deleted or cleared. Estimated cost tracking is provided for reference purposes only. You are solely responsible for monitoring the usage and costs of individual providers' APIs."
-check_for_updates_btn,Check for Updates
-check_for_updates_on_startup,Check for updates on startup
-check_updates_title,Checking for Updates
-check_updates_msg,Checking for updates...
-update_available_title,Update Available
-update_available_msg_start,New version {0} is available!
-update_available_current_version,Current version: {0}
-update_available_new_version,New version: {0}
-update_available_file_size,File size: {0}
-update_available_release_notes,Release notes:
-update_available_question,Would you like to download and install the update?
-no_updates_title,No Updates
-no_updates_msg,You have the latest version!
-update_error_title,Update Error
-update_error_msg,Unable to check for updates:
-download_update_title,Downloading Update
-download_update_msg,Downloading update...
-download_progress_format,{0} MB of {1} MB ({2}%)
-download_error_title,Download Error
-download_error_msg,Failed to download update. Please try again later.
-download_error_detail,Error downloading update:
-apply_update_title,Apply Update
-apply_update_msg,Update downloaded successfully!
-apply_update_detail,The application will close and automatically restart with the new version.
-apply_update_continue,Click OK to continue.
-applying_update_title,Applying Update
-applying_update_msg,Update is being applied...
-applying_update_restart,The application will restart automatically.
-update_apply_error_title,Update Error
-update_apply_error_msg,Failed to apply update.
-update_apply_error_detail,Please try again or restart the application to apply the update.
-update_apply_error_exception,An error occurred while applying the update:
-update_apply_error_restart,Restart the application to apply the update.
-stats_copied_title,Copied
-stats_copied_msg,Statistics copied to clipboard.
-stats_copy_error,Error copying to clipboard.
 deepl_usage_unavailable,Unable to retrieve usage data
 deepl_usage_error,Error retrieving usage data
-export_success_title,Export Successful
-export_success_msg,Statistics exported to:
-export_failed_title,Export Failed
-export_csv_failed_msg,Failed to export statistics to CSV.
-export_text_failed_msg,Failed to export statistics to text.
-export_error_title,Export Error
-export_error_msg,Error exporting statistics:
 gemini_reset_success_title,Success
 gemini_reset_success_msg,Gemini API log has been reset.
 gemini_reset_warning_title,Warning
@@ -222,21 +160,9 @@ gemini_reset_warning_msg,Gemini API log file does not exist.
 gemini_reset_error_title,Error
 gemini_reset_error_msg,Could not access Gemini log file.
 gemini_reset_error_failed,Failed to reset Gemini API log:
-stats_clipboard_header,Game-Changing Translator - API Usage Statistics
-stats_section_ocr_header,📊 Gemini OCR Statistics
-stats_section_translation_header,🔄 Gemini Translation Statistics  
-stats_section_combined_header,💰 Combined API Statistics
-stats_section_deepl_header,📈 DeepL Usage Monitor
-stats_deepl_free_limit,Free Monthly Limit:
-stats_not_available,N/A
-stats_cost_per_min_suffix,/min
-stats_cost_per_hr_suffix,/hr
-stats_duration_suffix,s
 currency_usd, USD
 mb_progress_of, MB of 
 mb_progress_format, MB ({0}%)
-export_csv_dialog_title,Export Statistics to CSV
-export_text_dialog_title,Export Statistics to Text
 file_type_csv,CSV files
 file_type_text,Text files
 file_type_all,All files
@@ -245,25 +171,32 @@ csv_header_type,Type
 csv_header_metric,Metric
 csv_header_value,Value
 csv_metric_free_monthly_limit,Free Monthly Limit
-stats_text_total_ocr_calls,Total OCR Calls
-stats_text_median_duration,Median Duration
-stats_text_avg_cost_per_call,Average Cost per Call
-stats_text_avg_cost_per_minute,Average Cost per Minute
-stats_text_avg_cost_per_hour,Average Cost per Hour
-stats_text_total_ocr_cost,Total OCR Cost
-stats_text_total_trans_calls,Total Translation Calls
-stats_text_total_words,Total Words Translated
-stats_text_words_per_minute,Average Words per Minute
-stats_text_avg_cost_per_word,Average Cost per Word
-stats_text_total_trans_cost,Total Translation Cost
-stats_text_total_api_cost,Total API Cost
-stats_text_combined_cost_per_minute,Combined Cost per Minute
-stats_text_combined_cost_per_hour,Combined Cost per Hour
-stats_text_ocr_header_gemini,📊 Gemini OCR Statistics
-stats_text_trans_header_gemini,🔄 Gemini Translation Statistics
-stats_text_combined_header_gemini,💰 Combined Gemini Statistics
-stats_text_ocr_header_openai,📊 OpenAI OCR Statistics
-stats_text_trans_header_openai,🔄 OpenAI Translation Statistics
-stats_text_combined_header_openai,💰 Combined OpenAI Statistics
-stats_text_deepl_header,📈 DeepL Usage Monitor
-stats_report_generated,Report generated:
+custom_prompt_tab_title,Custom Prompt
+custom_prompt_info,"This text will be added at the beginning of the custom AI translation instruction. It will be used for EVERY API call. Make it as short as possible to save costs. Use English for best results."
+custom_prompt_saved,Custom prompt saved successfully!
+custom_prompt_save_error,Failed to save custom prompt.
+save_btn,Save
+reload_btn,Reload
+custom_ai_no_profiles,Add an AI model profile
+ai_model_profiles_title,AI Model Profiles
+ai_profile_name_label,name
+ai_profile_url_label,api url
+ai_profile_key_label,api key
+ai_profile_model_label,model
+fetch_model_list_btn,Fetch Models
+add_btn,Add
+delete_btn,Delete
+test_btn,Test
+profile_error_title,Profile Error
+delete_profile_title,Delete Profile
+delete_profile_confirm,Delete profile '{0}'?
+connection_test_title,Connection Test
+connection_test_success,"Response: {0}
+Duration: {1:.2f}s"
+connection_test_failed_title,Connection Test Failed
+model_list_title,Model List
+model_list_success,Fetched {0} models.
+model_list_failed_title,Model List Failed
+start_error_title,Start Error
+start_error_no_translation_profile,Add and select an AI model profile before starting.
+start_error_no_ocr_profile,Add and select an AI model profile for OCR before starting, or choose Tesseract OCR.

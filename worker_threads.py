@@ -18,7 +18,8 @@ from logger import log_debug
 from ocr_utils import (
     preprocess_for_ocr, get_tesseract_model_params, 
     ocr_region_with_confidence, post_process_ocr_text_general, 
-    remove_text_after_last_punctuation_mark
+    remove_text_after_last_punctuation_mark, capture_screen_region,
+    build_capture_signature, build_ocr_frame_cache_key, recognize_windows_ocr
 )
 from translation_utils import post_process_translation_text
 from PIL import Image # For hashing in capture_thread
@@ -26,7 +27,8 @@ from PIL import Image # For hashing in capture_thread
 def run_capture_thread(app):
     log_debug("WT: Capture thread started.")
     last_cap_time = 0.0
-    last_cap_hash = None
+    last_cap_signature = None
+    last_capture_geometry_signature = None
     min_interval = 0.05  # 50ms minimum safety floor - user can control via Settings tab
     similar_frames = 0
     current_scan_interval_sec = min_interval # Initialize
@@ -95,18 +97,48 @@ def run_capture_thread(app):
             if width <=0 or height <=0: continue
 
             capture_moment = time.monotonic()
-            screenshot = pyautogui.screenshot(region=(x1,y1,width,height))
+            capture_backend_var = getattr(app, 'capture_backend_var', None)
+            capture_backend = capture_backend_var.get() if capture_backend_var is not None else 'auto'
+            geometry_signature = (x1, y1, width, height, capture_backend, ocr_model)
+            if geometry_signature != last_capture_geometry_signature:
+                log_debug(f"CAPTURE: source context changed to {geometry_signature}; clearing stale OCR state")
+                last_capture_geometry_signature = geometry_signature
+                last_cap_signature = None
+                similar_frames = 0
+                app.last_processed_subtitle = None
+                app.previous_text = ""
+                app.text_stability_counter = 0
+                if hasattr(app, 'ocr_frame_cache'):
+                    app.ocr_frame_cache.clear()
+                try:
+                    while True:
+                        app.ocr_queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+            screenshot = capture_screen_region((x1, y1, width, height), backend=capture_backend)
+            capture_duration = time.monotonic() - capture_moment
             last_cap_time = capture_moment
+            log_debug(f"LATENCY: capture backend={capture_backend} region={width}x{height} took {capture_duration:.3f}s")
 
             img_small = screenshot.resize((max(1, width//4), max(1, height//4)), Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST)
             img_hash = hashlib.md5(img_small.tobytes()).hexdigest()
+            capture_signature = build_capture_signature(img_hash, (x1, y1, width, height), capture_backend)
+            try:
+                screenshot._gct_frame_hash = img_hash
+                screenshot._gct_region_origin = (x1, y1)
+                screenshot._gct_capture_signature = capture_signature
+                screenshot._gct_capture_monotonic = capture_moment
+                screenshot._gct_capture_duration = capture_duration
+            except Exception:
+                pass
 
             if app.is_api_based_ocr_model(ocr_model):
-                if img_hash == last_cap_hash:
+                if capture_signature == last_cap_signature:
                     continue
-                last_cap_hash = img_hash
+                last_cap_signature = capture_signature
             else: # Tesseract-specific deduplication
-                if img_hash == last_cap_hash:
+                if capture_signature == last_cap_signature:
                     similar_frames +=1
                     skip_probability = min(0.95, 0.5 + (similar_frames*0.05))
                     if random.random() < skip_probability:
@@ -114,7 +146,7 @@ def run_capture_thread(app):
                         continue
                 else:
                     similar_frames = 0
-                last_cap_hash = img_hash
+                last_cap_signature = capture_signature
 
             try:
                 if not app.ocr_queue.full():
@@ -199,12 +231,71 @@ def run_ocr_thread(app):
             ocr_proc_start_time = time.monotonic()
             last_ocr_proc_time = ocr_proc_start_time
             app.last_screenshot = screenshot_pil
+            processed_cv_img = None
 
+            frame_hash = getattr(screenshot_pil, '_gct_frame_hash', None)
+            if not frame_hash:
+                cache_img = screenshot_pil.resize(
+                    (max(1, screenshot_pil.width//4), max(1, screenshot_pil.height//4)),
+                    Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
+                )
+                frame_hash = hashlib.md5(cache_img.tobytes()).hexdigest()
+
+            prep_mode = app.preprocessing_mode_var.get()
+            block_size = app.adaptive_block_size_var.get()
+            c_value = app.adaptive_c_var.get()
+            region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
+            ocr_cache_key = None
+            if hasattr(app, 'ocr_frame_cache') and not app.is_api_based_ocr_model(ocr_model):
+                cache_lang = tess_langs or (app.get_tesseract_lang_code() if ocr_model == 'windows_ocr' else getattr(app, 'custom_source_lang', 'auto'))
+                ocr_cache_key = build_ocr_frame_cache_key(
+                    frame_hash,
+                    ocr_model,
+                    cache_lang,
+                    prep_mode,
+                    screenshot_pil.size,
+                    region_origin=region_origin,
+                )
+                cached_ocr_text = app.ocr_frame_cache.get(ocr_cache_key)
+                if cached_ocr_text is not None:
+                    ocr_cleaned_text = cached_ocr_text
+                    log_debug(f"LATENCY: OCR cache hit for {ocr_model} took {time.monotonic() - ocr_proc_start_time:.3f}s")
+                    if app.ocr_debugging_var.get() and app.last_processed_image is not None:
+                        app.root.after(0, app.update_debug_display, screenshot_pil, app.last_processed_image, ocr_cleaned_text)
+                    # Jump to shared post-OCR routing below.
+                    goto_post_ocr = True
+                else:
+                    goto_post_ocr = False
+            else:
+                goto_post_ocr = False
+
+            if goto_post_ocr:
+                pass
             # ==================== OCR MODEL ROUTING ====================
-            if app.is_api_based_ocr_model(ocr_model):
+            elif app.is_api_based_ocr_model(ocr_model):
                 run_api_ocr(app, screenshot_pil)
                 continue # Skip to the next loop iteration
             
+            elif ocr_model == 'windows_ocr':
+                log_debug("WT: OCR routing to Windows OCR")
+                try:
+                    windows_lang = tess_langs or app.get_tesseract_lang_code()
+                    ocr_raw_text = recognize_windows_ocr(screenshot_pil, windows_lang)
+                    ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, windows_lang)
+                    if app.keep_linebreaks_var.get():
+                        ocr_cleaned_text = ocr_cleaned_text.replace('\n', '<br>')
+                    else:
+                        ocr_cleaned_text = ocr_cleaned_text.replace('\n', ' ')
+                    if ocr_cache_key is not None:
+                        app.ocr_frame_cache.put(ocr_cache_key, ocr_cleaned_text)
+                    log_debug(f"LATENCY: Windows OCR took {time.monotonic() - ocr_proc_start_time:.3f}s")
+                except Exception as e:
+                    log_debug(f"WT: Windows OCR failed, falling back to Tesseract: {type(e).__name__} - {e}")
+                    ocr_model = 'tesseract'
+                    goto_post_ocr = False
+                else:
+                    goto_post_ocr = True
+
             elif ocr_model == 'tesseract':
                 log_debug("WT: OCR routing to Tesseract OCR")
                 pass
@@ -213,46 +304,48 @@ def run_ocr_thread(app):
                 log_debug(f"WT: OCR: Unknown OCR model '{ocr_model}', falling back to Tesseract")
                 pass
 
-            # ==================== TESSERACT OCR PROCESSING ====================
-            img_np = np.array(screenshot_pil)
-            img_shape = img_np.shape
-            
-            if len(img_shape) == 3:
-                if img_shape[2] == 3:
-                    img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                elif img_shape[2] == 4:
-                    img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+            if not goto_post_ocr:
+                # ==================== TESSERACT OCR PROCESSING ====================
+                img_np = np.array(screenshot_pil)
+                img_shape = img_np.shape
+                
+                if len(img_shape) == 3:
+                    if img_shape[2] == 3:
+                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    elif img_shape[2] == 4:
+                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+                    else:
+                        raise ValueError(f"WT: OCR: Unexpected 3D image channels: {img_shape[2]}")
+                elif len(img_shape) == 2:
+                    img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
                 else:
-                    raise ValueError(f"WT: OCR: Unexpected 3D image channels: {img_shape[2]}")
-            elif len(img_shape) == 2:
-                img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
-            else:
-                raise ValueError(f"WT: OCR: Unexpected image dimensions: {len(img_shape)}D")
+                    raise ValueError(f"WT: OCR: Unexpected image dimensions: {len(img_shape)}D")
 
-            prep_mode = app.preprocessing_mode_var.get()
-            block_size = app.adaptive_block_size_var.get()
-            c_value = app.adaptive_c_var.get()
-            processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
-            app.last_processed_image = processed_cv_img
+                processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
+                app.last_processed_image = processed_cv_img
 
-            if app.ocr_debugging_var.get():
-                app.root.after(0, app.update_debug_display, screenshot_pil, processed_cv_img, "Processing...")
+                if app.ocr_debugging_var.get():
+                    app.root.after(0, app.update_debug_display, screenshot_pil, processed_cv_img, "Processing...")
 
-            if cached_prep_mode != prep_mode:
-                cached_prep_mode = prep_mode
-                cached_tess_params = get_tesseract_model_params(prep_mode if prep_mode in ['gaming','document','subtitle'] else 'general')
-                log_debug(f"WT: OCR parameters cached for mode: {prep_mode}")
-            
-            full_img_region = (0,0, processed_cv_img.shape[1], processed_cv_img.shape[0])
-            ocr_raw_text = ocr_region_with_confidence(processed_cv_img, full_img_region, tess_langs, cached_tess_params, current_conf_thresh)
-            
-            ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
-            
-            # Apply conditional linebreak conversion for Tesseract
-            if app.keep_linebreaks_var.get():
-                ocr_cleaned_text = ocr_cleaned_text.replace('\n', '<br>')
-            else:
-                ocr_cleaned_text = ocr_cleaned_text.replace('\n', ' ')
+                if cached_prep_mode != prep_mode:
+                    cached_prep_mode = prep_mode
+                    cached_tess_params = get_tesseract_model_params(prep_mode if prep_mode in ['gaming','document','subtitle'] else 'general')
+                    log_debug(f"WT: OCR parameters cached for mode: {prep_mode}")
+                
+                full_img_region = (0,0, processed_cv_img.shape[1], processed_cv_img.shape[0])
+                ocr_raw_text = ocr_region_with_confidence(processed_cv_img, full_img_region, tess_langs, cached_tess_params, current_conf_thresh)
+                
+                ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
+                
+                # Apply conditional linebreak conversion for Tesseract
+                if app.keep_linebreaks_var.get():
+                    ocr_cleaned_text = ocr_cleaned_text.replace('\n', '<br>')
+                else:
+                    ocr_cleaned_text = ocr_cleaned_text.replace('\n', ' ')
+
+                if ocr_cache_key is not None:
+                    app.ocr_frame_cache.put(ocr_cache_key, ocr_cleaned_text)
+                log_debug(f"LATENCY: Tesseract OCR took {time.monotonic() - ocr_proc_start_time:.3f}s")
             
             if app.remove_trailing_garbage_var.get() and ocr_cleaned_text:
                 pattern = r'[.!?]|\.{3}|…' 
@@ -262,7 +355,7 @@ def run_ocr_thread(app):
                     continue 
                 ocr_cleaned_text = remove_text_after_last_punctuation_mark(ocr_cleaned_text)
             
-            if app.ocr_debugging_var.get(): 
+            if app.ocr_debugging_var.get() and processed_cv_img is not None: 
                 app.root.after(0, app.update_debug_display, screenshot_pil, processed_cv_img, ocr_cleaned_text)
 
             if not ocr_cleaned_text or app.is_placeholder_text(ocr_cleaned_text):
@@ -433,6 +526,8 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
         
         if isinstance(ocr_result, str) and ocr_result.startswith("<e>:"):
             log_debug(f"OCR error in {provider_name} batch {sequence_number}: {ocr_result}")
+            visible_error = ocr_result[len("<e>:"):].strip() or ocr_result
+            app.update_translation_text(f"OCR Error:\n{visible_error}")
             app.last_displayed_batch_sequence = sequence_number
             return
         
@@ -465,17 +560,63 @@ def start_async_translation(app, text_to_translate, ocr_sequence_number):
         
         app.translation_sequence_counter += 1
         translation_sequence = app.translation_sequence_counter
+        app.latest_translation_sequence_started = translation_sequence
+
+        latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
+        try:
+            latency_mode = latency_mode_var.get() if latency_mode_var is not None else "safe"
+        except Exception:
+            latency_mode = "safe"
+        dedupe_inflight = latency_mode != "none"
+
+        enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
+        instant_cache_enabled = enable_instant_var.get() if enable_instant_var is not None else True
+        if instant_cache_enabled and hasattr(app, 'translation_handler'):
+            cached_translation = app.translation_handler.get_cached_translation_for_display(text_to_translate)
+            if cached_translation:
+                final_processed_translation = post_process_translation_text(cached_translation)
+                display_schedule_start = time.monotonic()
+                app.update_translation_text(final_processed_translation)
+                log_debug(f"LATENCY: display scheduling took {time.monotonic() - display_schedule_start:.3f}s")
+                app.last_displayed_translation_sequence = translation_sequence
+                app.last_successful_translation_time = time.monotonic()
+                log_debug(f"LATENCY: instant translation cache display for sequence {translation_sequence}: '{final_processed_translation}'")
+                return
+
+        if not hasattr(app, 'active_translation_inflight_keys'):
+            app.active_translation_inflight_keys = set()
+
+        inflight_key = None
+        if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, 'get_inflight_translation_key'):
+            try:
+                inflight_key = app.translation_handler.get_inflight_translation_key(text_to_translate)
+            except Exception as key_error:
+                log_debug(f"LATENCY: failed to build translation inflight key: {type(key_error).__name__} - {key_error}")
+        if inflight_key is None:
+            inflight_key = ("raw", text_to_translate)
+
+        if dedupe_inflight and inflight_key in app.active_translation_inflight_keys:
+            log_debug(f"LATENCY: duplicate in-flight translation skipped for sequence {translation_sequence}: '{text_to_translate}'")
+            return
         
         if len(app.active_translation_calls) >= app.max_concurrent_translation_calls:
             log_debug(f"Max concurrent translation calls ({app.max_concurrent_translation_calls}) reached, skipping translation {translation_sequence}")
             return
         
         app.active_translation_calls.add(translation_sequence)
+        if dedupe_inflight:
+            app.active_translation_inflight_keys.add(inflight_key)
         
-        future = app.translation_thread_pool.submit(
-            process_translation_async,
-            app, text_to_translate, translation_sequence, ocr_sequence_number
-        )
+        try:
+            future = app.translation_thread_pool.submit(
+                process_translation_async,
+                app, text_to_translate, translation_sequence, ocr_sequence_number, inflight_key
+            )
+        except Exception:
+            app.active_translation_calls.discard(translation_sequence)
+            if dedupe_inflight:
+                app.active_translation_inflight_keys.discard(inflight_key)
+            raise
         
         log_debug(f"Started async translation {translation_sequence} for OCR batch {ocr_sequence_number} (active calls: {len(app.active_translation_calls)}): '{text_to_translate}'")
         
@@ -483,14 +624,47 @@ def start_async_translation(app, text_to_translate, ocr_sequence_number):
         log_debug(f"Error starting async translation: {type(e).__name__} - {e}")
 
 
-def process_translation_async(app, text_to_translate, translation_sequence, ocr_sequence_number):
+def process_translation_async(app, text_to_translate, translation_sequence, ocr_sequence_number, inflight_key=None):
     """Process translation API call asynchronously with timeout and staleness handling."""
     start_time = time.monotonic()
     
     try:
         log_debug(f"Processing async translation {translation_sequence}")
+
+        stream_callback = None
+        latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
+        try:
+            latency_mode = latency_mode_var.get() if latency_mode_var is not None else ""
+        except Exception:
+            latency_mode = ""
+
+        if latency_mode == "stream":
+            def stream_callback(partial_text):
+                def display_partial(text=partial_text):
+                    try:
+                        if not getattr(app, 'is_running', True):
+                            return
+                        latest_started = getattr(app, 'latest_translation_sequence_started', translation_sequence)
+                        if translation_sequence < latest_started:
+                            return
+                        last_displayed = getattr(app, 'last_displayed_translation_sequence', 0)
+                        if translation_sequence < last_displayed:
+                            return
+                        if isinstance(text, str) and text.strip():
+                            app.update_translation_text(post_process_translation_text(text))
+                            app.last_successful_translation_time = time.monotonic()
+                    except Exception as stream_error:
+                        log_debug(f"Streaming translation display failed: {type(stream_error).__name__} - {stream_error}")
+
+                app.root.after(0, display_partial)
         
-        translation_result = app.translation_handler.translate_text_with_timeout(text_to_translate, timeout_seconds=10.0, ocr_batch_number=ocr_sequence_number)
+        translation_result = app.translation_handler.translate_text_with_timeout(
+            text_to_translate,
+            timeout_seconds=10.0,
+            ocr_batch_number=ocr_sequence_number,
+            stream_callback=stream_callback,
+            translation_sequence=translation_sequence,
+        )
         
         elapsed_time = time.monotonic() - start_time
         if elapsed_time > 5.0:
@@ -510,6 +684,8 @@ def process_translation_async(app, text_to_translate, translation_sequence, ocr_
     finally:
         try:
             app.active_translation_calls.discard(translation_sequence)
+            if inflight_key is not None and hasattr(app, 'active_translation_inflight_keys'):
+                app.active_translation_inflight_keys.discard(inflight_key)
             log_debug(f"Translation {translation_sequence} finished (active calls: {len(app.active_translation_calls)})")
         except Exception as cleanup_error:
             log_debug(f"Error cleaning up translation {translation_sequence}: {cleanup_error}")
@@ -551,7 +727,9 @@ def process_translation_response(app, translation_result, translation_sequence, 
         
         if isinstance(translation_result, str) and translation_result.strip():
             final_processed_translation = post_process_translation_text(translation_result)
+            display_schedule_start = time.monotonic()
             app.update_translation_text(final_processed_translation)
+            log_debug(f"LATENCY: display scheduling took {time.monotonic() - display_schedule_start:.3f}s")
             log_debug(f"Translation {translation_sequence} displayed: '{final_processed_translation}' (from OCR batch {ocr_sequence_number})")
             app.last_displayed_translation_sequence = translation_sequence
             app.last_successful_translation_time = time.monotonic()

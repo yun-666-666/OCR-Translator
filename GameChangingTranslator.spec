@@ -76,6 +76,8 @@ a = Analysis(
         'tkinter.colorchooser',
         '_tkinter',
         # PySide6 for RTL translation overlays with native Qt support
+        # NOTE: Must use PySide6==6.7.3 — Qt 6.8+ breaks frameless window resizing on Windows.
+        # See requirements.txt for details.
         'PySide6',
         'PySide6.QtCore',
         'PySide6.QtWidgets',

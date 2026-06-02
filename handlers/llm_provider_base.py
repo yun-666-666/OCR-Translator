@@ -159,13 +159,13 @@ Format: Each entry shows complete message content sent to and received from {sel
         plus exact token counts and costs for the individual call and the session.
 
 """
-                with open(self.main_log_file, 'w', encoding='utf-8') as f:
+                with open(self.main_log_file, 'w', encoding='utf-8-sig') as f:
                     f.write(header)
                 log_debug(f"{self.provider_name.title()} API logging initialized: {self.main_log_file}")
             else:
                 # Append a session start separator to existing log
                 session_start_msg = f"\n\n--- NEW LOGGING SESSION STARTED: {timestamp} ---\n"
-                with open(self.main_log_file, 'a', encoding='utf-8') as f:
+                with open(self.main_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(session_start_msg)
                 log_debug(f"{self.provider_name.title()} API logging continues in existing file: {self.main_log_file}")
 
@@ -188,12 +188,12 @@ Session Started: {timestamp}
 Purpose: Concise {self.provider_name} translation call results and statistics
 
 """
-                with open(self.short_log_file, 'w', encoding='utf-8') as f:
+                with open(self.short_log_file, 'w', encoding='utf-8-sig') as f:
                     f.write(tra_header)
                 log_debug(f"{self.provider_name.title()} translation short log initialized: {self.short_log_file}")
             else:
                 # Append session separator
-                with open(self.short_log_file, 'a', encoding='utf-8') as f:
+                with open(self.short_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(f"\n--- SESSION: {timestamp} ---\n")
 
         except Exception as e:
@@ -205,7 +205,7 @@ Purpose: Concise {self.provider_name} translation call results and statistics
             # Read Translation log to find highest translation session number
             highest_translation_session = 0
             if os.path.exists(self.short_log_file):
-                with open(self.short_log_file, 'r', encoding='utf-8') as f:
+                with open(self.short_log_file, 'r', encoding='utf-8-sig') as f:
                     for line in f:
                         if line.startswith("SESSION ") and " STARTED " in line:
                             try:
@@ -232,7 +232,7 @@ Purpose: Concise {self.provider_name} translation call results and statistics
         if not self.current_translation_session_active:
             timestamp = self._get_precise_timestamp()
             try:
-                with open(self.short_log_file, 'a', encoding='utf-8') as f:
+                with open(self.short_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(f"\nSESSION {self.translation_session_counter} STARTED {timestamp}\n")
                 self.current_translation_session_active = True
                 log_debug(f"{self.provider_name.title()} Translation Session {self.translation_session_counter} started")
@@ -263,7 +263,7 @@ Purpose: Concise {self.provider_name} translation call results and statistics
             timestamp = self._get_precise_timestamp()
             try:
                 end_reason = "(FORCED - APP CLOSING)" if force else ""
-                with open(self.short_log_file, 'a', encoding='utf-8') as f:
+                with open(self.short_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(f"SESSION {self.translation_session_counter} ENDED {timestamp} {end_reason}\n".strip() + "\n")
                 
                 # Clear context AFTER session end is logged to ensure clean start for next session
@@ -306,26 +306,30 @@ Purpose: Concise {self.provider_name} translation call results and statistics
         # linebreak_instruction = "Use <br> as in the source text. " if self.app.keep_linebreaks_var.get() else ""
         linebreak_instruction = "Keep <br> linebreaks from the source text in the translation. " if self.app.keep_linebreaks_var.get() else ""
         
+        # Add custom prompt prefix if available
+        custom_prompt = getattr(self.app, 'custom_prompt_text', '').strip()
+        custom_prefix = f"{custom_prompt}\n" if custom_prompt else ""
+        
         # Build instruction line based on actual context window content
         if context_size == 0:
-            instruction_line = f"<Translate idiomatically from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+            instruction_line = f"<{custom_prefix}Translate idiomatically from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
         else:
             # Check actual number of stored context pairs
             actual_context_count = len(self.context_window)
             
             if actual_context_count == 0:
-                instruction_line = f"<Translate idiomatically from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+                instruction_line = f"<{custom_prefix}Translate idiomatically from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
             elif context_size == 1:
-                instruction_line = f"<Translate idiomatically the second subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+                instruction_line = f"<{custom_prefix}Translate idiomatically the second subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
             elif context_size == 2:
                 if actual_context_count == 1:
-                    instruction_line = f"<Translate idiomatically the second subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+                    instruction_line = f"<{custom_prefix}Translate idiomatically the second subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
                 else:
-                    instruction_line = f"<Translate idiomatically the third subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+                    instruction_line = f"<{custom_prefix}Translate idiomatically the third subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
             else:
                 target_position = min(actual_context_count + 1, context_size + 1)
                 ordinal = self._get_ordinal_number(target_position)
-                instruction_line = f"<Translate idiomatically the {ordinal} subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
+                instruction_line = f"<{custom_prefix}Translate idiomatically the {ordinal} subtitle from {source_lang_name} to {target_lang_name}. {linebreak_instruction}Return translation only.>"
         
         # Build context window with new text integrated in grouped format
         if context_size == 0:
@@ -513,7 +517,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
 """
                 
                 # --- 7. Write to main log file ---
-                with open(self.main_log_file, 'a', encoding='utf-8') as f:
+                with open(self.main_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(log_entry)
                 
                 # --- 8. Write to short translation log ---
@@ -572,7 +576,7 @@ Result:
 --------------------------------------------------
 
 """
-            with open(self.short_log_file, 'a', encoding='utf-8') as f:
+            with open(self.short_log_file, 'a', encoding='utf-8-sig') as f:
                 f.write(log_entry)
         except Exception as e:
             log_debug(f"Error writing short {self.provider_name} translation log: {e}")
@@ -646,6 +650,8 @@ Result:
     
     def _get_language_display_name(self, lang_code):
         """Get display name for language code using the language manager."""
+        if lang_code is None:
+            return 'Unknown'
         try:
             # Use the language manager's existing functionality
             display_name = self.app.language_manager.get_localized_language_name(lang_code, self.provider_name, 'english')
@@ -694,7 +700,7 @@ Result:
         output_token_regex = re.compile(r"^\s*-\s*Total Output Tokens \(so far\):\s*(\d+)")
         
         try:
-            with open(self.main_log_file, 'r', encoding='utf-8') as f:
+            with open(self.main_log_file, 'r', encoding='utf-8-sig') as f:
                 for line in f:
                     translated_words_match = translated_words_regex.match(line)
                     if translated_words_match:
@@ -752,7 +758,7 @@ Result:
         output_cost_regex = re.compile(r"^\s*-\s*Total Output Cost \(so far\):\s*\$([0-9]*\.?[0-9]+)")
         
         try:
-            with open(self.main_log_file, 'r', encoding='utf-8') as f:
+            with open(self.main_log_file, 'r', encoding='utf-8-sig') as f:
                 for line in f:
                     input_cost_match = input_cost_regex.match(line)
                     if input_cost_match:

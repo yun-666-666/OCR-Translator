@@ -7,30 +7,20 @@ import time
 import html
 import traceback
 import threading
+import concurrent.futures
 from datetime import datetime, timedelta
 
 from logger import log_debug
-from marian_mt_translator import MarianMTTranslator
 from unified_translation_cache import UnifiedTranslationCache
-from constants import DEEPL_BETA_LANGUAGES
+from custom_ai import (
+    CustomAIProvider,
+    CUSTOM_AI_LATENCY_MODE_RACE,
+    CUSTOM_AI_LATENCY_MODE_SAFE,
+    CUSTOM_AI_LATENCY_MODE_STREAM,
+    normalize_custom_ai_latency_mode,
+)
 
-# Import the new LLM provider classes
-from .llm_provider_base import NetworkCircuitBreaker # Used by legacy OCR (if needed)
-from .gemini_provider import GeminiProvider
-from .openai_provider import OpenAIProvider
-
-# Import the new OCR provider classes
-from .gemini_ocr_provider import GeminiOCRProvider
-from .openai_ocr_provider import OpenAIOCRProvider
-
-# Import other dependencies
-try:
-    import requests
-    REQUESTS_AVAILABLE = True
-    log_debug("Pre-loaded requests library")
-except ImportError:
-    REQUESTS_AVAILABLE = False
-    log_debug("Requests library not available")
+REQUESTS_AVAILABLE = False
 
 
 class TranslationHandler:
@@ -38,61 +28,48 @@ class TranslationHandler:
         self.app = app
         self.unified_cache = UnifiedTranslationCache(max_size=1000)
         
-        # Initialize LLM providers using the new architecture
-        self.providers = {
-            'gemini': GeminiProvider(app),
-            'openai': OpenAIProvider(app)
-        }
+        self.custom_ai_provider = CustomAIProvider()
+        self.providers = {}
+        self.ocr_providers = {}
+        self.custom_context_window = []
         
-        # Initialize OCR providers using the new architecture
-        self.ocr_providers = {
-            'gemini': GeminiOCRProvider(app),
-            'openai': OpenAIOCRProvider(app)
-        }
-        
-        # DeepL-specific context storage
+        # Legacy DeepL-specific context storage retained only to keep old callbacks harmless.
         self.deepl_context_window = []  # List of source texts only
         self.deepl_current_source_lang = None
         self.deepl_current_target_lang = None
         
-        # DeepL logging system
-        self.deepl_log_file = 'DeepL_Translation_Long_Log.txt'
-        self.deepl_log_lock = threading.Lock()
-        self._initialize_deepl_log_file()
-        
-        log_debug("Translation handler initialized with unified cache, LLM providers, and OCR providers")
+        log_debug("Translation handler initialized with custom AI provider and unified cache")
 
     def _get_active_llm_provider(self):
         """Get the currently active LLM provider based on selected translation model."""
-        selected_model = self.app.translation_model_var.get()
-        if selected_model == 'gemini_api':
-            return self.providers.get('gemini')
-        elif self.app.is_openai_model(selected_model):
-            return self.providers.get('openai')
         return None
 
     def _get_active_ocr_provider(self):
         """Get the currently active OCR provider based on selected OCR model."""
-        selected_ocr_model = self.app.ocr_model_var.get()
-        if self.app.is_gemini_model(selected_ocr_model):
-            return self.ocr_providers.get('gemini')
-        elif self.app.is_openai_model(selected_ocr_model):
-            return self.ocr_providers.get('openai')
         return None
 
     def perform_ocr(self, image_data, source_lang):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
-        provider = self._get_active_ocr_provider()
-        if provider:
-            try:
-                # The recognize method in the base class will handle all logic
-                return provider.recognize(image_data, source_lang)
-            except Exception as e:
-                log_debug(f"Error performing OCR with {provider.provider_name}: {e}")
-                return "<EMPTY>"
-        else:
-            log_debug(f"No active OCR provider found for model: {self.app.ocr_model_var.get()}")
-            return "<EMPTY>"  # Fallback
+        profile = self.app.custom_ai_profiles.get_active_profile("ocr")
+        if not profile:
+            log_debug("No active custom AI model profile configured for OCR")
+            return "<e>: AI model profile for OCR is missing"
+        try:
+            result, usage, duration = self.custom_ai_provider.recognize(
+                profile,
+                image_data,
+                source_lang,
+                keep_linebreaks=self.app.keep_linebreaks_var.get(),
+                latency_mode=self._get_custom_ai_latency_mode(),
+            )
+            self._log_custom_short_call("ocr", profile, result, usage, duration)
+            return result
+        except Exception as e:
+            error_text = str(e)
+            if hasattr(self.custom_ai_provider, "_sanitize_error"):
+                error_text = self.custom_ai_provider._sanitize_error(error_text, profile.get("api_key", ""))
+            log_debug(f"Custom AI OCR error: {type(e).__name__} - {error_text}")
+            return f"<e>: Custom AI OCR error: {type(e).__name__} - {error_text}"
 
     # === LLM SESSION MANAGEMENT ===
     def start_translation_session(self):
@@ -100,9 +77,7 @@ class TranslationHandler:
         if provider:
             provider.start_translation_session()
         
-        # Clear DeepL context at session start
-        self._clear_deepl_context()
-        log_debug("DeepL context cleared for new translation session")
+        self._clear_active_context()
 
     def request_end_translation_session(self):        
         provider = self._get_active_llm_provider()
@@ -111,15 +86,15 @@ class TranslationHandler:
         else:
             result = True
         
-        # Clear DeepL context at session end
-        self._clear_deepl_context()
-        log_debug("DeepL context cleared on translation session end")
+        self._clear_active_context()
         
         return result
 
     # === CONTEXT MANAGEMENT ===
     def _clear_active_context(self):
         """Clear context window for the currently active LLM provider. Called when language, model, or settings change."""
+        self.custom_context_window = []
+        log_debug("Custom AI context cleared")
         provider = self._get_active_llm_provider()
         if provider:
             provider._clear_context()
@@ -157,8 +132,14 @@ class TranslationHandler:
             except Exception as e:
                 log_debug(f"Error force ending {provider.provider_name} OCR session: {e}")
         
-        # Clear DeepL context on app close
-        self._clear_deepl_context()
+        self._clear_active_context()
+
+    def close(self):
+        try:
+            if hasattr(self.custom_ai_provider, "close"):
+                self.custom_ai_provider.close()
+        except Exception as e:
+            log_debug(f"Error closing Custom AI provider: {e}")
 
     # === DEEPL CONTEXT MANAGEMENT ===
     def _clear_deepl_context(self):
@@ -195,13 +176,8 @@ class TranslationHandler:
         # Get last N source texts
         context_texts = self.deepl_context_window[-context_size:]
         
-        # Simple concatenation with period separation
-        # DeepL expects natural text in source language
-        context_string = ". ".join(context_texts)
-        
-        # Ensure proper ending
-        if context_string and not context_string.endswith('.'):
-            context_string += '.'
+        # Join subtitles with linebreaks
+        context_string = "\n".join(context_texts)
         
         return context_string
     
@@ -229,7 +205,7 @@ class TranslationHandler:
         """Initialize DeepL translation log file with header if it doesn't exist."""
         try:
             if not os.path.exists(self.deepl_log_file):
-                with open(self.deepl_log_file, 'w', encoding='utf-8') as f:
+                with open(self.deepl_log_file, 'w', encoding='utf-8-sig') as f:
                     f.write("=== DEEPL TRANSLATION API CALL LOG ===\n")
                     f.write(f"Log initialized: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write("=" * 50 + "\n\n")
@@ -243,7 +219,7 @@ class TranslationHandler:
         return True
     
     def _log_deepl_translation_call(self, original_text, source_lang, target_lang, 
-                                   context_size, translated_text, model_type, 
+                                   context_string, context_size, translated_text, model_type, 
                                    call_start_time, call_duration):
         """Log DeepL translation API call with context information."""
         if not self._is_deepl_logging_enabled():
@@ -269,19 +245,13 @@ MESSAGE SENT TO DEEPL:
 """
                 
                 # Add context section if context was used
-                if context_size > 0 and self.deepl_context_window:
-                    # Get the actual subtitles that were used as context
-                    context_subtitles = self.deepl_context_window[-context_size:]
-                    context_count = len(context_subtitles)
-                    
+                if context_string:
+                    subtitle_count = min(context_size, len(self.deepl_context_window))
+                    count_text = f" ({subtitle_count} subtitle{'s' if subtitle_count != 1 else ''})" if context_size > 0 and subtitle_count > 0 else ""
                     log_entry += f"""
-CONTEXT ({context_count} subtitle{'s' if context_count != 1 else ''}):
+CONTEXT{count_text}:
+{context_string}
 """
-                    # Add each subtitle on its own line
-                    for subtitle in context_subtitles:
-                        if subtitle.strip():
-                            log_entry += f"{subtitle}\n"
-                
                 # Add text to translate
                 log_entry += f"""
 TEXT TO TRANSLATE:
@@ -301,7 +271,7 @@ Call Duration: {call_duration:.3f} seconds
 """
                 
                 # Write to log file
-                with open(self.deepl_log_file, 'a', encoding='utf-8') as f:
+                with open(self.deepl_log_file, 'a', encoding='utf-8-sig') as f:
                     f.write(log_entry)
                 
                 log_debug(f"DeepL translation call logged: {source_lang}->{target_lang}, Duration={call_duration:.3f}s")
@@ -310,13 +280,25 @@ Call Duration: {call_duration:.3f} seconds
             log_debug(f"Error logging DeepL translation call: {e}")
 
     # === UNIFIED TRANSLATE METHOD ===
-    def translate_text_with_timeout(self, text_content, timeout_seconds=10.0, ocr_batch_number=None):
+    def translate_text_with_timeout(
+        self,
+        text_content,
+        timeout_seconds=10.0,
+        ocr_batch_number=None,
+        stream_callback=None,
+        translation_sequence=None,
+    ):
         result = [None]
         exception = [None]
         
         def translation_worker():
             try:
-                result[0] = self.translate_text(text_content, ocr_batch_number)
+                result[0] = self.translate_text(
+                    text_content,
+                    ocr_batch_number,
+                    stream_callback=stream_callback,
+                    translation_sequence=translation_sequence,
+                )
             except Exception as e:
                 exception[0] = e
         
@@ -334,7 +316,7 @@ Call Duration: {call_duration:.3f} seconds
         
         return result[0]
 
-    def translate_text(self, text_content_main, ocr_batch_number=None):
+    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None):
         cleaned_text_main = text_content_main.strip() if text_content_main else ""
         if not cleaned_text_main or self.is_placeholder_text(cleaned_text_main):
             return None
@@ -342,6 +324,319 @@ Call Duration: {call_duration:.3f} seconds
         translation_start_monotonic = time.monotonic()
         selected_model = self.app.translation_model_var.get()
         log_debug(f"Translate request for \"{cleaned_text_main}\" using {selected_model}")
+
+        if selected_model != 'custom_ai':
+            log_debug(f"Legacy translation model '{selected_model}' is disabled; using custom_ai route")
+            selected_model = 'custom_ai'
+
+        return self._custom_ai_translate(
+            cleaned_text_main,
+            translation_start_monotonic,
+            stream_callback=stream_callback,
+            translation_sequence=translation_sequence,
+        )
+
+    def get_cached_translation_for_display(self, text_content):
+        """Return a display-ready cached translation without making a provider call."""
+        cleaned_text = text_content.strip() if text_content else ""
+        if not cleaned_text or self.is_placeholder_text(cleaned_text):
+            return None
+
+        selected_model = self.app.translation_model_var.get()
+        if selected_model != 'custom_ai':
+            selected_model = 'custom_ai'
+
+        if selected_model == 'custom_ai':
+            return self._get_custom_ai_cached_translation(cleaned_text)
+
+        return None
+
+    def _get_custom_ai_cache_profile_and_params(self):
+        profile = self.app.custom_ai_profiles.get_active_profile("translation")
+        if not profile:
+            return None, None, None, None
+
+        source_lang = getattr(self.app, 'custom_source_lang', None) or self.app.source_lang_var.get()
+        target_lang = getattr(self.app, 'custom_target_lang', None) or self.app.target_lang_var.get()
+        cache_params = {
+            "profile_id": profile.get("id", ""),
+            "base_url": profile.get("base_url", ""),
+            "model": profile.get("model", ""),
+        }
+        return profile, source_lang, target_lang, cache_params
+
+    def _get_custom_ai_cached_translation(self, cleaned_text):
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        if not profile:
+            return None
+
+        cached_result = self.unified_cache.get(cleaned_text, source_lang, target_lang, "custom_ai", **cache_params)
+        if not cached_result:
+            return None
+
+        self._update_custom_context(cleaned_text)
+        return self._format_dialog_text(cached_result)
+
+    def get_inflight_translation_key(self, text_content):
+        cleaned_text = text_content.strip() if text_content else ""
+        if not cleaned_text or self.is_placeholder_text(cleaned_text):
+            return None
+
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        if not profile:
+            return ("custom_ai", cleaned_text, "missing_profile")
+
+        keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
+        try:
+            keep_linebreaks = bool(keep_linebreaks_var.get()) if keep_linebreaks_var is not None else False
+        except Exception:
+            keep_linebreaks = False
+
+        return (
+            "custom_ai",
+            cleaned_text,
+            source_lang,
+            target_lang,
+            cache_params.get("profile_id", ""),
+            cache_params.get("base_url", ""),
+            cache_params.get("model", ""),
+            getattr(self.app, "custom_prompt_text", ""),
+            keep_linebreaks,
+            tuple(self._get_custom_context_for_request()),
+        )
+
+    def _get_custom_ai_latency_mode(self):
+        if hasattr(self.app, 'get_custom_ai_latency_mode'):
+            return self.app.get_custom_ai_latency_mode()
+        var = getattr(self.app, 'custom_ai_latency_mode_var', None)
+        try:
+            return normalize_custom_ai_latency_mode(var.get() if var is not None else CUSTOM_AI_LATENCY_MODE_SAFE)
+        except Exception:
+            return CUSTOM_AI_LATENCY_MODE_SAFE
+
+    def _custom_ai_translate(
+        self,
+        cleaned_text_main,
+        translation_start_monotonic,
+        stream_callback=None,
+        translation_sequence=None,
+    ):
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        if not profile:
+            return "AI model profile for translation is missing."
+
+        cached_result = self._get_custom_ai_cached_translation(cleaned_text_main)
+        if cached_result:
+            return cached_result
+
+        latency_mode = self._get_custom_ai_latency_mode()
+        context = self._get_custom_context_for_request()
+        keep_linebreaks = self.app.keep_linebreaks_var.get()
+
+        try:
+            if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
+                (
+                    translated_api_text,
+                    usage,
+                    duration,
+                    cache_params,
+                    winning_profile,
+                ) = self._custom_ai_translate_race(
+                    profile,
+                    cleaned_text_main,
+                    source_lang,
+                    target_lang,
+                    context,
+                    keep_linebreaks,
+                )
+            else:
+                translated_api_text, usage, duration = self.custom_ai_provider.translate(
+                    profile,
+                    cleaned_text_main,
+                    source_lang,
+                    target_lang,
+                    custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
+                    context=context,
+                    keep_linebreaks=keep_linebreaks,
+                    latency_mode=latency_mode,
+                    stream_callback=stream_callback if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM else None,
+                )
+                winning_profile = profile
+            self._log_custom_short_call("translation", winning_profile, translated_api_text, usage, duration)
+        except Exception as e:
+            log_debug(f"Custom AI translation error: {type(e).__name__} - {e}")
+            return f"Custom AI translation error: {type(e).__name__} - {e}"
+
+        if translated_api_text and not self._is_error_message(translated_api_text):
+            cache_targets = [cache_params]
+            if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
+                active_cache_params = self._cache_params_for_profile(profile)
+                if active_cache_params != cache_params:
+                    cache_targets.append(active_cache_params)
+            for target_cache_params in cache_targets:
+                self.unified_cache.store(
+                    cleaned_text_main,
+                    source_lang,
+                    target_lang,
+                    "custom_ai",
+                    translated_api_text,
+                    **target_cache_params,
+                )
+            self._update_custom_context(cleaned_text_main)
+
+        log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
+        return self._format_dialog_text(translated_api_text)
+
+    def _custom_ai_translate_race(self, active_profile, text, source_lang, target_lang, context, keep_linebreaks):
+        candidates = self._get_custom_ai_race_profiles(active_profile)
+        if len(candidates) <= 1:
+            translated, usage, duration = self.custom_ai_provider.translate(
+                active_profile,
+                text,
+                source_lang,
+                target_lang,
+                custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
+                context=context,
+                keep_linebreaks=keep_linebreaks,
+                latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+            )
+            return translated, usage, duration, self._cache_params_for_profile(active_profile), active_profile
+
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=len(candidates),
+            thread_name_prefix="CustomAIRace",
+        )
+        future_to_profile = {
+            executor.submit(
+                self.custom_ai_provider.translate,
+                candidate,
+                text,
+                source_lang,
+                target_lang,
+                custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
+                context=context,
+                keep_linebreaks=keep_linebreaks,
+                latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+            ): candidate
+            for candidate in candidates
+        }
+        shutdown_started = False
+        errors = []
+        try:
+            for future in concurrent.futures.as_completed(future_to_profile):
+                candidate = future_to_profile[future]
+                try:
+                    translated, usage, duration = future.result()
+                except Exception as e:
+                    errors.append(f"{candidate.get('name', 'Custom AI')}: {e}")
+                    continue
+                log_debug(
+                    "LATENCY: custom_ai race winner "
+                    f"profile={candidate.get('name', 'Custom AI')} "
+                    f"duration={duration:.3f}s candidates={len(candidates)}"
+                )
+                executor.shutdown(wait=False, cancel_futures=True)
+                shutdown_started = True
+                return translated, usage, duration, self._cache_params_for_profile(candidate), candidate
+        finally:
+            if not shutdown_started:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+        raise ValueError("All Custom AI race endpoints failed. Tried: " + "; ".join(errors))
+
+    def _get_custom_ai_race_profiles(self, active_profile):
+        active_model = str(active_profile.get("model", "")).strip()
+        candidates = []
+        seen = set()
+
+        def add_candidate(profile):
+            if not isinstance(profile, dict):
+                return
+            if str(profile.get("model", "")).strip() != active_model:
+                return
+            identity = profile.get("id") or (
+                profile.get("base_url", ""),
+                profile.get("api_key", ""),
+                profile.get("model", ""),
+            )
+            if identity in seen:
+                return
+            seen.add(identity)
+            candidates.append(profile)
+
+        add_candidate(active_profile)
+        try:
+            profiles = self.app.custom_ai_profiles.list_profiles("translation", enabled_only=True)
+        except TypeError:
+            profiles = self.app.custom_ai_profiles.list_profiles(enabled_only=True)
+        except Exception as e:
+            log_debug(f"Custom AI race profile list failed: {e}")
+            profiles = []
+        for profile in profiles:
+            add_candidate(profile)
+        return candidates
+
+    def _cache_params_for_profile(self, profile):
+        return {
+            "profile_id": profile.get("id", ""),
+            "base_url": profile.get("base_url", ""),
+            "model": profile.get("model", ""),
+        }
+
+    def _update_custom_context(self, source_text):
+        context_size = self._get_custom_context_window_size()
+        if context_size == 0:
+            self.custom_context_window = []
+            return
+        if self.custom_context_window and self.custom_context_window[-1] == source_text:
+            return
+        self.custom_context_window.append(source_text)
+        self.custom_context_window = self.custom_context_window[-context_size:]
+
+    def _get_custom_context_for_request(self):
+        context_size = self._get_custom_context_window_size()
+        if context_size == 0:
+            return []
+        return self.custom_context_window[-context_size:]
+
+    def _get_custom_context_window_size(self):
+        var = getattr(self.app, 'custom_context_window_var', None)
+        try:
+            value = int(var.get()) if var is not None else 5
+        except (TypeError, ValueError):
+            value = 5
+        return max(0, min(10, value))
+
+    def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
+        try:
+            log_file = "CustomAI_OCR_Short_Log.txt" if call_type == "ocr" else "CustomAI_Translation_Short_Log.txt"
+            if not hasattr(self, "_custom_session_started"):
+                self._custom_session_started = set()
+            if call_type not in self._custom_session_started:
+                with open(log_file, 'a', encoding='utf-8-sig') as f:
+                    f.write(f"\nSESSION 1 STARTED {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
+                self._custom_session_started.add(call_type)
+            header = "========= OCR CALL ===========" if call_type == "ocr" else "===== TRANSLATION CALL ======="
+            cost = 0.0
+            prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+            completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+            with open(log_file, 'a', encoding='utf-8-sig') as f:
+                f.write(
+                    f"{header}\n"
+                    f"Provider: {profile.get('name')}\n"
+                    f"Model: {profile.get('model')}\n"
+                    f"Duration: {duration:.3f}s\n"
+                    f"Input Tokens: {prompt_tokens}\n"
+                    f"Output Tokens: {completion_tokens}\n"
+                    f"Cost: ${cost:.8f}\n"
+                    f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
+                )
+        except Exception as e:
+            log_debug(f"Custom AI short log write failed: {e}")
+
+    def _legacy_translate_disabled(self):
+        """Legacy provider code is kept below for reference but is no longer reached."""
+        return None
         
         source_lang, target_lang, extra_params = None, None, {}
         
@@ -522,6 +817,14 @@ Call Duration: {call_duration:.3f} seconds
         # Build context string (source language only)
         context_string = self._build_deepl_context(context_size)
         
+        # Add custom prompt prefix if available
+        custom_prompt = getattr(self.app, 'custom_prompt_text', '').strip()
+        if custom_prompt:
+            if context_string:
+                context_string = f"[{custom_prompt}]\n{context_string}"
+            else:
+                context_string = f"[{custom_prompt}]\n"
+        
         model_type = self.app.deepl_model_type_var.get()
         log_debug(f"DeepL API call for: {text_to_translate_dl} using model_type={model_type}")
         
@@ -583,6 +886,7 @@ Call Duration: {call_duration:.3f} seconds
                         original_text=text_to_translate_dl,
                         source_lang=source_lang_dl,
                         target_lang=target_lang_dl,
+                        context_string=context_string,
                         context_size=context_size,
                         translated_text=translated_text,
                         model_type=model_type,
@@ -639,6 +943,7 @@ Call Duration: {call_duration:.3f} seconds
                             original_text=text_to_translate_dl,
                             source_lang=source_lang_dl,
                             target_lang=target_lang_dl,
+                            context_string=context_string,
                             context_size=context_size,
                             translated_text=translated_text,
                             model_type="latency_optimized",

@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
 from logger import log_debug
+from modern_ui import style_tk_canvas
 
 def create_scrollable_tab(notebook, tab_name):
     """Create a scrollable tab with conditional scrollbar visibility"""
@@ -14,6 +15,7 @@ def create_scrollable_tab(notebook, tab_name):
     
     # Create canvas without border or highlight
     canvas = tk.Canvas(outer_frame, highlightthickness=0, borderwidth=0)
+    style_tk_canvas(canvas)
     
     # Create scrollbar (not packed yet - will be shown conditionally)
     scrollbar = ttk.Scrollbar(outer_frame, orient="vertical", command=canvas.yview)

@@ -52,6 +52,38 @@ except Exception:
     RESHAPER_AVAILABLE = False
 
 
+def _valid_scale(scale):
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        return 1.0
+    return scale if scale > 0 else 1.0
+
+
+def physical_rect_to_qt_rect(rect, scale):
+    """Convert physical screen pixels from Tk selection into Qt logical pixels."""
+    scale = _valid_scale(scale)
+    x1, y1, x2, y2 = map(int, rect)
+    return [
+        round(x1 / scale),
+        round(y1 / scale),
+        round(x2 / scale),
+        round(y2 / scale),
+    ]
+
+
+def qt_rect_to_physical_rect(rect, scale):
+    """Convert Qt logical window geometry back into physical screen pixels."""
+    scale = _valid_scale(scale)
+    x1, y1, x2, y2 = map(int, rect)
+    return [
+        round(x1 * scale),
+        round(y1 * scale),
+        round(x2 * scale),
+        round(y2 * scale),
+    ]
+
+
 # -----------------------
 # PySide6-backed classes
 # -----------------------
@@ -348,6 +380,7 @@ if PYSIDE6_AVAILABLE:
                      font_family: str = "Arial",
                      border_px: int = 0,
                      opacity: float = 0.85,
+                     corner_radius: int = 16,
                      parent=None):
             super().__init__(parent)
             self.text_widget = None
@@ -363,10 +396,12 @@ if PYSIDE6_AVAILABLE:
             self._font_size = int(font_size)
             self._font_family = font_family
             self._border_px = int(border_px)
+            self._corner_radius = int(corner_radius)
             try:
                 self._opacity = float(opacity)
             except Exception:
                 self._opacity = 0.85
+            self._geometry_scale = 1.0
 
             # Native hit-test constants for Windows
             if sys.platform == "win32":
@@ -382,6 +417,31 @@ if PYSIDE6_AVAILABLE:
 
             self.setup_window(initial_geometry, bg_color, title)
 
+        def _screen_scale_for_physical_point(self, x, y):
+            """Return Qt device pixel ratio for a Tk physical screen point."""
+            try:
+                app = QApplication.instance()
+                primary = app.primaryScreen() if app else None
+                primary_scale = _valid_scale(primary.devicePixelRatio()) if primary else 1.0
+                screen = app.screenAt(QPoint(round(int(x) / primary_scale), round(int(y) / primary_scale))) if app else None
+                if screen is None:
+                    screen = primary
+                if screen is not None:
+                    return _valid_scale(screen.devicePixelRatio())
+            except Exception as e:
+                log_debug(f"Could not determine PySide overlay screen scale: {e}")
+            return 1.0
+
+        def _current_geometry_scale(self):
+            try:
+                handle = self.windowHandle()
+                screen = handle.screen() if handle else None
+                if screen is not None:
+                    self._geometry_scale = _valid_scale(screen.devicePixelRatio())
+            except Exception:
+                pass
+            return _valid_scale(getattr(self, "_geometry_scale", 1.0))
+
         def setup_window(self, initial_geometry, bg_color, title):
             """Setup overlay window visuals and layout."""
             self.setWindowTitle(title)
@@ -396,11 +456,18 @@ if PYSIDE6_AVAILABLE:
 
             # Geometry
             try:
-                x1, y1, x2, y2 = map(int, initial_geometry)
-                width = max(x2 - x1, 100)
-                height = max(y2 - y1, 50)
+                physical_rect = list(map(int, initial_geometry))
+                self._geometry_scale = self._screen_scale_for_physical_point(physical_rect[0], physical_rect[1])
+                x1, y1, x2, y2 = physical_rect_to_qt_rect(physical_rect, self._geometry_scale)
+                min_width = max(1, round(100 / self._geometry_scale))
+                min_height = max(1, round(50 / self._geometry_scale))
+                width = max(x2 - x1, min_width)
+                height = max(y2 - y1, min_height)
                 self.setGeometry(x1, y1, width, height)
-                log_debug(f"PySide overlay geometry set: {width}x{height}+{x1}+{y1}")
+                log_debug(
+                    f"PySide overlay geometry set: physical={physical_rect}, "
+                    f"qt={width}x{height}+{x1}+{y1}, scale={self._geometry_scale}"
+                )
             except Exception as e:
                 log_debug(f"Error setting PySide overlay geometry {initial_geometry}: {e}. Using default.")
                 self.setGeometry(200, 200, 300, 200)
@@ -420,6 +487,7 @@ if PYSIDE6_AVAILABLE:
                 QWidget {{
                     background-color: {semi_transparent_bg};
                     {border_css}
+                    border-radius: {self._corner_radius}px;
                 }}
             """)
 
@@ -517,6 +585,7 @@ if PYSIDE6_AVAILABLE:
                     QWidget {{
                         background-color: {semi_transparent_bg};
                         {border_css}
+                        border-radius: {self._corner_radius}px;
                     }}
                 """)
 
@@ -563,7 +632,7 @@ if PYSIDE6_AVAILABLE:
                 y = self.y()
                 w = self.width()
                 h = self.height()
-                return [x, y, x + w, y + h]
+                return qt_rect_to_physical_rect([x, y, x + w, y + h], self._current_geometry_scale())
             except Exception as e:
                 log_debug(f"Error getting PySide overlay geometry: {e}")
                 return None

@@ -1,10 +1,55 @@
-# gui_builder.py
+﻿# gui_builder.py
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
 import os
+import threading
 from logger import log_debug
 from ui_elements import create_scrollable_tab
+from modern_ui import style_tk_text_widget
 import tkinter.font as tkFont
+
+def filter_model_values(models, query):
+    """Return model names containing the query, preserving the original order."""
+    query = (query or "").strip().lower()
+    if not query:
+        return list(models)
+    return [model for model in models if query in str(model).lower()]
+
+
+def run_profile_network_task_async(app, button, task, on_success, failure_title):
+    """Run a Custom AI profile network action without blocking the Tk UI thread."""
+    def set_button_state(state):
+        if button is None:
+            return
+        try:
+            button.config(state=state)
+        except Exception as e:
+            log_debug(f"Custom AI profile button state update failed: {e}")
+
+    def finish_success(result):
+        set_button_state(tk.NORMAL)
+        on_success(result)
+
+    def finish_error(error):
+        set_button_state(tk.NORMAL)
+        messagebox.showerror(failure_title, str(error), parent=app.root)
+
+    def schedule(callback, *args):
+        try:
+            app.root.after(0, callback, *args)
+        except Exception as e:
+            log_debug(f"Custom AI profile async callback scheduling failed: {e}")
+
+    def worker():
+        try:
+            result = task()
+        except Exception as e:
+            schedule(finish_error, e)
+        else:
+            schedule(finish_success, result)
+
+    set_button_state(tk.DISABLED)
+    threading.Thread(target=worker, name="CustomAIProfileNetworkTask", daemon=True).start()
 
 def get_system_fonts():
     """Get available system fonts with preferred fonts at the top"""
@@ -144,6 +189,7 @@ def create_settings_tab(app):
     validate_c_value = frame.register(lambda P: validate_int_range(P, -75, 75))
     validate_beam_size = frame.register(lambda P: validate_int_range(P, 1, 50))
     validate_scan_interval = frame.register(lambda P: validate_int_range(P, 50, 2000))
+    validate_custom_context_window = frame.register(lambda P: validate_int_range(P, 0, 10))
     validate_timeout = frame.register(lambda P: validate_int_range(P, 0, 60))
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_confidence = frame.register(lambda P: validate_int_range(P, 0, 100))
@@ -151,14 +197,12 @@ def create_settings_tab(app):
     
     style = ttk.Style()
     
-    # Configure TCombobox style for better readability when focused
-    # Simple fix: just change text color to white when focused (blue background is system default)
+    # Keep combobox text readable on the white theme, including focused readonly fields.
     style.map('TCombobox',
         foreground=[
-            ('readonly', 'focus', 'white'),      # White text when focused for better contrast
-            ('readonly', '!focus', 'black'),     # Black text when not focused  
-            ('!readonly', 'focus', 'white'),     # White text when focused (editable)
-            ('!readonly', '!focus', 'black')     # Black text when not focused (editable)
+            ('readonly', 'focus', '#1f2937'),
+            ('readonly', '!focus', '#1f2937'),
+            ('!readonly', '#1f2937')
         ]
     )
 
@@ -183,101 +227,26 @@ def create_settings_tab(app):
     # Row 0: Translation Model Selection
     ttk.Label(frame, text=app.ui_lang.get_label("translation_model_label")).grid(row=0, column=0, padx=5, pady=5, sticky="w")
     
-    translation_models_available_for_ui = []
-    log_debug(f"GUI Builder: Translation model availability check:")
-    log_debug(f"  GEMINI_API_AVAILABLE: {app.GEMINI_API_AVAILABLE}")
-    log_debug(f"  OPENAI_API_AVAILABLE: {app.OPENAI_API_AVAILABLE}")
-    log_debug(f"  MARIANMT_AVAILABLE: {app.MARIANMT_AVAILABLE}")  
-    log_debug(f"  DEEPL_API_AVAILABLE: {app.DEEPL_API_AVAILABLE}")
-    log_debug(f"  GOOGLE_TRANSLATE_API_AVAILABLE: {app.GOOGLE_TRANSLATE_API_AVAILABLE}")
-    
-    # Add Gemini models first (from CSV file)
-    if app.GEMINI_API_AVAILABLE:
-        gemini_translation_models = app.gemini_models_manager.get_translation_model_names()
-        translation_models_available_for_ui.extend(gemini_translation_models)
-        log_debug(f"Added Gemini translation models: {gemini_translation_models}")
-    
-    # Add OpenAI models second (from CSV file)
-    if app.OPENAI_API_AVAILABLE:
-        openai_translation_models = app.openai_models_manager.get_translation_model_names()
-        translation_models_available_for_ui.extend(openai_translation_models)
-        log_debug(f"Added OpenAI translation models: {openai_translation_models}")
-    
-    # Add other translation models
-    if app.MARIANMT_AVAILABLE: 
-        translation_models_available_for_ui.append(app.translation_model_names['marianmt'])
-    if app.DEEPL_API_AVAILABLE: 
-        translation_models_available_for_ui.append(app.translation_model_names['deepl_api'])
-    if app.GOOGLE_TRANSLATE_API_AVAILABLE: 
-        translation_models_available_for_ui.append(app.translation_model_names['google_api'])
-    
+    translation_models_available_for_ui = [p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)]
     log_debug(f"GUI Builder: Available translation models for UI: {translation_models_available_for_ui}")
     
     if not translation_models_available_for_ui: 
-        default_model_key_from_var = app.translation_model_var.get() 
-        translation_models_available_for_ui.append(app.translation_model_names.get(default_model_key_from_var, "MarianMT (offline and free)"))
+        translation_models_available_for_ui.append(app.ui_lang.get_label("custom_ai_no_profiles", "Add an AI model profile"))
 
     app.translation_model_combobox = ttk.Combobox(frame, textvariable=app.translation_model_display_var,
                                            values=translation_models_available_for_ui, width=25, state='readonly')
     app.translation_model_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
     
-    # Set initial value from config - follow same pattern as OCR model
-    current_translation_model = app.translation_model_var.get()
-    log_debug(f"Current translation model type: {current_translation_model}")
-    
-    if current_translation_model == 'gemini_api':
-        # For Gemini translation, read the specific model from config
-        if hasattr(app, 'config'):
-            saved_gemini_translation_model = app.config['Settings'].get('gemini_translation_model', '')
-            if saved_gemini_translation_model and saved_gemini_translation_model in translation_models_available_for_ui:
-                app.translation_model_display_var.set(saved_gemini_translation_model)
-                log_debug(f"Set translation model from config: {saved_gemini_translation_model}")
-            elif app.GEMINI_API_AVAILABLE and app.gemini_models_manager.get_translation_model_names():
-                app.translation_model_display_var.set(app.gemini_models_manager.get_translation_model_names()[0])
-                log_debug(f"Set translation model to first Gemini: {app.gemini_models_manager.get_translation_model_names()[0]}")
-            else:
-                app.translation_model_display_var.set(translation_models_available_for_ui[0] if translation_models_available_for_ui else "MarianMT (offline and free)")
-                log_debug(f"Set translation model to first available: {translation_models_available_for_ui[0] if translation_models_available_for_ui else 'MarianMT'}")
-        else:
-            # Fallback to first available Gemini model or first overall
-            if app.GEMINI_API_AVAILABLE and app.gemini_models_manager.get_translation_model_names():
-                app.translation_model_display_var.set(app.gemini_models_manager.get_translation_model_names()[0])
-            else:
-                app.translation_model_display_var.set(translation_models_available_for_ui[0] if translation_models_available_for_ui else "MarianMT (offline and free)")
-    elif app.is_openai_model(current_translation_model):
-        # For OpenAI translation, read the specific model from config
-        if hasattr(app, 'config'):
-            saved_openai_translation_model = app.config['Settings'].get('openai_translation_model', '')
-            if saved_openai_translation_model and saved_openai_translation_model in translation_models_available_for_ui:
-                app.translation_model_display_var.set(saved_openai_translation_model)
-                log_debug(f"Set translation model from config: {saved_openai_translation_model}")
-            elif app.OPENAI_API_AVAILABLE and app.openai_models_manager.get_translation_model_names():
-                app.translation_model_display_var.set(app.openai_models_manager.get_translation_model_names()[0])
-                log_debug(f"Set translation model to first OpenAI: {app.openai_models_manager.get_translation_model_names()[0]}")
-            else:
-                app.translation_model_display_var.set(translation_models_available_for_ui[0] if translation_models_available_for_ui else "MarianMT (offline and free)")
-                log_debug(f"Set translation model to first available: {translation_models_available_for_ui[0] if translation_models_available_for_ui else 'MarianMT'}")
-        else:
-            # Fallback to first available OpenAI model or first overall
-            if app.OPENAI_API_AVAILABLE and app.openai_models_manager.get_translation_model_names():
-                app.translation_model_display_var.set(app.openai_models_manager.get_translation_model_names()[0])
-            else:
-                app.translation_model_display_var.set(translation_models_available_for_ui[0] if translation_models_available_for_ui else "MarianMT (offline and free)")
-    elif current_translation_model == 'marianmt' and app.MARIANMT_AVAILABLE:
-        app.translation_model_display_var.set(app.translation_model_names['marianmt'])
-        log_debug(f"Set translation model to MarianMT: {app.translation_model_names['marianmt']}")
-    elif current_translation_model == 'deepl_api' and app.DEEPL_API_AVAILABLE:
-        app.translation_model_display_var.set(app.translation_model_names['deepl_api'])
-        log_debug(f"Set translation model to DeepL: {app.translation_model_names['deepl_api']}")
-    elif current_translation_model == 'google_api' and app.GOOGLE_TRANSLATE_API_AVAILABLE:
-        app.translation_model_display_var.set(app.translation_model_names['google_api'])
-        log_debug(f"Set translation model to Google: {app.translation_model_names['google_api']}")
-    else:
-        # Default to first available option
-        app.translation_model_display_var.set(translation_models_available_for_ui[0] if translation_models_available_for_ui else "MarianMT (offline and free)")
-        log_debug(f"Set translation model to default: {translation_models_available_for_ui[0] if translation_models_available_for_ui else 'MarianMT'}")
+    active_translation_profile = app.custom_ai_profiles.get_active_profile("translation")
+    app.translation_model_display_var.set(active_translation_profile["name"] if active_translation_profile else translation_models_available_for_ui[0])
     
     def handle_translation_model_selection(event):
+        selected_name = app.translation_model_display_var.get()
+        for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):
+            if profile["name"] == selected_name:
+                app.custom_ai_profiles.set_active_profile("translation", profile["id"])
+                app.translation_model_var.set("custom_ai")
+                break
         app.on_translation_model_selection_changed(event=event, initial_setup=False)
     app.translation_model_combobox.bind('<<ComboboxSelected>>', 
         create_combobox_handler_wrapper(handle_translation_model_selection))
@@ -285,23 +254,10 @@ def create_settings_tab(app):
     # Row 0.5: OCR Model Selection
     ttk.Label(frame, text=app.ui_lang.get_label("ocr_model_label", "OCR Model")).grid(row=1, column=0, padx=5, pady=5, sticky="w")
     
-    # Build OCR models list with Gemini models first, then OpenAI, then Tesseract
-    ocr_models_available_for_ui = []
-    
-    # Add Gemini OCR models first (from CSV file)
-    if app.GEMINI_API_AVAILABLE:
-        gemini_ocr_models = app.gemini_models_manager.get_ocr_model_names()
-        ocr_models_available_for_ui.extend(gemini_ocr_models)
-        log_debug(f"Added Gemini OCR models: {gemini_ocr_models}")
-    
-    # Add OpenAI OCR models (from CSV file)
-    if app.OPENAI_API_AVAILABLE:
-        openai_ocr_models = app.openai_models_manager.get_ocr_model_names()
-        ocr_models_available_for_ui.extend(openai_ocr_models)
-        log_debug(f"Added OpenAI OCR models: {openai_ocr_models}")
-    
-    # Add Tesseract
-    ocr_models_available_for_ui.append(app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)"))
+    ocr_models_available_for_ui = [app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")]
+    if getattr(app, 'WINDOWS_OCR_AVAILABLE', False):
+        ocr_models_available_for_ui.append(app.ui_lang.get_label("ocr_model_windows", "Windows OCR (fast, offline)"))
+    ocr_models_available_for_ui.extend([p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)])
     
     
     app.ocr_model_combobox = ttk.Combobox(frame, textvariable=app.ocr_model_display_var,
@@ -316,22 +272,19 @@ def create_settings_tab(app):
         # Suppress traces during OCR model update to prevent premature saves
         app.suppress_traces()
         try:
-            # Determine if this is a Gemini model, OpenAI model, or Tesseract
             if selected_display == app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)"):
                 app.ocr_model_var.set('tesseract')
                 log_debug("OCR model set to tesseract")
-            elif app.GEMINI_API_AVAILABLE and selected_display in app.gemini_models_manager.get_ocr_model_names():
-                app.ocr_model_var.set('gemini')
-                # Store the specific Gemini model selection
-                app.gemini_ocr_model_var.set(selected_display)
-                log_debug(f"OCR model set to gemini, specific model: {selected_display}")
-            elif app.OPENAI_API_AVAILABLE and selected_display in app.openai_models_manager.get_ocr_model_names():
-                app.ocr_model_var.set('openai')
-                # --- FIX: Store the specific OpenAI model selection ---
-                app.openai_ocr_model_var.set(selected_display)
-                log_debug(f"OCR model set to openai, specific model: {selected_display}")
+            elif selected_display == app.ui_lang.get_label("ocr_model_windows", "Windows OCR (fast, offline)") and getattr(app, 'WINDOWS_OCR_AVAILABLE', False):
+                app.ocr_model_var.set('windows_ocr')
+                log_debug("OCR model set to windows_ocr")
             else:
-                log_debug(f"Unknown OCR model selection: {selected_display}")
+                for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):
+                    if profile["name"] == selected_display:
+                        app.custom_ai_profiles.set_active_profile("ocr", profile["id"])
+                        app.ocr_model_var.set('custom_ai')
+                        log_debug(f"OCR model set to custom_ai profile: {selected_display}")
+                        break
         finally:
             # Always restore traces
             app.restore_traces()
@@ -384,6 +337,8 @@ def create_settings_tab(app):
                 current_stored_value = app.gemini_source_lang
             elif app.is_openai_model(active_model):
                 current_stored_value = app.openai_source_lang
+            elif active_model == 'custom_ai':
+                current_stored_value = app.custom_source_lang
             
             # Only update and save if the value actually changed
             if api_code != current_stored_value:
@@ -402,6 +357,9 @@ def create_settings_tab(app):
                 elif app.is_openai_model(active_model):
                     app.openai_source_lang = api_code
                     log_debug(f"OpenAI source lang set to: {api_code}")
+                elif active_model == 'custom_ai':
+                    app.custom_source_lang = api_code
+                    log_debug(f"Custom AI source lang set to: {api_code}")
                 
                 # Clear context for currently active provider when source language is changed
                 if (hasattr(app, 'translation_handler') and 
@@ -455,6 +413,8 @@ def create_settings_tab(app):
                 current_stored_value = app.gemini_target_lang
             elif app.is_openai_model(active_model):
                 current_stored_value = app.openai_target_lang
+            elif active_model == 'custom_ai':
+                current_stored_value = app.custom_target_lang
             
             # Only update and save if the value actually changed
             if api_code != current_stored_value:
@@ -473,6 +433,9 @@ def create_settings_tab(app):
                 elif app.is_openai_model(active_model):
                     app.openai_target_lang = api_code
                     log_debug(f"OpenAI target lang set to: {api_code}")
+                elif active_model == 'custom_ai':
+                    app.custom_target_lang = api_code
+                    log_debug(f"Custom AI target lang set to: {api_code}")
                 
                 # Clear context for currently active provider when target language is changed
                 if (hasattr(app, 'translation_handler') and 
@@ -919,11 +882,7 @@ def create_settings_tab(app):
     def update_deepl_usage_for_language():
         if hasattr(app, 'deepl_usage_label') and app.deepl_usage_label.winfo_exists():
             app.deepl_usage_label.config(text=app.ui_lang.get_label("deepl_usage_label", "DeepL Usage"))
-        
-        # Always refresh DeepL usage display since it's now always visible in API Usage tab
-        if hasattr(app, 'update_deepl_usage'):
-            app.root.after_idle(app.update_deepl_usage)
-        
+
         log_debug("Updated DeepL usage labels for language change")
     
     # Store function reference for calling during language updates
@@ -953,8 +912,309 @@ def create_settings_tab(app):
         app.save_settings() 
     app.beam_spinbox.bind("<FocusOut>", on_beam_spinbox_focus_out)
 
+    app.ai_profile_selected_id = None
+    app.ai_profile_name_var = tk.StringVar()
+    app.ai_profile_url_var = tk.StringVar()
+    app.ai_profile_key_var = tk.StringVar()
+    app.ai_profile_model_var = tk.StringVar()
+    app.ai_profile_model_values = []
+
+    def get_profile_by_name(name):
+        for profile_item in app.custom_ai_profiles.list_profiles():
+            if profile_item["name"] == name:
+                return profile_item
+        return None
+
+    def refresh_custom_profile_controls(select_profile_id=None):
+        profiles = app.custom_ai_profiles.list_profiles()
+        enabled_profiles = [p for p in profiles if p.get("enabled", True)]
+        profile_names = [p["name"] for p in profiles]
+        enabled_names = [p["name"] for p in enabled_profiles]
+
+        app.ai_profile_name_combobox.config(values=profile_names)
+        app.ai_profile_model_values = []
+        app.ai_profile_model_combobox.config(values=[])
+
+        translation_names = enabled_names or [app.ui_lang.get_label("custom_ai_no_profiles", "Add an AI model profile")]
+        app.translation_model_combobox.config(values=translation_names)
+        active_translation = app.custom_ai_profiles.get_active_profile("translation")
+        app.translation_model_display_var.set(active_translation["name"] if active_translation else translation_names[0])
+
+        ocr_names = [app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")]
+        if getattr(app, 'WINDOWS_OCR_AVAILABLE', False):
+            ocr_names.append(app.ui_lang.get_label("ocr_model_windows", "Windows OCR (fast, offline)"))
+        ocr_names.extend(enabled_names)
+        app.ocr_model_combobox.config(values=ocr_names)
+        active_ocr = app.custom_ai_profiles.get_active_profile("ocr")
+        if app.ocr_model_var.get() == "custom_ai" and active_ocr:
+            app.ocr_model_display_var.set(active_ocr["name"])
+        elif app.ocr_model_var.get() == "windows_ocr" and getattr(app, 'WINDOWS_OCR_AVAILABLE', False):
+            app.ocr_model_display_var.set(app.ui_lang.get_label("ocr_model_windows", "Windows OCR (fast, offline)"))
+        elif app.ocr_model_var.get() != "custom_ai":
+            app.ocr_model_display_var.set(app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)"))
+
+        profile_to_load = None
+        if select_profile_id:
+            profile_to_load = app.custom_ai_profiles.get_profile(select_profile_id)
+        if not profile_to_load and app.ai_profile_selected_id:
+            profile_to_load = app.custom_ai_profiles.get_profile(app.ai_profile_selected_id)
+        if not profile_to_load and profiles:
+            profile_to_load = profiles[0]
+        load_profile(profile_to_load)
+
+    def load_profile(profile):
+        if not profile:
+            app.ai_profile_selected_id = None
+            app.ai_profile_name_var.set("")
+            app.ai_profile_url_var.set("")
+            app.ai_profile_key_var.set("")
+            app.ai_profile_model_var.set("")
+            return
+        app.ai_profile_selected_id = profile["id"]
+        app.ai_profile_name_var.set(profile.get("name", ""))
+        app.ai_profile_url_var.set(profile.get("base_url", ""))
+        app.ai_profile_key_var.set(profile.get("api_key", ""))
+        app.ai_profile_model_var.set(profile.get("model", ""))
+
+    def on_profile_name_selected(event=None):
+        load_profile(get_profile_by_name(app.ai_profile_name_var.get()))
+
+    def build_profile_from_form():
+        return {
+            "name": app.ai_profile_name_var.get().strip(),
+            "base_url": app.ai_profile_url_var.get().strip(),
+            "api_key": app.ai_profile_key_var.get(),
+            "model": app.ai_profile_model_var.get().strip(),
+            "enabled": True,
+        }
+
+    def add_profile_form():
+        load_profile(None)
+        app.ai_profile_name_combobox.focus_set()
+
+    def save_profile_form():
+        try:
+            values = build_profile_from_form()
+            if app.ai_profile_selected_id and app.custom_ai_profiles.get_profile(app.ai_profile_selected_id):
+                profile = app.custom_ai_profiles.update_profile(app.ai_profile_selected_id, **values)
+            else:
+                profile = app.custom_ai_profiles.add_profile(**values)
+            refresh_custom_profile_controls(profile["id"])
+            app.save_settings()
+        except Exception as e:
+            messagebox.showerror(app.ui_lang.get_label("profile_error_title", "Profile Error"), str(e), parent=app.root)
+
+    def delete_profile_form():
+        profile = app.custom_ai_profiles.get_profile(app.ai_profile_selected_id) if app.ai_profile_selected_id else get_profile_by_name(app.ai_profile_name_var.get())
+        if not profile:
+            return
+        title = app.ui_lang.get_label("delete_profile_title", "Delete Profile")
+        message = app.ui_lang.get_label("delete_profile_confirm", "Delete profile '{0}'?").format(profile["name"])
+        if messagebox.askyesno(title, message, parent=app.root):
+            app.custom_ai_profiles.delete_profile(profile["id"])
+            app.ai_profile_selected_id = None
+            refresh_custom_profile_controls()
+            app.save_settings()
+
+    def test_profile_form():
+        try:
+            values = build_profile_from_form()
+            app.custom_ai_profiles._validate_profile(values)
+        except Exception as e:
+            messagebox.showerror(app.ui_lang.get_label("connection_test_failed_title", "Connection Test Failed"), str(e), parent=app.root)
+            return
+
+        def task():
+            latency_mode = app.get_custom_ai_latency_mode() if hasattr(app, 'get_custom_ai_latency_mode') else "safe"
+            return app.translation_handler.custom_ai_provider.test_profile(values, latency_mode=latency_mode)
+
+        def on_success(result):
+            response_text, duration = result
+            title = app.ui_lang.get_label("connection_test_title", "Connection Test")
+            message = app.ui_lang.get_label("connection_test_success", "Response: {0}\nDuration: {1:.2f}s").format(response_text, duration)
+            messagebox.showinfo(title, message, parent=app.root)
+
+        run_profile_network_task_async(
+            app,
+            getattr(app, "ai_profile_test_button", None),
+            task,
+            on_success,
+            app.ui_lang.get_label("connection_test_failed_title", "Connection Test Failed"),
+        )
+
+    def fetch_model_list_form():
+        try:
+            values = build_profile_from_form()
+            if not values["base_url"]:
+                raise ValueError("API URL is required")
+            if not values["api_key"]:
+                raise ValueError("API key is required")
+        except Exception as e:
+            messagebox.showerror(app.ui_lang.get_label("model_list_failed_title", "Model List Failed"), str(e), parent=app.root)
+            return
+
+        def task():
+            latency_mode = app.get_custom_ai_latency_mode() if hasattr(app, 'get_custom_ai_latency_mode') else "safe"
+            return app.translation_handler.custom_ai_provider.fetch_models(values, latency_mode=latency_mode)
+
+        def on_success(models):
+            app.ai_profile_model_values = models
+            current_model_filter = app.ai_profile_model_var.get().strip()
+            app.ai_profile_model_combobox.config(values=filter_model_values(models, current_model_filter))
+            if models and not current_model_filter:
+                app.ai_profile_model_var.set(models[0])
+            title = app.ui_lang.get_label("model_list_title", "Model List")
+            message = app.ui_lang.get_label("model_list_success", "Fetched {0} models.").format(len(models))
+            messagebox.showinfo(title, message, parent=app.root)
+
+        run_profile_network_task_async(
+            app,
+            getattr(app, "ai_profile_fetch_models_button", None),
+            task,
+            on_success,
+            app.ui_lang.get_label("model_list_failed_title", "Model List Failed"),
+        )
+
+    def filter_model_list_form(event=None):
+        models = getattr(app, "ai_profile_model_values", [])
+        if not models:
+            return
+        query = app.ai_profile_model_var.get()
+        app.ai_profile_model_combobox.config(values=filter_model_values(models, query))
+
+    app.ai_profiles_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("ai_model_profiles_title", "AI Model Profiles"))
+    app.ai_profiles_frame.grid(row=16, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+    app.ai_profiles_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_name_label", "name")).grid(row=0, column=0, padx=5, pady=3, sticky="w")
+    app.ai_profile_name_combobox = ttk.Combobox(app.ai_profiles_frame, textvariable=app.ai_profile_name_var, width=48)
+    app.ai_profile_name_combobox.grid(row=0, column=1, padx=5, pady=3, sticky="ew")
+    app.ai_profile_name_combobox.bind("<<ComboboxSelected>>", on_profile_name_selected)
+
+    ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_url_label", "api url")).grid(row=1, column=0, padx=5, pady=3, sticky="w")
+    ttk.Entry(app.ai_profiles_frame, textvariable=app.ai_profile_url_var).grid(row=1, column=1, padx=5, pady=3, sticky="ew")
+
+    ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_key_label", "api key")).grid(row=2, column=0, padx=5, pady=3, sticky="w")
+    ttk.Entry(app.ai_profiles_frame, textvariable=app.ai_profile_key_var, show="*").grid(row=2, column=1, padx=5, pady=3, sticky="ew")
+
+    ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_model_label", "model")).grid(row=3, column=0, padx=5, pady=3, sticky="w")
+    model_frame = ttk.Frame(app.ai_profiles_frame)
+    model_frame.grid(row=3, column=1, padx=5, pady=3, sticky="ew")
+    model_frame.columnconfigure(0, weight=1)
+    app.ai_profile_model_combobox = ttk.Combobox(model_frame, textvariable=app.ai_profile_model_var)
+    app.ai_profile_model_combobox.grid(row=0, column=0, sticky="ew")
+    app.ai_profile_model_combobox.bind("<KeyRelease>", filter_model_list_form)
+    app.ai_profile_fetch_models_button = ttk.Button(model_frame, text=app.ui_lang.get_label("fetch_model_list_btn", "Fetch Models"), command=fetch_model_list_form)
+    app.ai_profile_fetch_models_button.grid(row=0, column=1, padx=(5, 0))
+
+    profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
+    profile_buttons.grid(row=0, column=2, rowspan=4, padx=(10, 8), pady=6, sticky="nsew")
+    ttk.Button(
+        profile_buttons,
+        text=app.ui_lang.get_label("add_btn", "Add"),
+        command=add_profile_form,
+        style="ProfileAdd.TButton",
+        width=12,
+    ).pack(fill=tk.X, pady=(0, 7), ipady=1)
+    ttk.Button(
+        profile_buttons,
+        text=app.ui_lang.get_label("save_btn", "Save"),
+        command=save_profile_form,
+        style="ProfileSave.TButton",
+        width=12,
+    ).pack(fill=tk.X, pady=(0, 7), ipady=1)
+    ttk.Button(
+        profile_buttons,
+        text=app.ui_lang.get_label("delete_btn", "Delete"),
+        command=delete_profile_form,
+        style="ProfileDelete.TButton",
+        width=12,
+    ).pack(fill=tk.X, pady=(0, 7), ipady=1)
+    app.ai_profile_test_button = ttk.Button(
+        profile_buttons,
+        text=app.ui_lang.get_label("test_btn", "Test"),
+        command=test_profile_form,
+        style="ProfileTest.TButton",
+        width=12,
+    )
+    app.ai_profile_test_button.pack(fill=tk.X, pady=0, ipady=1)
+
+    refresh_custom_profile_controls()
+
     app.marian_explanation_labels = [] 
-    row_offset = 18  # Adjusted from 15 to account for added OpenAI settings (3 new rows)
+    app.custom_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("custom_context_window_label", "Custom AI Context Window"))
+    app.custom_context_window_label.grid(row=17, column=0, padx=5, pady=5, sticky="w")
+    app.custom_context_window_spinbox = ttk.Spinbox(
+        frame,
+        from_=0,
+        to=10,
+        textvariable=app.custom_context_window_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_custom_context_window, '%P'),
+    )
+    app.custom_context_window_spinbox.grid(row=17, column=1, padx=5, pady=5, sticky="w")
+
+    def on_custom_context_window_focus_out(event):
+        try:
+            value = int(app.custom_context_window_var.get())
+            clamped = max(0, min(10, value))
+            if clamped != value:
+                app.custom_context_window_var.set(clamped)
+        except (ValueError, tk.TclError):
+            app.custom_context_window_var.set(5)
+        if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, '_clear_active_context'):
+            app.translation_handler._clear_active_context()
+        app.save_settings()
+
+    app.custom_context_window_spinbox.bind("<FocusOut>", on_custom_context_window_focus_out)
+
+    app.custom_ai_latency_mode_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("custom_ai_latency_mode_label", "Custom AI response mode:"),
+    )
+    app.custom_ai_latency_mode_label.grid(row=18, column=0, padx=5, pady=5, sticky="w")
+    custom_ai_latency_mode_options = [
+        ("none", app.ui_lang.get_label("custom_ai_latency_mode_none", "None")),
+        ("safe", app.ui_lang.get_label("custom_ai_latency_mode_safe", "Stable low latency")),
+        ("stream", app.ui_lang.get_label("custom_ai_latency_mode_stream", "Streaming subtitles")),
+        ("race", app.ui_lang.get_label("custom_ai_latency_mode_race", "Fastest endpoint")),
+    ]
+    app.custom_ai_latency_mode_display_var = tk.StringVar()
+    current_latency_mode = app.get_custom_ai_latency_mode() if hasattr(app, 'get_custom_ai_latency_mode') else app.custom_ai_latency_mode_var.get()
+    for value, display in custom_ai_latency_mode_options:
+        if value == current_latency_mode:
+            app.custom_ai_latency_mode_display_var.set(display)
+            break
+    else:
+        app.custom_ai_latency_mode_display_var.set(custom_ai_latency_mode_options[1][1])
+
+    app.custom_ai_latency_mode_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.custom_ai_latency_mode_display_var,
+        values=[display for _, display in custom_ai_latency_mode_options],
+        width=25,
+        state='readonly',
+    )
+    app.custom_ai_latency_mode_combobox.grid(row=18, column=1, padx=5, pady=5, sticky="ew")
+
+    def on_custom_ai_latency_mode_changed(event):
+        selected_display = app.custom_ai_latency_mode_display_var.get()
+        for value, display in custom_ai_latency_mode_options:
+            if display == selected_display:
+                app.custom_ai_latency_mode_var.set(value)
+                log_debug(f"Custom AI latency mode changed to: {value}")
+                if app._fully_initialized:
+                    app.save_settings()
+                break
+
+    app.custom_ai_latency_mode_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_custom_ai_latency_mode_changed),
+    )
+    app.custom_ai_latency_mode_options = custom_ai_latency_mode_options
+
+    row_offset = 19
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),
@@ -993,6 +1253,36 @@ def create_settings_tab(app):
     
     app.keep_linebreaks_checkbox = ttk.Checkbutton(frame, variable=app.keep_linebreaks_var, command=on_keep_linebreaks_clicked)
     app.keep_linebreaks_checkbox.grid(row=current_row, column=1, padx=5, pady=5, sticky="w")
+    current_row += 1
+
+    ttk.Label(frame, text=app.ui_lang.get_label("capture_backend_label", "Capture Backend")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
+    capture_backend_display_values = [
+        app.ui_lang.get_label("capture_backend_auto", "Auto (fastest available)"),
+        app.ui_lang.get_label("capture_backend_mss", "MSS (fast)"),
+        app.ui_lang.get_label("capture_backend_pyautogui", "PyAutoGUI (compatible)"),
+    ]
+    capture_backend_code_by_display = {
+        capture_backend_display_values[0]: "auto",
+        capture_backend_display_values[1]: "mss",
+        capture_backend_display_values[2]: "pyautogui",
+    }
+    capture_backend_display_by_code = {v: k for k, v in capture_backend_code_by_display.items()}
+    app.capture_backend_display_var = tk.StringVar(value=capture_backend_display_by_code.get(app.capture_backend_var.get(), capture_backend_display_values[0]))
+    app.capture_backend_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.capture_backend_display_var,
+        values=capture_backend_display_values,
+        width=25,
+        state="readonly",
+    )
+    app.capture_backend_combobox.grid(row=current_row, column=1, padx=5, pady=5, sticky="ew")
+
+    def on_capture_backend_changed(event):
+        selected_backend_display = app.capture_backend_display_var.get()
+        app.capture_backend_var.set(capture_backend_code_by_display.get(selected_backend_display, "auto"))
+        app.save_settings()
+
+    app.capture_backend_combobox.bind("<<ComboboxSelected>>", create_combobox_handler_wrapper(on_capture_backend_changed))
     current_row += 1
 
     ttk.Label(frame, text=app.ui_lang.get_label("scan_interval_label")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w") 
@@ -1280,36 +1570,12 @@ def create_settings_tab(app):
     
     file_cache_frame_outer = ttk.LabelFrame(frame, text=app.ui_lang.get_label("file_cache_frame_title")) 
     file_cache_frame_outer.grid(row=current_row, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-    ttk.Label(file_cache_frame_outer, text=app.ui_lang.get_label("file_cache_description"), wraplength=400).grid(row=0, column=0, columnspan=2, padx=5, pady=2, sticky="w")
-    ttk.Checkbutton(file_cache_frame_outer, text=app.ui_lang.get_label("google_cache_checkbox"), variable=app.google_file_cache_var).grid(row=1, column=0, padx=5, pady=2, sticky="w")
-    ttk.Checkbutton(file_cache_frame_outer, text=app.ui_lang.get_label("deepl_cache_checkbox"), variable=app.deepl_file_cache_var).grid(row=2, column=0, padx=5, pady=2, sticky="w")
-    
-    # Gemini file cache checkbox (always visible here, not just when Gemini is selected)
-    app.gemini_file_cache_checkbox = ttk.Checkbutton(
-        file_cache_frame_outer, 
-        text=app.ui_lang.get_label("gemini_file_cache_checkbox", "Enable Gemini file cache"),
-        variable=app.gemini_file_cache_var,
-        command=lambda: [
-            log_debug(f"Gemini file cache toggled: {app.gemini_file_cache_var.get()}"),
-            app._fully_initialized and app.save_settings()
-        ]
-    )
-    app.gemini_file_cache_checkbox.grid(row=3, column=0, padx=5, pady=2, sticky="w")
-    
-    # OpenAI file cache checkbox (always visible here, not just when OpenAI is selected)
-    app.openai_file_cache_checkbox = ttk.Checkbutton(
-        file_cache_frame_outer, 
-        text=app.ui_lang.get_label("openai_file_cache_checkbox", "Enable OpenAI file cache"),
-        variable=app.openai_file_cache_var,
-        command=lambda: [
-            log_debug(f"OpenAI file cache toggled: {app.openai_file_cache_var.get()}"),
-            app._fully_initialized and app.save_settings()
-        ]
-    )
-    app.openai_file_cache_checkbox.grid(row=4, column=0, padx=5, pady=2, sticky="w")
-    
-    ttk.Label(file_cache_frame_outer, text=f"{app.ui_lang.get_label('cache_files_label')} {os.path.basename(app.google_cache_file)}, {os.path.basename(app.deepl_cache_file)}, {os.path.basename(app.gemini_cache_file)}, openai_cache.txt", wraplength=400).grid(row=5, column=0, columnspan=2, padx=5, pady=2, sticky="w")
-    ttk.Button(file_cache_frame_outer, text=app.ui_lang.get_label("clear_caches_btn"), command=app.clear_file_caches).grid(row=6, column=0, padx=5, pady=5, sticky="w")
+    ttk.Label(
+        file_cache_frame_outer,
+        text=app.ui_lang.get_label("file_cache_description", "Clear cached translations for the active custom AI configuration."),
+        wraplength=400
+    ).grid(row=0, column=0, columnspan=2, padx=5, pady=2, sticky="w")
+    ttk.Button(file_cache_frame_outer, text=app.ui_lang.get_label("clear_caches_btn"), command=app.clear_file_caches).grid(row=1, column=0, padx=5, pady=5, sticky="w")
     current_row += 1
     
     button_frame_outer = ttk.Frame(frame)
@@ -1322,141 +1588,11 @@ def create_settings_tab(app):
     
     frame.columnconfigure(1, weight=1)
 
-def create_api_usage_tab(app):
-    """Create the API Usage tab with provider-specific statistics."""
-    scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("api_usage_tab_title"))
-    app.tab_api_usage = scrollable_content
-    
-    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("api_usage_tab_title"))
-    frame.pack(fill="both", expand=True, padx=10, pady=10)
-    
-    current_row = 0
-
-    def create_stats_section(parent, provider, type, stats_keys, row_start):
-        section_key = f"api_usage_section_{provider.lower()}_{type.lower()}"
-        fallback_text = f"📊 {provider} {type} Statistics"
-        section = ttk.LabelFrame(parent, text=app.ui_lang.get_label(section_key, fallback_text))
-        section.grid(row=row_start, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
-        
-        labels_attr = f"{provider.lower()}_{type.lower()}_stat_labels"
-        vars_attr = f"{provider.lower()}_{type.lower()}_stat_vars"
-        setattr(app, labels_attr, {})
-        setattr(app, vars_attr, {})
-
-        for i, (key, fallback) in enumerate(stats_keys):
-            label = ttk.Label(section, text=app.ui_lang.get_label(key, fallback))
-            label.grid(row=i, column=0, padx=5, pady=2, sticky="w")
-            getattr(app, labels_attr)[key] = label
-            
-            var = tk.StringVar(value=app.ui_lang.get_label("api_usage_no_data", "No data available"))
-            value_label = ttk.Label(section, textvariable=var, foreground="blue")
-            value_label.grid(row=i, column=1, padx=5, pady=2, sticky="w")
-            getattr(app, vars_attr)[key] = var
-        
-        section.columnconfigure(1, weight=1)
-        return row_start + 1
-
-    trans_keys = [
-        ("api_usage_total_translation_calls", "Total Translation Calls"), ("api_usage_total_words_translated", "Total Words Translated"),
-        ("api_usage_median_duration_translation", "Median Duration"), ("api_usage_words_per_minute", "Average Words per Minute"),
-        ("api_usage_avg_cost_per_word", "Average Cost per Word"), ("api_usage_avg_cost_per_call", "Average Cost per Call"),
-        ("api_usage_avg_cost_per_minute", "Average Cost per Minute"), ("api_usage_avg_cost_per_hour", "Average Cost per Hour"),
-        ("api_usage_total_translation_cost", "Total Translation Cost")
-    ]
-    ocr_keys = [
-        ("api_usage_total_ocr_calls", "Total OCR Calls"), ("api_usage_median_duration_ocr", "Median Duration"),
-        ("api_usage_avg_cost_per_call", "Average Cost per Call"), ("api_usage_avg_cost_per_minute", "Average Cost per Minute"),
-        ("api_usage_avg_cost_per_hour", "Average Cost per Hour"), ("api_usage_total_ocr_cost", "Total OCR Cost")
-    ]
-    combined_keys = [
-        ("api_usage_combined_cost_per_minute", "Combined Cost per Minute"), ("api_usage_combined_cost_per_hour", "Combined Cost per Hour"),
-        ("api_usage_total_api_cost", "Total API Cost")
-    ]
-
-    current_row = create_stats_section(frame, "Gemini", "Translation", trans_keys, current_row)
-    current_row = create_stats_section(frame, "Gemini", "OCR", ocr_keys, current_row)
-    current_row = create_stats_section(frame, "Gemini", "Combined", combined_keys, current_row)
-    
-    current_row = create_stats_section(frame, "OpenAI", "Translation", trans_keys, current_row)
-    current_row = create_stats_section(frame, "OpenAI", "OCR", ocr_keys, current_row)
-    current_row = create_stats_section(frame, "OpenAI", "Combined", combined_keys, current_row)
-    
-    deepl_section = ttk.LabelFrame(frame, text=app.ui_lang.get_label("api_usage_section_deepl"))
-    deepl_section.grid(row=current_row, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
-    app.deepl_usage_label = ttk.Label(deepl_section, text=app.ui_lang.get_label("deepl_usage_label", "DeepL Usage"))
-    app.deepl_usage_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-    app.deepl_usage_var = tk.StringVar(value=app.ui_lang.get_label("deepl_usage_loading", "Loading..."))
-    app.deepl_usage_display = ttk.Label(deepl_section, textvariable=app.deepl_usage_var, foreground="blue")
-    app.deepl_usage_display.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-    deepl_section.columnconfigure(1, weight=1)
-    current_row += 1
-    
-    button_frame = ttk.Frame(frame)
-    button_frame.grid(row=current_row, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
-    
-    app.refresh_stats_button = ttk.Button(button_frame, 
-                                        text=app.ui_lang.get_label("api_usage_refresh_btn", "Refresh Statistics"),
-                                        command=app.refresh_api_statistics)
-    app.refresh_stats_button.pack(side=tk.LEFT, padx=5)
-    
-    app.export_csv_button = ttk.Button(button_frame,
-                                     text=app.ui_lang.get_label("api_usage_export_csv_btn", "Export to CSV"),
-                                     command=app.export_statistics_csv)
-    app.export_csv_button.pack(side=tk.LEFT, padx=5)
-    
-    app.export_text_button = ttk.Button(button_frame,
-                                      text=app.ui_lang.get_label("api_usage_export_text_btn", "Export to Text"),
-                                      command=app.export_statistics_text)
-    app.export_text_button.pack(side=tk.LEFT, padx=5)
-    
-    app.copy_stats_button = ttk.Button(button_frame,
-                                     text=app.ui_lang.get_label("api_usage_copy_btn", "Copy"),
-                                     command=app.copy_statistics_to_clipboard)
-    app.copy_stats_button.pack(side=tk.LEFT, padx=5)
-    current_row += 1
-    
-    info_frame = ttk.Frame(frame)
-    info_frame.grid(row=current_row, column=0, columnspan=2, padx=5, pady=(10, 5), sticky="ew")
-    
-    app.api_usage_info_label = ttk.Label(info_frame, 
-                                        text=app.ui_lang.get_label("api_usage_info_note", 
-                                            "ℹ️ Note: Statistics are based on the short log files (e.g., Gemini_OCR_Short_Log.txt). Data will be reset if these files are deleted or cleared."),
-                                        foreground="gray", 
-                                        justify=tk.LEFT, wraplength=600)
-    app.api_usage_info_label.pack(anchor="w", fill="x", padx=5, pady=2)
-    
-    def update_info_label_wraplength(event=None):
-        if hasattr(app, 'api_usage_info_label') and app.api_usage_info_label.winfo_exists():
-            try:
-                frame_width = info_frame.winfo_width()
-                if frame_width > 100:
-                    new_wraplength = max(200, frame_width - 20)
-                    app.api_usage_info_label.config(wraplength=new_wraplength)
-            except Exception as e:
-                pass
-    
-    info_frame.bind('<Configure>', update_info_label_wraplength)
-    app.update_info_label_wraplength = update_info_label_wraplength
-    
-    def update_api_usage_info_for_language():
-        if hasattr(app, 'api_usage_info_label') and app.api_usage_info_label.winfo_exists():
-            app.api_usage_info_label.config(text=app.ui_lang.get_label("api_usage_info_note", 
-                "ℹ️ Note: Statistics are based on the short log files (e.g., Gemini_OCR_Short_Log.txt). Data will be reset if these files are deleted or cleared."))
-            app.root.after_idle(update_info_label_wraplength)
-        log_debug("Updated API usage info label for language change")
-    
-    app.update_api_usage_info_for_language = update_api_usage_info_for_language
-    
-    frame.columnconfigure(0, weight=1)
-    frame.columnconfigure(1, weight=1)
-    
-    app.root.after_idle(lambda: app._delayed_api_stats_refresh() if hasattr(app, '_delayed_api_stats_refresh') else None)
-
 def create_debug_tab(app):
     # Create a scrollable tab content frame
     scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("debug_tab_title"))
     app.tab_debug = scrollable_content
-    
+
     # Create the debug frame inside the scrollable area
     frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("debug_tab_title"))
     frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -1475,29 +1611,89 @@ def create_debug_tab(app):
     app.processed_image_label.pack(padx=5, pady=5)
 
     ocr_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("ocr_results_label"))
-    ocr_frame.pack(fill="x", padx=5, pady=5)  # Remove expand=True
+    ocr_frame.pack(fill="x", padx=5, pady=5)
     app.ocr_results_text = tk.Text(ocr_frame, height=16, width=50, wrap=tk.WORD)
+    style_tk_text_widget(app.ocr_results_text, getattr(app, "md3_palette", None))
     app.ocr_results_text.pack(fill="both", expand=True, padx=5, pady=5)
     app.ocr_results_text.insert(tk.END, app.ui_lang.get_label("ocr_results_placeholder"))
     app.ocr_results_text.config(state=tk.DISABLED)
 
-    button_frame = ttk.Frame(frame) # Renamed to avoid conflict
+    button_frame = ttk.Frame(frame)
     button_frame.pack(fill="x", padx=5, pady=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("save_debug_images_btn"), command=app.save_debug_images).pack(side=tk.LEFT, padx=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("refresh_log_btn"), command=app.refresh_debug_log).pack(side=tk.LEFT, padx=5)
 
     log_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("app_log_label"))
     log_frame.pack(fill="both", expand=True, padx=5, pady=5)
-    
-    # Create text widget without fixed height to allow expansion
+
     app.log_text = tk.Text(log_frame, wrap=tk.WORD)
-    
-    # Add scrollbar
+    style_tk_text_widget(app.log_text, getattr(app, "md3_palette", None))
     scrollbar = ttk.Scrollbar(log_frame, command=app.log_text.yview)
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     app.log_text.config(yscrollcommand=scrollbar.set, state=tk.DISABLED)
-    
-    # Pack the text widget to fill the frame
     app.log_text.pack(fill="both", expand=True, padx=5, pady=5)
-    
+
     app.refresh_debug_log()
+
+def create_custom_prompt_tab(app):
+    # Create a scrollable tab content frame
+    scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("custom_prompt_tab_title", "Custom Prompt"))
+    app.tab_custom_prompt = scrollable_content
+    
+    # Create the main frame inside the scrollable area
+    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("custom_prompt_tab_title", "Custom Prompt"))
+    frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+    # Info label
+    info_text = app.ui_lang.get_label("custom_prompt_info", "This text will be added at the beginning of the custom AI translation instruction.")
+    info_label = ttk.Label(frame, text=info_text, wraplength=550)
+    info_label.pack(fill="x", padx=5, pady=5)
+
+    # Text area
+    text_frame = ttk.Frame(frame)
+    text_frame.pack(fill="both", expand=True, padx=5, pady=5)
+    
+    app.custom_prompt_text_widget = tk.Text(text_frame, wrap=tk.WORD, height=15)
+    style_tk_text_widget(app.custom_prompt_text_widget, getattr(app, "md3_palette", None))
+    scrollbar = ttk.Scrollbar(text_frame, command=app.custom_prompt_text_widget.yview)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    app.custom_prompt_text_widget.pack(side=tk.LEFT, fill="both", expand=True)
+    app.custom_prompt_text_widget.config(yscrollcommand=scrollbar.set)
+    
+    # Load initial text
+    if hasattr(app, "custom_prompt_text"):
+        app.custom_prompt_text_widget.insert("1.0", app.custom_prompt_text)
+
+    # Buttons
+    button_frame = ttk.Frame(frame)
+    button_frame.pack(fill="x", padx=5, pady=10)
+
+    def save_prompt():
+        text = app.custom_prompt_text_widget.get("1.0", "end-1c")
+        if not app.save_custom_prompt(text):
+            messagebox.showerror(app.ui_lang.get_label("error_title", "Error"), 
+                                 app.ui_lang.get_label("custom_prompt_save_error", "Failed to save custom prompt."))
+
+    def reload_prompt():
+        app.load_custom_prompt()
+        app.custom_prompt_text_widget.delete("1.0", tk.END)
+        app.custom_prompt_text_widget.insert("1.0", app.custom_prompt_text)
+
+    app.save_custom_prompt_btn = ttk.Button(button_frame, text=app.ui_lang.get_label("save_btn", "Save"), command=save_prompt)
+    app.save_custom_prompt_btn.pack(side=tk.LEFT, padx=5)
+
+    app.reload_custom_prompt_btn = ttk.Button(button_frame, text=app.ui_lang.get_label("reload_btn", "Reload"), command=reload_prompt)
+    app.reload_custom_prompt_btn.pack(side=tk.LEFT, padx=5)
+    
+    # Function to update labels on language change
+    def update_custom_prompt_labels_for_language():
+        if hasattr(app, 'tab_custom_prompt') and app.tab_custom_prompt.winfo_exists():
+            try:
+                frame.config(text=app.ui_lang.get_label("custom_prompt_tab_title", "Custom Prompt"))
+                info_label.config(text=app.ui_lang.get_label("custom_prompt_info", "This text will be added at the beginning of the custom AI translation instruction."))
+                app.save_custom_prompt_btn.config(text=app.ui_lang.get_label("save_btn", "Save"))
+                app.reload_custom_prompt_btn.config(text=app.ui_lang.get_label("reload_btn", "Reload"))
+            except Exception as e:
+                log_debug(f"Error updating custom prompt UI language: {e}")
+                
+    app.update_custom_prompt_labels_for_language = update_custom_prompt_labels_for_language
