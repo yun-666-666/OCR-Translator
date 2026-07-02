@@ -5,7 +5,11 @@ import re
 import tkinter as tk
 from tkinter import messagebox, colorchooser
 from config_manager import save_app_config 
-from logger import clear_debug_log as clear_runtime_debug_log, log_debug
+from logger import (
+    clear_debug_log as clear_runtime_debug_log,
+    log_debug,
+    read_debug_log_tail,
+)
 from ocr_utils import resolve_tessdata_dir_from_tesseract_path
 import traceback
 
@@ -1081,15 +1085,15 @@ class UIInteractionHandler:
         try:
             self.app.log_text.config(state=tk.NORMAL)
             self.app.log_text.delete(1.0, tk.END)
-            log_file = 'translator_debug.log'
-            if os.path.exists(log_file):
-                try:
-                    with open(log_file, 'r', encoding='utf-8-sig') as f: log_lines = f.readlines()
-                    start_index = max(0, len(log_lines) - 200)
-                    for line in log_lines[start_index:]: self.app.log_text.insert(tk.END, line)
-                    self.app.log_text.see(tk.END)
-                except Exception as read_err: self.app.log_text.insert(tk.END, f"Error reading log: {read_err}")
-            else: self.app.log_text.insert(tk.END, f"Log file not found: {log_file}")
+            try:
+                log_lines = read_debug_log_tail(max_lines=200)
+                for line in log_lines:
+                    self.app.log_text.insert(tk.END, line)
+                self.app.log_text.see(tk.END)
+            except FileNotFoundError:
+                self.app.log_text.insert(tk.END, "Log file not found: translator_debug.log")
+            except Exception as read_err:
+                self.app.log_text.insert(tk.END, f"Error reading log: {read_err}")
             self.app.log_text.config(state=tk.DISABLED)
         except Exception as e: log_debug(f"Error refreshing log text: {e}")
 

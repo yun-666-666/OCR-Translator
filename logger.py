@@ -190,6 +190,35 @@ def append_rotating_text(
     writer.write(text)
 
 
+def read_log_tail(filename, max_lines=200, block_size=8192):
+    """Read the last lines of a UTF-8 log without loading the whole file."""
+    max_lines = max(0, int(max_lines))
+    if max_lines == 0:
+        return []
+    block_size = max(256, int(block_size))
+    path = resolve_runtime_log_path(filename)
+
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        buffer = b""
+        while position > 0 and buffer.count(b"\n") <= max_lines:
+            read_size = min(block_size, position)
+            position -= read_size
+            stream.seek(position)
+            buffer = stream.read(read_size) + buffer
+
+    selected = b"".join(buffer.splitlines(keepends=True)[-max_lines:])
+    decoded = selected.decode("utf-8-sig", errors="replace")
+    normalized = decoded.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.splitlines(keepends=True)
+
+
+def read_debug_log_tail(max_lines=200):
+    """Read the active debug log tail."""
+    return read_log_tail(DEBUG_LOG_FILENAME, max_lines=max_lines)
+
+
 def close_log_writers():
     """Flush and close every process-local log writer."""
     with _writer_registry_lock:

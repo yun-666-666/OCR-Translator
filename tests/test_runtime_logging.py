@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -130,6 +131,16 @@ class RotatingTextWriterTests(unittest.TestCase):
                 r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}: hello\n$",
             )
 
+    def test_read_log_tail_returns_only_requested_utf8_lines(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            lines = [f"行-{index}\r\n" for index in range(500)]
+            path.write_text("".join(lines), encoding="utf-8-sig", newline="")
+
+            tail = logger.read_log_tail(path, max_lines=3, block_size=64)
+
+            self.assertEqual(tail, [line.replace("\r\n", "\n") for line in lines[-3:]])
+
     def test_custom_ai_short_log_uses_shared_rotating_writer(self):
         handler = object.__new__(TranslationHandler)
         handler._custom_session_started = set()
@@ -168,6 +179,28 @@ class RotatingTextWriterTests(unittest.TestCase):
 
         clear_log.assert_called_once_with()
         handler.refresh_debug_log.assert_called_once_with()
+
+    def test_ui_refresh_debug_log_uses_tail_reader(self):
+        log_text = types.SimpleNamespace(
+            winfo_exists=lambda: True,
+            config=Mock(),
+            delete=Mock(),
+            insert=Mock(),
+            see=Mock(),
+        )
+        handler = object.__new__(UIInteractionHandler)
+        handler.app = types.SimpleNamespace(log_text=log_text)
+
+        with patch(
+            "handlers.ui_interaction_handler.read_debug_log_tail",
+            create=True,
+            return_value=["first\n", "second\n"],
+        ) as read_tail:
+            handler.refresh_debug_log()
+
+        read_tail.assert_called_once_with(max_lines=200)
+        self.assertEqual(log_text.insert.call_count, 2)
+        log_text.see.assert_called_once()
 
 
 if __name__ == "__main__":
