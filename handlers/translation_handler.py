@@ -10,7 +10,7 @@ import threading
 import concurrent.futures
 from datetime import datetime, timedelta
 
-from logger import log_debug
+from logger import append_rotating_text, log_debug
 from unified_translation_cache import UnifiedTranslationCache
 from custom_ai import (
     CustomAIProvider,
@@ -661,25 +661,34 @@ Call Duration: {call_duration:.3f} seconds
             log_file = "CustomAI_OCR_Short_Log.txt" if call_type == "ocr" else "CustomAI_Translation_Short_Log.txt"
             if not hasattr(self, "_custom_session_started"):
                 self._custom_session_started = set()
+            session_header = ""
             if call_type not in self._custom_session_started:
-                with open(log_file, 'a', encoding='utf-8-sig') as f:
-                    f.write(f"\nSESSION 1 STARTED {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
-                self._custom_session_started.add(call_type)
+                session_header = (
+                    f"\nSESSION 1 STARTED "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
+                )
             header = "========= OCR CALL ===========" if call_type == "ocr" else "===== TRANSLATION CALL ======="
             cost = 0.0
             prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
             completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-            with open(log_file, 'a', encoding='utf-8-sig') as f:
-                f.write(
-                    f"{header}\n"
-                    f"Provider: {profile.get('name')}\n"
-                    f"Model: {profile.get('model')}\n"
-                    f"Duration: {duration:.3f}s\n"
-                    f"Input Tokens: {prompt_tokens}\n"
-                    f"Output Tokens: {completion_tokens}\n"
-                    f"Cost: ${cost:.8f}\n"
-                    f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
-                )
+            block = (
+                f"{session_header}"
+                f"{header}\n"
+                f"Provider: {profile.get('name')}\n"
+                f"Model: {profile.get('model')}\n"
+                f"Duration: {duration:.3f}s\n"
+                f"Input Tokens: {prompt_tokens}\n"
+                f"Output Tokens: {completion_tokens}\n"
+                f"Cost: ${cost:.8f}\n"
+                f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
+            )
+            append_rotating_text(
+                log_file,
+                block,
+                max_bytes=2 * 1024 * 1024,
+                backup_count=2,
+            )
+            self._custom_session_started.add(call_type)
         except Exception as e:
             log_debug(f"Custom AI short log write failed: {e}")
 

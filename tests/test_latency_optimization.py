@@ -1606,5 +1606,60 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
         self.assertIn("tesserocr", Path("setup.py").read_text(encoding="utf-8-sig").lower())
 
 
+class AdaptiveScanLoggingTests(unittest.TestCase):
+    @staticmethod
+    def _make_app(active_count=0):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.load_check_timer = 0.0
+        app.active_ocr_calls = set(range(active_count))
+        app.max_concurrent_ocr_calls = 8
+        app.current_scan_interval = 200
+        app.base_scan_interval = 200
+        app.overload_detected = False
+        app.scan_interval_var = types.SimpleNamespace(get=lambda: 200)
+        app._last_adaptive_log_state = None
+        app._last_adaptive_log_time = 0.0
+        return app
+
+    def test_unchanged_adaptive_state_logs_once_inside_heartbeat_window(self):
+        import app_logic
+
+        app = self._make_app(active_count=0)
+        with (
+            patch.object(
+                app_logic.time,
+                "monotonic",
+                side_effect=[2.1, 4.2, 6.3],
+            ),
+            patch.object(app_logic, "log_debug") as debug_log,
+        ):
+            app.update_adaptive_scan_interval()
+            app.update_adaptive_scan_interval()
+            app.update_adaptive_scan_interval()
+
+        self.assertEqual(debug_log.call_count, 1)
+
+    def test_adaptive_state_transition_logs_immediately(self):
+        import app_logic
+
+        app = self._make_app(active_count=0)
+        with (
+            patch.object(
+                app_logic.time,
+                "monotonic",
+                side_effect=[2.1, 4.2],
+            ),
+            patch.object(app_logic, "log_debug") as debug_log,
+        ):
+            app.update_adaptive_scan_interval()
+            app.active_ocr_calls = set(range(6))
+            app.update_adaptive_scan_interval()
+
+        self.assertEqual(debug_log.call_count, 2)
+        self.assertIn("overload detected", debug_log.call_args.args[0].lower())
+
+
 if __name__ == "__main__":
     unittest.main()

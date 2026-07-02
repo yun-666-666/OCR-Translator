@@ -5,7 +5,7 @@ import re
 import tkinter as tk
 from tkinter import messagebox, colorchooser
 from config_manager import save_app_config 
-from logger import log_debug
+from logger import clear_debug_log as clear_runtime_debug_log, log_debug
 from ocr_utils import resolve_tessdata_dir_from_tesseract_path
 import traceback
 
@@ -1346,9 +1346,7 @@ class UIInteractionHandler:
              
     def clear_debug_log(self):
         try:
-            log_filename = 'translator_debug.log' 
-            with open(log_filename, 'w', encoding='utf-8-sig') as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Debug log cleared by user.\n")
+            clear_runtime_debug_log()
             self.refresh_debug_log()
             if hasattr(self.app, 'status_label') and self.app.status_label.winfo_exists():
                 original_status_text = self.app.status_label.cget("text")

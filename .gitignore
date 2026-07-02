@@ -27,6 +27,7 @@ OCR_images/
 # Application specific files
 translator_debug*.log
 *.log
+*.log.*
 marian_models_cache/
 debug_images/
 artifacts/
@@ -43,6 +44,8 @@ gemini_cache*.txt
 openai_cache*.txt
 *_log*.txt
 *_Log.txt
+*_log*.txt.*
+*_Log.txt.*
 *_LOG.txt
 *API*Log*.txt
 *API*log*.txt

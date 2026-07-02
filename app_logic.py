@@ -198,6 +198,8 @@ class GameChangingTranslator:
         self.current_scan_interval = 500  # Dynamic value used by capture thread
         self.load_check_timer = 0
         self.overload_detected = False
+        self._last_adaptive_log_state = None
+        self._last_adaptive_log_time = 0.0
         log_debug("Initialized adaptive scan interval infrastructure")
         
         # OCR Preview window
@@ -883,9 +885,6 @@ class GameChangingTranslator:
         active_ocr_count = len(self.active_ocr_calls)
         max_ocr_calls = self.max_concurrent_ocr_calls
         
-        # DEBUG: Always log the current state
-        log_debug(f"ADAPTIVE: Checking OCR load - Active calls: {active_ocr_count}/{max_ocr_calls}, Current interval: {self.current_scan_interval}ms, Overload detected: {self.overload_detected}")
-        
         # Get user's preferred base interval
         base_interval = self.scan_interval_var.get()  # User's setting in milliseconds
         
@@ -896,14 +895,35 @@ class GameChangingTranslator:
         # If active OCR API calls > 5, increase scan interval to 150% of current value
         # If active OCR API calls fall below 5, restore original scan interval
         if active_ocr_count > 5:
+            adaptive_state = "overloaded"
+        elif active_ocr_count < 5:
+            adaptive_state = "normal"
+        else:
+            adaptive_state = "moderate"
+
+        previous_log_state = getattr(self, "_last_adaptive_log_state", None)
+        previous_log_time = getattr(self, "_last_adaptive_log_time", 0.0)
+        should_log_state = (
+            adaptive_state != previous_log_state
+            or now - previous_log_time >= 30.0
+        )
+        adaptive_log_message = None
+
+        if active_ocr_count > 5:
             if not self.overload_detected:
                 # First detection of overload
                 self.current_scan_interval = int(base_interval * 1.5)  # 150%
                 self.overload_detected = True
-                log_debug(f"ADAPTIVE: OCR overload detected ({active_ocr_count} active calls), increasing scan interval to {self.current_scan_interval}ms")
-            else:
+                adaptive_log_message = (
+                    f"ADAPTIVE: OCR overload detected ({active_ocr_count} active calls), "
+                    f"increasing scan interval to {self.current_scan_interval}ms"
+                )
+            elif should_log_state:
                 # Already in overload state, maintain increased interval
-                log_debug(f"ADAPTIVE: OCR still overloaded ({active_ocr_count} active calls), maintaining scan interval at {self.current_scan_interval}ms")
+                adaptive_log_message = (
+                    f"ADAPTIVE: OCR still overloaded ({active_ocr_count} active calls), "
+                    f"maintaining scan interval at {self.current_scan_interval}ms"
+                )
             # Stay at increased interval while overloaded
             
         elif active_ocr_count < 5:
@@ -911,13 +931,28 @@ class GameChangingTranslator:
                 # Load has decreased, return to normal
                 self.current_scan_interval = base_interval
                 self.overload_detected = False
-                log_debug(f"ADAPTIVE: OCR load normalized ({active_ocr_count} active calls), returning scan interval to {self.current_scan_interval}ms")
-            else:
+                adaptive_log_message = (
+                    f"ADAPTIVE: OCR load normalized ({active_ocr_count} active calls), "
+                    f"returning scan interval to {self.current_scan_interval}ms"
+                )
+            elif should_log_state:
                 # Normal state, no change needed
-                log_debug(f"ADAPTIVE: OCR load normal ({active_ocr_count} active calls), scan interval remains at {self.current_scan_interval}ms")
+                adaptive_log_message = (
+                    f"ADAPTIVE: OCR load normal ({active_ocr_count} active calls), "
+                    f"scan interval remains at {self.current_scan_interval}ms"
+                )
         else:
             # At exactly 5 calls, maintain current state
-            log_debug(f"ADAPTIVE: OCR load moderate ({active_ocr_count} active calls), scan interval unchanged at {self.current_scan_interval}ms")
+            if should_log_state:
+                adaptive_log_message = (
+                    f"ADAPTIVE: OCR load moderate ({active_ocr_count} active calls), "
+                    f"scan interval unchanged at {self.current_scan_interval}ms"
+                )
+
+        if adaptive_log_message:
+            log_debug(adaptive_log_message)
+            self._last_adaptive_log_state = adaptive_state
+            self._last_adaptive_log_time = now
     
     def handle_empty_ocr_result(self):
         """Handle <EMPTY> OCR result and manage clear translation timeout."""
