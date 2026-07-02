@@ -12,7 +12,7 @@ import gui_builder
 from custom_ai import CustomAIProfileManager, CustomAIProvider
 from gui_builder import filter_model_values, run_profile_network_task_async
 from language_ui import UILanguageManager
-from unified_translation_cache import UnifiedTranslationCache
+from unified_translation_cache import CACHE_SCHEMA_VERSION, UnifiedTranslationCache
 
 
 translation_handler_spec = importlib.util.spec_from_file_location(
@@ -1319,6 +1319,56 @@ class CustomAIProviderTests(unittest.TestCase):
                 **{**params, "reasoning_effort": "low"},
             )
         )
+
+    def test_full_cache_update_does_not_evict_another_entry(self):
+        cache = UnifiedTranslationCache(max_size=3)
+        for key in ("one", "two", "three"):
+            cache.store(key, "en", "zh-CN", "custom_ai", key)
+
+        cache.store("three", "en", "zh-CN", "custom_ai", "updated")
+
+        self.assertEqual(cache.get_stats()["total_entries"], 3)
+        self.assertEqual(cache.get("one", "en", "zh-CN", "custom_ai"), "one")
+        self.assertEqual(cache.get("three", "en", "zh-CN", "custom_ai"), "updated")
+
+    def test_persistent_load_trims_exactly_to_max_size(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            key_builder = UnifiedTranslationCache(max_size=20)
+            entries = []
+            for index in range(12):
+                cache_key = key_builder._generate_cache_key(
+                    f"text-{index}",
+                    "en",
+                    "zh-CN",
+                    "custom_ai",
+                )
+                entries.append(
+                    {
+                        "key": list(cache_key),
+                        "translation": f"value-{index}",
+                        "access_time": float(index),
+                    }
+                )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": CACHE_SCHEMA_VERSION,
+                        "entries": entries,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cache = UnifiedTranslationCache(max_size=3, persistence_path=cache_path)
+
+            self.assertEqual(cache.get_stats()["total_entries"], 3)
+            self.assertIsNone(cache.get("text-8", "en", "zh-CN", "custom_ai"))
+            self.assertEqual(
+                cache.get("text-11", "en", "zh-CN", "custom_ai"),
+                "value-11",
+            )
+            cache.close()
 
     def test_persistent_cache_restores_entries_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

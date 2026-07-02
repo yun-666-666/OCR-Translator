@@ -119,8 +119,9 @@ class UnifiedTranslationCache:
                     except Exception:
                         self._access_times[cache_key] = now
 
-                if len(self._cache) > self.max_size:
-                    self._evict_lru_entries()
+                excess_entries = len(self._cache) - self.max_size
+                if excess_entries > 0:
+                    self._evict_lru_entries(excess_entries)
 
             log_debug(f"Loaded {len(self._cache)} persisted unified cache entries")
         except Exception as e:
@@ -289,7 +290,7 @@ class UnifiedTranslationCache:
         
         with self.lock:
             # Evict old entries if cache is full
-            if len(self._cache) >= self.max_size:
+            if cache_key not in self._cache and len(self._cache) >= self.max_size:
                 self._evict_lru_entries()
             
             # Store the translation
@@ -311,9 +312,14 @@ class UnifiedTranslationCache:
         if late_snapshot is not None:
             self._write_snapshot(late_snapshot, late_generation)
     
-    def _evict_lru_entries(self):
+    def _evict_lru_entries(self, entries_to_evict=None):
         """Evict least recently used entries (10% of cache size)."""
-        evict_count = max(1, self.max_size // 10)
+        evict_count = (
+            max(1, self.max_size // 10)
+            if entries_to_evict is None
+            else max(0, int(entries_to_evict))
+        )
+        evict_count = min(evict_count, len(self._cache))
         
         # Sort by access time and remove oldest
         sorted_items = sorted(self._access_times.items(), key=lambda x: x[1])
