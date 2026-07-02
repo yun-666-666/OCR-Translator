@@ -16,7 +16,7 @@
 - Modify: `tests/test_custom_ai.py`
 - Modify: `unified_translation_cache.py`
 
-- [ ] **Step 1: Write failing capacity tests**
+- [x] **Step 1: Write failing capacity tests**
 
 ```python
 def test_full_cache_update_does_not_evict_another_entry(self):
@@ -33,7 +33,7 @@ def test_persistent_load_trims_exactly_to_max_size(self):
     self.assertEqual(cache.get_stats()["total_entries"], 3)
 ```
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -45,7 +45,7 @@ python -m unittest `
 
 Expected: the update leaves only two entries, and oversized loading remains above three.
 
-- [ ] **Step 3: Implement exact eviction semantics**
+- [x] **Step 3: Implement exact eviction semantics**
 
 ```python
 if cache_key not in self._cache and len(self._cache) >= self.max_size:
@@ -54,7 +54,7 @@ if cache_key not in self._cache and len(self._cache) >= self.max_size:
 
 Extend `_evict_lru_entries(entries_to_evict=None)` so persisted loading passes `len(self._cache) - self.max_size`, while normal insertion keeps the 10% batch.
 
-- [ ] **Step 4: Run focused tests and verify GREEN**
+- [x] **Step 4: Run focused tests and verify GREEN**
 
 Run the Step 2 command. Expected: both tests pass.
 
@@ -65,7 +65,7 @@ Run the Step 2 command. Expected: both tests pass.
 - Modify: `logger.py`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Write failing writer tests**
+- [x] **Step 1: Write failing writer tests**
 
 Cover stream reuse, bounded rotation, concurrent writes, safe clear/reuse, and test-path resolution:
 
@@ -79,7 +79,7 @@ self.assertIs(writer._stream, stream)
 
 Use multiple threads and assert every unique line is present exactly once across the active log and backups.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -89,7 +89,7 @@ python -m unittest tests.test_runtime_logging -v
 
 Expected: import errors because the writer and resolver do not exist.
 
-- [ ] **Step 3: Implement the writer registry and path resolver**
+- [x] **Step 3: Implement the writer registry and path resolver**
 
 `logger.py` will define:
 
@@ -106,7 +106,7 @@ def clear_debug_log(): ...
 
 `resolve_runtime_log_path()` uses `OCR_TRANSLATOR_LOG_DIR` when set, otherwise redirects unittest/pytest processes to a PID-specific system-temp directory. Register `close_log_writers()` with `atexit`.
 
-- [ ] **Step 4: Ignore numbered rotated files**
+- [x] **Step 4: Ignore numbered rotated files**
 
 Add:
 
@@ -116,7 +116,7 @@ Add:
 *_log.txt.*
 ```
 
-- [ ] **Step 5: Run logging tests and verify GREEN**
+- [x] **Step 5: Run logging tests and verify GREEN**
 
 Run the Step 2 command. Expected: all logging tests pass.
 
@@ -129,11 +129,11 @@ Run the Step 2 command. Expected: all logging tests pass.
 - Modify: `handlers/ui_interaction_handler.py`
 - Modify: `app_logic.py`
 
-- [ ] **Step 1: Write failing integration and throttling tests**
+- [x] **Step 1: Write failing integration and throttling tests**
 
 Assert Custom AI short calls use `append_rotating_text()`, UI clear calls `logger.clear_debug_log()`, repeated normal adaptive checks emit one message within 30 seconds, and a normal-to-overload transition logs immediately.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
 Run:
 
@@ -145,7 +145,7 @@ python -m unittest `
 
 Expected: failures because direct file opens and per-check logging remain.
 
-- [ ] **Step 3: Route raw and clear operations through logger APIs**
+- [x] **Step 3: Route raw and clear operations through logger APIs**
 
 Build one Custom AI short-log block and call:
 
@@ -155,7 +155,7 @@ append_rotating_text(log_file, block, max_bytes=2 * 1024 * 1024, backup_count=2)
 
 Replace direct truncation in `UIInteractionHandler.clear_debug_log()` with the logger-level clear API.
 
-- [ ] **Step 4: Add transition plus heartbeat adaptive logging**
+- [x] **Step 4: Add transition plus heartbeat adaptive logging**
 
 Initialize:
 
@@ -166,7 +166,7 @@ self._last_adaptive_log_time = 0.0
 
 Log only when the state bucket changes or 30 seconds elapsed, without changing interval decisions.
 
-- [ ] **Step 5: Run focused tests and verify GREEN**
+- [x] **Step 5: Run focused tests and verify GREEN**
 
 Run the Step 2 command. Expected: all integration and adaptive tests pass.
 
@@ -175,7 +175,7 @@ Run the Step 2 command. Expected: all integration and adaptive tests pass.
 **Files:**
 - Create: `.codex/handoffs/<timestamp>.md`
 
-- [ ] **Step 1: Run full automated verification**
+- [x] **Step 1: Run full automated verification**
 
 ```powershell
 python -m unittest tests.test_runtime_logging -v
@@ -184,15 +184,15 @@ python -m unittest discover
 python -m compileall -q logger.py unified_translation_cache.py handlers\translation_handler.py handlers\ui_interaction_handler.py app_logic.py tests
 ```
 
-- [ ] **Step 2: Run performance and isolation probes**
+- [x] **Step 2: Run performance and isolation probes**
 
 Compare 5,000 debug writes against the backed-up logger using temporary files. Hash the real runtime logs before and after full unit tests and assert they do not change.
 
-- [ ] **Step 3: Use Computer Use for visible desktop validation**
+- [x] **Step 3: Use Computer Use for visible desktop validation**
 
-Launch the source application, capture the Home and Debugging states, invoke the existing clear-debug-log control, verify the marker is visible, then close the app normally. Do not start live OCR or expose unrelated screen content.
+Launch the source application, inspect the Home and Debugging states, invoke the non-destructive refresh control, then close the app normally. The destructive clear control is covered by an automated test and is not clicked without action-time confirmation.
 
-- [ ] **Step 4: Review remaining hotspots**
+- [x] **Step 4: Review remaining hotspots**
 
 Reinspect fresh runtime logs and changed diffs. If another bounded, independently testable high-value issue is found, add its RED-GREEN increment before completion.
 
