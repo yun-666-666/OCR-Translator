@@ -1354,6 +1354,43 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(cache._cache.getitem_calls, 1)
         self.assertEqual(cache._cache.contains_calls, 0)
 
+    def test_get_stats_uses_provider_index_without_scanning_cache_keys(self):
+        class NoKeysDict(dict):
+            def keys(self):
+                raise AssertionError("full cache key scan should not run")
+
+        cache = UnifiedTranslationCache(max_size=10)
+        cache.store("one", "en", "zh-CN", "custom_ai", "one")
+        cache.store("two", "en", "zh-CN", "custom_ai", "two")
+        cache.store("three", "en", "zh-CN", "deepl_api", "three")
+        cache._cache = NoKeysDict(cache._cache)
+
+        stats = cache.get_stats()
+
+        self.assertEqual(stats["total_entries"], 3)
+        self.assertEqual(
+            stats["provider_breakdown"],
+            {"custom_ai": 2, "deepl_api": 1},
+        )
+
+    def test_clear_provider_uses_provider_index_without_scanning_cache_keys(self):
+        class NoKeysDict(dict):
+            def keys(self):
+                raise AssertionError("full cache key scan should not run")
+
+        cache = UnifiedTranslationCache(max_size=10)
+        cache.store("one", "en", "zh-CN", "custom_ai", "one")
+        cache.store("two", "en", "zh-CN", "custom_ai", "two")
+        cache.store("three", "en", "zh-CN", "deepl_api", "three")
+        cache._cache = NoKeysDict(cache._cache)
+
+        cache.clear_provider("custom_ai")
+
+        self.assertEqual(cache.get_stats()["total_entries"], 1)
+        self.assertIsNone(cache.get("one", "en", "zh-CN", "custom_ai"))
+        self.assertIsNone(cache.get("two", "en", "zh-CN", "custom_ai"))
+        self.assertEqual(cache.get("three", "en", "zh-CN", "deepl_api"), "three")
+
     def test_persistent_load_trims_exactly_to_max_size(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"

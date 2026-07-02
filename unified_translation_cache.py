@@ -46,6 +46,7 @@ class UnifiedTranslationCache:
         # Key format: (text_hash, source_lang, target_lang, provider, params_hash)
         self._cache = {}
         self._access_times = {}  # For LRU eviction
+        self._provider_keys = {}
 
         self._load_persisted_entries()
         
@@ -89,6 +90,23 @@ class UnifiedTranslationCache:
         
         return (text_hash, source_lang.lower(), target_lang.lower(), provider.lower(), params_hash)
 
+    def _add_provider_key_locked(self, cache_key):
+        self._provider_keys.setdefault(cache_key[3], set()).add(cache_key)
+
+    def _discard_provider_key_locked(self, cache_key):
+        provider = cache_key[3]
+        provider_keys = self._provider_keys.get(provider)
+        if provider_keys is None:
+            return
+        provider_keys.discard(cache_key)
+        if not provider_keys:
+            self._provider_keys.pop(provider, None)
+
+    def _remove_cache_entry_locked(self, cache_key):
+        self._cache.pop(cache_key, None)
+        self._access_times.pop(cache_key, None)
+        self._discard_provider_key_locked(cache_key)
+
     def _load_persisted_entries(self):
         if not self.persistence_path or not self.persistence_path.exists():
             return
@@ -115,6 +133,7 @@ class UnifiedTranslationCache:
                         continue
                     cache_key = tuple(str(part) for part in key_parts)
                     self._cache[cache_key] = translation
+                    self._add_provider_key_locked(cache_key)
                     try:
                         self._access_times[cache_key] = float(entry.get("access_time", now))
                     except Exception:
@@ -302,6 +321,8 @@ class UnifiedTranslationCache:
             
             # Store the translation
             self._cache[cache_key] = translation
+            if is_new_entry:
+                self._add_provider_key_locked(cache_key)
             self._access_times[cache_key] = time.time()
             if translation_changed:
                 self._persistence_generation += 1
@@ -336,8 +357,7 @@ class UnifiedTranslationCache:
             key=lambda indexed_item: (indexed_item[1][1], indexed_item[0]),
         )
         for _, (cache_key, _) in oldest_items:
-            self._cache.pop(cache_key, None)
-            self._access_times.pop(cache_key, None)
+            self._remove_cache_entry_locked(cache_key)
         
         log_debug(f"Evicted {evict_count} LRU cache entries")
     
@@ -347,6 +367,7 @@ class UnifiedTranslationCache:
             entries_cleared = len(self._cache)
             self._cache.clear()
             self._access_times.clear()
+            self._provider_keys.clear()
             self._persistence_generation += 1
             self._cancel_persistence_timer_locked()
             generation = self._persistence_generation
@@ -358,15 +379,14 @@ class UnifiedTranslationCache:
         """Clear cache entries for a specific provider."""
         with self.lock:
             provider_lower = provider.lower()
-            keys_to_remove = [k for k in self._cache.keys() if k[3] == provider_lower]
+            keys_to_remove = list(self._provider_keys.get(provider_lower, ()))
 
             if not keys_to_remove:
                 log_debug(f"Cleared 0 cache entries for provider: {provider}")
                 return
             
             for key in keys_to_remove:
-                self._cache.pop(key, None)
-                self._access_times.pop(key, None)
+                self._remove_cache_entry_locked(key)
 
             self._persistence_generation += 1
             self._cancel_persistence_timer_locked()
@@ -378,10 +398,10 @@ class UnifiedTranslationCache:
     def get_stats(self):
         """Get cache statistics."""
         with self.lock:
-            provider_counts = {}
-            for key in self._cache.keys():
-                provider = key[3]  # provider is at index 3
-                provider_counts[provider] = provider_counts.get(provider, 0) + 1
+            provider_counts = {
+                provider: len(keys)
+                for provider, keys in self._provider_keys.items()
+            }
             
             return {
                 "total_entries": len(self._cache),
