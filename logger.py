@@ -108,6 +108,16 @@ class _RotatingTextWriter:
                 self._stream.flush()
                 self._size_bytes = self._encoded_write_size(marker)
 
+    def read_tail(self, max_lines=200, block_size=8192):
+        with self._lock:
+            if self._stream is not None:
+                self._stream.flush()
+            return _read_log_tail_path(
+                self.path,
+                max_lines=max_lines,
+                block_size=block_size,
+            )
+
     def close(self):
         with self._lock:
             self._close_locked()
@@ -190,13 +200,11 @@ def append_rotating_text(
     writer.write(text)
 
 
-def read_log_tail(filename, max_lines=200, block_size=8192):
-    """Read the last lines of a UTF-8 log without loading the whole file."""
+def _read_log_tail_path(path, max_lines=200, block_size=8192):
     max_lines = max(0, int(max_lines))
     if max_lines == 0:
         return []
     block_size = max(256, int(block_size))
-    path = resolve_runtime_log_path(filename)
 
     with path.open("rb") as stream:
         stream.seek(0, os.SEEK_END)
@@ -214,9 +222,37 @@ def read_log_tail(filename, max_lines=200, block_size=8192):
     return normalized.splitlines(keepends=True)
 
 
+def read_log_tail(filename, max_lines=200, block_size=8192):
+    """Read the last lines of a UTF-8 log without loading the whole file."""
+    path = resolve_runtime_log_path(filename)
+    return _read_log_tail_path(
+        path,
+        max_lines=max_lines,
+        block_size=block_size,
+    )
+
+
+def read_shared_log_tail(
+    filename,
+    max_lines=200,
+    max_bytes=DEBUG_LOG_MAX_BYTES,
+    backup_count=DEBUG_LOG_BACKUP_COUNT,
+    block_size=8192,
+):
+    """Read a registered rotating log while holding its writer lock."""
+    path = resolve_runtime_log_path(filename)
+    writer = _get_writer(path, max_bytes, backup_count)
+    return writer.read_tail(max_lines=max_lines, block_size=block_size)
+
+
 def read_debug_log_tail(max_lines=200):
     """Read the active debug log tail."""
-    return read_log_tail(DEBUG_LOG_FILENAME, max_lines=max_lines)
+    return read_shared_log_tail(
+        DEBUG_LOG_FILENAME,
+        max_lines=max_lines,
+        max_bytes=DEBUG_LOG_MAX_BYTES,
+        backup_count=DEBUG_LOG_BACKUP_COUNT,
+    )
 
 
 def close_log_writers():

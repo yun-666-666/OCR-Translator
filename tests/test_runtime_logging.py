@@ -90,6 +90,52 @@ class RotatingTextWriterTests(unittest.TestCase):
             actual = set(path.read_text(encoding="utf-8-sig").splitlines())
             self.assertEqual(actual, expected)
 
+    def test_shared_tail_reader_does_not_race_with_windows_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            errors = []
+            producer_done = threading.Event()
+
+            def produce():
+                try:
+                    for index in range(1000):
+                        logger.append_rotating_text(
+                            path,
+                            f"line-{index}-" + ("x" * 40) + "\n",
+                            max_bytes=512,
+                            backup_count=2,
+                        )
+                except Exception as error:
+                    errors.append(error)
+                finally:
+                    producer_done.set()
+
+            def consume():
+                while not producer_done.is_set():
+                    try:
+                        logger.read_shared_log_tail(
+                            path,
+                            max_lines=20,
+                            max_bytes=512,
+                            backup_count=2,
+                            block_size=256,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    except Exception as error:
+                        errors.append(error)
+                        return
+
+            producer = threading.Thread(target=produce)
+            consumer = threading.Thread(target=consume)
+            producer.start()
+            consumer.start()
+            producer.join()
+            consumer.join()
+            logger.close_log_writers()
+
+            self.assertEqual(errors, [])
+
     def test_unittest_process_uses_pid_specific_temporary_log_directory(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("OCR_TRANSLATOR_LOG_DIR", None)
