@@ -1,0 +1,22 @@
+# Core dependencies
+numpy>=1.19.0
+opencv-python>=4.5.0
+tesserocr>=2.10.0
+Pillow>=8.0.0
+pyautogui>=0.9.53
+requests>=2.25.0
+mss>=9.0.0
+
+# GUI framework for RTL translation overlays
+# PINNED to 6.7.3 — Qt 6.8+ introduced a regression that breaks nativeEvent/WM_NCHITTEST
+# resizing for frameless windows with WA_TranslucentBackground on Windows.
+# The overlay becomes non-resizable on Qt 6.8 and later.
+# Re-test before upgrading: https://bugreports.qt.io (search "FramelessWindowHint resize 6.8")
+PySide6==6.7.3
+
+# Optional keyboard controls
+keyboard>=0.13.5
+
+# RTL (Right-to-Left) text processing for proper BiDi display
+python-bidi>=0.4.2
+arabic-reshaper>=3.0.0

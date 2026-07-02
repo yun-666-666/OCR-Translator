@@ -1,0 +1,200 @@
+﻿key,value
+main_tab_title,主页
+select_source_btn,选择源区域（OCR）
+select_target_btn,选择目标区域（翻译）
+start_btn,开始
+stop_btn,停止
+hide_source_btn,隐藏/显示源窗口
+hide_target_btn,隐藏/显示目标窗口
+clear_cache_btn,清空翻译缓存
+clear_debug_log_btn,清空调试日志
+toggle_debug_log_disable_btn,禁用调试日志
+toggle_debug_log_enable_btn,启用调试日志
+gui_language_label,界面语言
+keyboard_shortcuts_title,快捷键
+status_ready,状态：就绪
+status_ready_hotkey,状态：就绪（按 ~ 开始/停止）
+shortcut_start_stop,开始/停止翻译
+shortcut_toggle_source,切换源窗口可见性
+shortcut_toggle_target,切换翻译窗口可见性
+shortcut_save_settings,保存设置
+shortcut_clear_cache,清空缓存
+shortcut_clear_log,清空调试日志
+status_running,运行中（按 ~ 停止）
+status_stopped,已停止（按 ~ 开始）
+settings_tab_title,设置
+translation_model_label,翻译模型：
+translation_model_marianmt_offline,MarianMT（离线免费）
+ocr_model_label,OCR 模型：
+ocr_model_tesseract,Tesseract（离线）
+ocr_model_gemini,Gemini API（在线）
+capture_backend_label,截图后端：
+capture_backend_auto,自动（可用最快）
+capture_backend_mss,MSS（快速）
+capture_backend_pyautogui,PyAutoGUI（兼容）
+source_lang_label,源语言：
+target_lang_label,目标语言：
+marian_model_label,MarianMT 模型：
+google_api_key_label,Google Translate API Key：
+deepl_api_key_label,DeepL API Key：
+gemini_api_key_label,Gemini API Key：
+deepl_model_type_label,质量：
+gemini_context_window_label,上下文窗口：
+gemini_context_window_0,0（禁用）
+gemini_context_window_1,1（上一条字幕）
+gemini_context_window_2,2（两条字幕）
+gemini_context_window_3,3（三条字幕）
+gemini_context_window_4,4（四条字幕）
+gemini_context_window_5,5（五条字幕）
+openai_api_key_label,OpenAI API Key：
+openai_context_window_label,上下文窗口：
+openai_context_window_0,0（禁用）
+openai_context_window_1,1（上一条字幕）
+openai_context_window_2,2（两条字幕）
+openai_context_window_3,3（三条字幕）
+openai_context_window_4,4（四条字幕）
+openai_context_window_5,5（五条字幕）
+deepl_classic_model,经典
+deepl_nextgen_model,新一代
+deepl_context_window_label,上下文窗口：
+deepl_context_window_0,0（禁用）
+deepl_context_window_1,1（上一条字幕）
+deepl_context_window_2,2（两条字幕）
+deepl_context_window_3,3（三条字幕）
+custom_context_window_label,联系上下文句数：
+custom_ai_latency_mode_label,AI 响应模式：
+custom_ai_latency_mode_none,什么都不用
+custom_ai_latency_mode_safe,稳妥优先
+custom_ai_latency_mode_stream,流式刷新
+custom_ai_latency_mode_race,最快端点
+models_file_label,MarianMT 模型列表：
+beam_size_label,翻译 Beam Size（MarianMT）：
+tesseract_path_label,Tesseract 路径：
+scan_interval_label,扫描间隔（毫秒）：
+clear_timeout_label,清空翻译超时（秒）：
+stability_threshold_label,文本稳定阈值：
+confidence_threshold_label,OCR 置信度阈值：
+preprocessing_mode_label,图像预处理模式：
+ocr_debugging_label,OCR 调试：
+show_debug_checkbox,显示调试图像/文本
+preview_btn,预览
+adaptive_block_size_label,块大小（3-101，奇数）：
+adaptive_c_label,C 值（-75 到 75）：
+remove_trailing_label,移除尾部杂质：
+remove_trailing_checkbox,移除最后一个标点之后的文本
+source_color_label,源区域颜色：
+target_color_label,目标区域颜色：
+target_text_color_label,目标文本颜色：
+font_size_label,目标窗口字体大小：
+font_type_label,目标窗口字体：
+opacity_label,不透明度：
+opacity_background_label,背景：
+opacity_text_label,文本：
+file_cache_frame_title,文件缓存选项
+file_cache_description,文件缓存会把翻译保存到磁盘以减少 API 成本并提升性能。
+google_cache_checkbox,启用 Google Translate 文件缓存（保存到磁盘，减少 API 调用）
+deepl_cache_checkbox,启用 DeepL 文件缓存（保存到磁盘，减少 API 调用）
+gemini_file_cache_checkbox,启用 Gemini 文件缓存（保存到磁盘，减少 API 调用）
+openai_file_cache_checkbox,启用 OpenAI 文件缓存（保存到磁盘，减少 API 调用）
+cache_files_label,缓存文件：
+clear_caches_btn,清空文件缓存
+save_settings_btn,立即保存设置
+browse_btn,浏览
+show_btn,显示
+hide_btn,隐藏
+choose_color_btn,选择颜色
+debug_tab_title,调试
+original_image_label,原始图像
+processed_image_label,处理后图像
+ocr_results_label,Tesseract OCR 结果
+ocr_results_placeholder,翻译运行且 OCR 模型选择 Tesseract 时，OCR 结果会显示在这里。
+app_log_label,应用日志
+save_debug_images_btn,保存 OCR 图像
+refresh_log_btn,刷新日志
+preprocessing_none,无
+preprocessing_binary,二值化
+preprocessing_binary_inv,反向二值化
+preprocessing_adaptive,自适应
+settings_saved,状态：设置已保存
+no_image_captured,尚未捕获图像
+no_image_processed,尚未处理图像
+marian_beam_explanation,Beam 值越高，翻译质量可能越好但速度越慢
+marian_quality_note,提示：MarianMT 可提供较高质量的翻译
+marian_quality_vary,不同语言对的效果可能不同。
+marian_download_note,模型会在首次使用时下载（需要网络）。
+marian_unavailable_line1,MarianMT 不可用。若要启用，请安装：
+marian_unavailable_line2,pip install transformers torch sentencepiece
+browse_marian_models_title,选择 MarianMT 模型 CSV 文件
+browse_tesseract_title,选择 tesseract.exe
+choose_source_color_title,选择源区域颜色
+choose_target_color_title,选择目标区域颜色
+choose_target_text_color_title,选择目标文本颜色
+dialog_area_selected_title,区域已选择
+dialog_source_area_set_message,源区域已设置为：
+dialog_target_area_set_message,目标显示区域已设置为：
+dialog_debug_images_saved_title,OCR 图像已保存
+dialog_debug_images_saved_message,图像已保存到“{0}”。
+dialog_debug_image_saved_title,OCR 图像已保存
+dialog_debug_image_saved_message,原始图像已保存到“{0}”。没有处理后图像。
+ocr_preview_title,OCR 预览
+processed_image_preview,处理后图像（1:1 比例）
+recognized_text_preview,识别文本
+refresh_preview,刷新预览
+close_btn,关闭
+no_text_recognized,未识别到文本
+no_image_for_ocr,没有可用于 OCR 的图像
+gemini_total_words_label,总字数
+gemini_total_cost_label,总费用
+gemini_enable_api_log_checkbox,启用 API 日志
+gemini_reset_log_button,重置
+gemini_refresh_stats_button,刷新
+deepl_usage_label,免费月用量
+deepl_usage_loading,加载中...
+deepl_usage_unavailable,无法获取用量数据
+deepl_usage_error,获取用量数据时出错
+gemini_reset_success_title,成功
+gemini_reset_success_msg,Gemini API 日志已重置。
+gemini_reset_warning_title,警告
+gemini_reset_warning_msg,Gemini API 日志文件不存在。
+gemini_reset_error_title,错误
+gemini_reset_error_msg,无法访问 Gemini 日志文件。
+gemini_reset_error_failed,重置 Gemini API 日志失败：
+currency_usd, 美元
+mb_progress_of, MB / 
+mb_progress_format, MB（{0}%）
+file_type_csv,CSV 文件
+file_type_text,文本文件
+file_type_all,所有文件
+csv_header_provider,服务商
+csv_header_type,类型
+csv_header_metric,指标
+csv_header_value,数值
+csv_metric_free_monthly_limit,免费月额度
+custom_prompt_tab_title,自定义提示词
+custom_prompt_info,这段文本会添加到自定义 AI 翻译指令开头，并用于每一次 API 调用。请尽量写短以节省费用。建议使用英文以获得更稳定的效果。
+custom_prompt_saved,自定义提示词已保存！
+custom_prompt_save_error,保存自定义提示词失败。
+save_btn,保存
+reload_btn,重新加载
+custom_ai_no_profiles,添加 AI 模型预设
+ai_model_profiles_title,AI 模型预设
+ai_profile_name_label,名称
+ai_profile_url_label,API URL
+ai_profile_key_label,API Key
+ai_profile_model_label,模型
+fetch_model_list_btn,获取模型列表
+add_btn,添加
+delete_btn,删除
+test_btn,测试
+profile_error_title,预设错误
+delete_profile_title,删除预设
+delete_profile_confirm,确定删除预设“{0}”吗？
+connection_test_title,连接测试
+connection_test_success,响应：{0}；耗时：{1:.2f} 秒
+connection_test_failed_title,连接测试失败
+model_list_title,模型列表
+model_list_success,已获取 {0} 个模型。
+model_list_failed_title,获取模型列表失败
+start_error_title,启动错误
+start_error_no_translation_profile,启动前请先添加并选择一个 AI 模型预设。
+start_error_no_ocr_profile,启动前请为 OCR 添加并选择一个 AI 模型预设，或选择 Tesseract OCR。
