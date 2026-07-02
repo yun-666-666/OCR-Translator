@@ -196,6 +196,6 @@ Launch the source application, inspect the Home and Debugging states, invoke the
 
 Reinspect fresh runtime logs and changed diffs. If another bounded, independently testable high-value issue is found, add its RED-GREEN increment before completion.
 
-- [ ] **Step 5: Write handoff and commit**
+- [x] **Step 5: Write handoff and commit**
 
 Record backups, design decisions, TDD evidence, performance numbers, desktop observations, remaining issues, and Git state. Commit the implementation on the feature branch, fast-forward `main`, rerun full tests, and delete the merged feature branch.
