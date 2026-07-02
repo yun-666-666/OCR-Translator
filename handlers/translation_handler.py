@@ -139,6 +139,11 @@ class TranslationHandler:
 
     def close(self):
         try:
+            if hasattr(self.unified_cache, "close"):
+                self.unified_cache.close()
+        except Exception as e:
+            log_debug(f"Error closing unified translation cache: {e}")
+        try:
             if hasattr(self.custom_ai_provider, "close"):
                 self.custom_ai_provider.close()
         except Exception as e:
@@ -379,6 +384,8 @@ Call Duration: {call_duration:.3f} seconds
             cache_params.get("profile_id", ""),
             cache_params.get("base_url", ""),
             cache_params.get("model", ""),
+            cache_params.get("wire_api", "chat_completions"),
+            cache_params.get("reasoning_effort", ""),
             cache_params.get("custom_prompt", ""),
             cache_params.get("keep_linebreaks", False),
             cache_params.get("context", ()),
@@ -610,8 +617,16 @@ Call Duration: {call_duration:.3f} seconds
 
         return {
             "profile_id": profile.get("id", ""),
-            "base_url": profile.get("base_url", ""),
+            "base_url": str(profile.get("base_url", "")).strip().rstrip("/"),
             "model": profile.get("model", ""),
+            "wire_api": str(
+                profile.get("wire_api") or "chat_completions"
+            ).strip().lower(),
+            "reasoning_effort": str(
+                profile.get("reasoning_effort")
+                or profile.get("model_reasoning_effort")
+                or ""
+            ).strip().lower(),
             "custom_prompt": getattr(self.app, "custom_prompt_text", ""),
             "keep_linebreaks": keep_linebreaks,
             "context": tuple(self._get_custom_context_for_request()),

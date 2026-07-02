@@ -1286,6 +1286,40 @@ class CustomAIProviderTests(unittest.TestCase):
             )
         )
 
+    def test_cache_key_is_isolated_by_wire_api_and_reasoning_effort(self):
+        cache = UnifiedTranslationCache(max_size=10)
+        params = {
+            "profile_id": "profile-1",
+            "base_url": "https://host.example/v1/",
+            "model": "gpt-5.5",
+            "wire_api": "responses",
+            "reasoning_effort": "xhigh",
+        }
+        cache.store("Hello", "en", "zh-CN", "custom_ai", "你好", **params)
+
+        self.assertEqual(
+            cache.get("Hello", "en", "zh-CN", "custom_ai", **params),
+            "你好",
+        )
+        self.assertIsNone(
+            cache.get(
+                "Hello",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                **{**params, "wire_api": "chat_completions"},
+            )
+        )
+        self.assertIsNone(
+            cache.get(
+                "Hello",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                **{**params, "reasoning_effort": "low"},
+            )
+        )
+
     def test_persistent_cache_restores_entries_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
@@ -1300,6 +1334,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 base_url="https://host.example/v1",
                 model="demo-model",
             )
+            cache.flush()
 
             restored = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
 
@@ -1346,6 +1381,129 @@ class CustomAIProviderTests(unittest.TestCase):
                 )
             )
 
+    def test_persistent_cache_store_is_deferred_until_flush(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("Bonjour", "fr", "en", "custom_ai", "Hello")
+
+            self.assertFalse(cache_path.exists())
+            self.assertTrue(cache.flush())
+            self.assertTrue(cache_path.exists())
+            cache.close()
+
+    def test_persistent_cache_coalesces_multiple_stores(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("one", "en", "zh-CN", "custom_ai", "一")
+            first_timer = cache._persistence_timer
+            cache.store("two", "en", "zh-CN", "custom_ai", "二")
+
+            self.assertIs(cache._persistence_timer, first_timer)
+            self.assertTrue(cache.flush())
+            restored = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+            self.assertEqual(restored.get("one", "en", "zh-CN", "custom_ai"), "一")
+            self.assertEqual(restored.get("two", "en", "zh-CN", "custom_ai"), "二")
+            cache.close()
+            restored.close()
+
+    def test_persistent_cache_close_flushes_pending_entries(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("Bonjour", "fr", "en", "custom_ai", "Hello")
+            cache.close()
+
+            restored = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+            self.assertEqual(
+                restored.get("Bonjour", "fr", "en", "custom_ai"),
+                "Hello",
+            )
+            restored.close()
+
+    def test_persistent_cache_store_after_close_is_synchronously_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.close()
+
+            cache.store("late", "en", "zh-CN", "custom_ai", "迟到")
+
+            restored = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+            self.assertEqual(
+                restored.get("late", "en", "zh-CN", "custom_ai"),
+                "迟到",
+            )
+            restored.close()
+
+    def test_persistent_cache_clear_cannot_be_resurrected(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("Bonjour", "fr", "en", "custom_ai", "Hello")
+            cache.clear_all()
+            cache.close()
+
+            self.assertFalse(cache_path.exists())
+            restored = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+            self.assertIsNone(restored.get("Bonjour", "fr", "en", "custom_ai"))
+            restored.close()
+
+    def test_persistent_cache_ignores_legacy_schema(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            legacy_cache = UnifiedTranslationCache(max_size=10)
+            legacy_key = legacy_cache._generate_cache_key(
+                "Bonjour",
+                "fr",
+                "en",
+                "custom_ai",
+            )
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "key": list(legacy_key),
+                                "translation": "Legacy value",
+                                "access_time": time.time(),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cache = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+
+            self.assertIsNone(cache.get("Bonjour", "fr", "en", "custom_ai"))
+            cache.close()
+
 
 class DummyVar:
     def __init__(self, value):
@@ -1356,6 +1514,53 @@ class DummyVar:
 
 
 class TranslationHandlerCustomAITests(unittest.TestCase):
+    def test_inflight_key_isolated_by_wire_api_and_reasoning_effort(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Translator",
+            "base_url": "https://host.example/v1/",
+            "api_key": "super-secret",
+            "model": "gpt-5.5",
+            "wire_api": "responses",
+            "reasoning_effort": "xhigh",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(0)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+
+        responses_xhigh_key = handler.get_inflight_translation_key("Hello")
+        profile["wire_api"] = "chat_completions"
+        chat_xhigh_key = handler.get_inflight_translation_key("Hello")
+        profile["reasoning_effort"] = "low"
+        chat_low_key = handler.get_inflight_translation_key("Hello")
+
+        self.assertNotEqual(responses_xhigh_key, chat_xhigh_key)
+        self.assertNotEqual(chat_xhigh_key, chat_low_key)
+        handler.close()
+
+    def test_close_flushes_cache_and_closes_provider(self):
+        handler = TranslationHandler(object())
+        events = []
+        handler.unified_cache = Mock()
+        handler.unified_cache.close.side_effect = lambda: events.append("cache")
+        handler.custom_ai_provider = Mock()
+        handler.custom_ai_provider.close.side_effect = lambda: events.append("provider")
+
+        handler.close()
+
+        self.assertEqual(events, ["cache", "provider"])
+
     def test_custom_ai_ocr_provider_errors_are_returned_visibly(self):
         class Profiles:
             def get_active_profile(self, kind):
@@ -1522,11 +1727,13 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             first_handler.custom_ai_provider.translate = Mock(return_value=("translated", {}, 0.01))
 
             self.assertEqual(first_handler._custom_ai_translate("current", 0.0), "translated")
+            first_handler.close()
 
             second_handler = TranslationHandler(App(cache_path))
             second_handler.custom_ai_provider.translate = Mock(side_effect=AssertionError("provider should not be called"))
 
             self.assertEqual(second_handler._custom_ai_translate("current", 0.0), "translated")
+            second_handler.close()
 
     def test_custom_ai_translation_errors_are_not_persisted(self):
         profile = {

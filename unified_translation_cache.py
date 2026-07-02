@@ -8,6 +8,10 @@ from pathlib import Path
 
 from logger import log_debug
 
+
+CACHE_SCHEMA_VERSION = 2
+
+
 class UnifiedTranslationCache:
     """
     Unified translation cache for all translation providers.
@@ -15,7 +19,12 @@ class UnifiedTranslationCache:
     Thread-safe, configurable, and integrates with existing file caches.
     """
     
-    def __init__(self, max_size=1000, persistence_path=None):
+    def __init__(
+        self,
+        max_size=1000,
+        persistence_path=None,
+        persistence_delay_seconds=0.25,
+    ):
         """
         Initialize the unified translation cache.
         
@@ -25,6 +34,12 @@ class UnifiedTranslationCache:
         self.max_size = max_size
         self.lock = threading.RLock()
         self.persistence_path = Path(persistence_path) if persistence_path else None
+        self.persistence_delay_seconds = max(0.0, float(persistence_delay_seconds))
+        self._persistence_lock = threading.Lock()
+        self._persistence_timer = None
+        self._persistence_generation = 0
+        self._persisted_generation = 0
+        self._closed = False
         
         # Unified cache storage
         # Key format: (text_hash, source_lang, target_lang, provider, params_hash)
@@ -52,8 +67,14 @@ class UnifiedTranslationCache:
             params_str = json.dumps(
                 {
                     "profile_id": kwargs.get("profile_id", ""),
-                    "base_url": kwargs.get("base_url", ""),
+                    "base_url": str(kwargs.get("base_url", "")).strip().rstrip("/"),
                     "model": kwargs.get("model", ""),
+                    "wire_api": str(
+                        kwargs.get("wire_api") or "chat_completions"
+                    ).strip().lower(),
+                    "reasoning_effort": str(
+                        kwargs.get("reasoning_effort") or ""
+                    ).strip().lower(),
                     "custom_prompt": kwargs.get("custom_prompt", ""),
                     "keep_linebreaks": bool(kwargs.get("keep_linebreaks", False)),
                     "context": list(kwargs.get("context", ()) or ()),
@@ -74,6 +95,14 @@ class UnifiedTranslationCache:
         try:
             with self.persistence_path.open("r", encoding="utf-8") as f:
                 payload = json.load(f)
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version") != CACHE_SCHEMA_VERSION
+            ):
+                with self.lock:
+                    self._persistence_generation += 1
+                log_debug("Ignored legacy unified cache persistence schema")
+                return
             entries = payload.get("entries", []) if isinstance(payload, dict) else []
             now = time.time()
 
@@ -97,36 +126,114 @@ class UnifiedTranslationCache:
         except Exception as e:
             log_debug(f"Unified cache persistence load failed: {e}")
 
-    def _persist_to_disk_locked(self):
-        if not self.persistence_path:
+    def _snapshot_locked(self):
+        now = time.time()
+        return [
+            {
+                "key": list(cache_key),
+                "translation": translation,
+                "access_time": self._access_times.get(cache_key, now),
+            }
+            for cache_key, translation in self._cache.items()
+        ]
+
+    def _cancel_persistence_timer_locked(self):
+        timer = self._persistence_timer
+        self._persistence_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _schedule_persistence_locked(self):
+        if (
+            not self.persistence_path
+            or self._closed
+            or self._persistence_timer is not None
+        ):
             return
 
-        try:
-            if self.persistence_path.parent:
-                self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
+        timer = threading.Timer(
+            self.persistence_delay_seconds,
+            self._run_scheduled_persistence,
+        )
+        timer.daemon = True
+        self._persistence_timer = timer
+        timer.start()
 
-            if not self._cache:
-                if self.persistence_path.exists():
-                    self.persistence_path.unlink()
+    def _run_scheduled_persistence(self):
+        with self.lock:
+            self._persistence_timer = None
+            if self._closed:
                 return
+            generation = self._persistence_generation
+            snapshot = self._snapshot_locked()
 
-            payload = {
-                "entries": [
-                    {
-                        "key": list(cache_key),
-                        "translation": translation,
-                        "access_time": self._access_times.get(cache_key, time.time()),
+        succeeded = self._write_snapshot(snapshot, generation)
+
+        with self.lock:
+            if (
+                succeeded
+                and not self._closed
+                and self._persisted_generation < self._persistence_generation
+            ):
+                self._schedule_persistence_locked()
+
+    def _write_snapshot(self, snapshot, generation):
+        if not self.persistence_path:
+            return True
+
+        with self._persistence_lock:
+            with self.lock:
+                if generation <= self._persisted_generation:
+                    return True
+
+            try:
+                if self.persistence_path.parent:
+                    self.persistence_path.parent.mkdir(parents=True, exist_ok=True)
+
+                temp_path = self.persistence_path.with_suffix(
+                    self.persistence_path.suffix + ".tmp"
+                )
+                if not snapshot:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                    if self.persistence_path.exists():
+                        self.persistence_path.unlink()
+                else:
+                    payload = {
+                        "schema_version": CACHE_SCHEMA_VERSION,
+                        "entries": snapshot,
                     }
-                    for cache_key, translation in self._cache.items()
-                ]
-            }
+                    with temp_path.open("w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False, indent=2)
+                    os.replace(temp_path, self.persistence_path)
+            except Exception as e:
+                log_debug(f"Unified cache persistence save failed: {e}")
+                return False
 
-            temp_path = self.persistence_path.with_suffix(self.persistence_path.suffix + ".tmp")
-            with temp_path.open("w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(temp_path, self.persistence_path)
-        except Exception as e:
-            log_debug(f"Unified cache persistence save failed: {e}")
+            with self.lock:
+                self._persisted_generation = max(
+                    self._persisted_generation,
+                    generation,
+                )
+            return True
+
+    def flush(self):
+        """Synchronously persist the latest cache snapshot."""
+        with self.lock:
+            self._cancel_persistence_timer_locked()
+            generation = self._persistence_generation
+            if generation <= self._persisted_generation:
+                return True
+            snapshot = self._snapshot_locked()
+
+        return self._write_snapshot(snapshot, generation)
+
+    def close(self):
+        """Flush pending persistence and stop future timer scheduling."""
+        with self.lock:
+            self._closed = True
+            self._cancel_persistence_timer_locked()
+        return self.flush()
     
     def get(self, text, source_lang, target_lang, provider, **kwargs):
         """
@@ -177,6 +284,8 @@ class UnifiedTranslationCache:
             **kwargs: Provider-specific parameters (e.g., beam_size for MarianMT, model_type for DeepL)
         """
         cache_key = self._generate_cache_key(text, source_lang, target_lang, provider, **kwargs)
+        late_snapshot = None
+        late_generation = None
         
         with self.lock:
             # Evict old entries if cache is full
@@ -186,13 +295,21 @@ class UnifiedTranslationCache:
             # Store the translation
             self._cache[cache_key] = translation
             self._access_times[cache_key] = time.time()
-            self._persist_to_disk_locked()
+            self._persistence_generation += 1
+            if self._closed:
+                late_generation = self._persistence_generation
+                late_snapshot = self._snapshot_locked()
+            else:
+                self._schedule_persistence_locked()
             
             # Enhanced debug logging for DeepL model types
             if provider.lower() == "deepl_api" and "model_type" in kwargs:
                 log_debug(f"Unified cache STORE: {provider} {source_lang}->{target_lang} (model_type={kwargs['model_type']})")
             else:
                 log_debug(f"Unified cache STORE: {provider} {source_lang}->{target_lang}")
+
+        if late_snapshot is not None:
+            self._write_snapshot(late_snapshot, late_generation)
     
     def _evict_lru_entries(self):
         """Evict least recently used entries (10% of cache size)."""
@@ -212,8 +329,12 @@ class UnifiedTranslationCache:
             entries_cleared = len(self._cache)
             self._cache.clear()
             self._access_times.clear()
-            self._persist_to_disk_locked()
-            log_debug(f"Cleared unified translation cache ({entries_cleared} entries)")
+            self._persistence_generation += 1
+            self._cancel_persistence_timer_locked()
+            generation = self._persistence_generation
+            snapshot = self._snapshot_locked()
+        self._write_snapshot(snapshot, generation)
+        log_debug(f"Cleared unified translation cache ({entries_cleared} entries)")
     
     def clear_provider(self, provider):
         """Clear cache entries for a specific provider."""
@@ -225,9 +346,12 @@ class UnifiedTranslationCache:
                 self._cache.pop(key, None)
                 self._access_times.pop(key, None)
 
-            self._persist_to_disk_locked()
-            
-            log_debug(f"Cleared {len(keys_to_remove)} cache entries for provider: {provider}")
+            self._persistence_generation += 1
+            self._cancel_persistence_timer_locked()
+            generation = self._persistence_generation
+            snapshot = self._snapshot_locked()
+        self._write_snapshot(snapshot, generation)
+        log_debug(f"Cleared {len(keys_to_remove)} cache entries for provider: {provider}")
     
     def get_stats(self):
         """Get cache statistics."""
