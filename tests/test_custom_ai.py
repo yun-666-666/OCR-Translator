@@ -1331,6 +1331,29 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(cache.get("one", "en", "zh-CN", "custom_ai"), "one")
         self.assertEqual(cache.get("three", "en", "zh-CN", "custom_ai"), "updated")
 
+    def test_cache_hit_uses_single_dictionary_lookup(self):
+        class CountingDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.contains_calls = 0
+                self.getitem_calls = 0
+
+            def __contains__(self, key):
+                self.contains_calls += 1
+                return super().__contains__(key)
+
+            def __getitem__(self, key):
+                self.getitem_calls += 1
+                return super().__getitem__(key)
+
+        cache = UnifiedTranslationCache(max_size=10)
+        cache.store("Hello", "en", "zh-CN", "custom_ai", "你好")
+        cache._cache = CountingDict(cache._cache)
+
+        self.assertEqual(cache.get("Hello", "en", "zh-CN", "custom_ai"), "你好")
+        self.assertEqual(cache._cache.getitem_calls, 1)
+        self.assertEqual(cache._cache.contains_calls, 0)
+
     def test_persistent_load_trims_exactly_to_max_size(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
@@ -1369,6 +1392,41 @@ class CustomAIProviderTests(unittest.TestCase):
                 "value-11",
             )
             cache.close()
+
+    def test_lru_eviction_avoids_full_cache_sort(self):
+        import unified_translation_cache as cache_module
+
+        cache = UnifiedTranslationCache(max_size=10)
+        cache_keys = []
+        for index in range(10):
+            text = f"text-{index}"
+            cache.store(text, "en", "zh-CN", "custom_ai", f"value-{index}")
+            cache_keys.append(
+                cache._generate_cache_key(text, "en", "zh-CN", "custom_ai")
+            )
+
+        with cache.lock:
+            for index, cache_key in enumerate(cache_keys):
+                cache._access_times[cache_key] = float(index)
+
+        with patch.object(
+            cache_module,
+            "sorted",
+            side_effect=AssertionError("full cache sort should not run"),
+            create=True,
+        ):
+            cache.store("new", "en", "zh-CN", "custom_ai", "new-value")
+
+        self.assertEqual(cache.get_stats()["total_entries"], 10)
+        self.assertIsNone(cache.get("text-0", "en", "zh-CN", "custom_ai"))
+        self.assertEqual(
+            cache.get("text-1", "en", "zh-CN", "custom_ai"),
+            "value-1",
+        )
+        self.assertEqual(
+            cache.get("new", "en", "zh-CN", "custom_ai"),
+            "new-value",
+        )
 
     def test_persistent_cache_restores_entries_from_disk(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1431,6 +1489,30 @@ class CustomAIProviderTests(unittest.TestCase):
                 )
             )
 
+    def test_persistent_cache_clear_missing_provider_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("Bonjour", "fr", "en", "custom_ai", "Hello")
+            self.assertTrue(cache.flush())
+            persisted_generation = cache._persisted_generation
+
+            cache.clear_provider("deepl_api")
+
+            self.assertEqual(cache._persistence_generation, persisted_generation)
+            self.assertIsNone(cache._persistence_timer)
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(
+                cache.get("Bonjour", "fr", "en", "custom_ai"),
+                "Hello",
+            )
+            cache.close()
+
     def test_persistent_cache_store_is_deferred_until_flush(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
@@ -1446,6 +1528,36 @@ class CustomAIProviderTests(unittest.TestCase):
             self.assertTrue(cache.flush())
             self.assertTrue(cache_path.exists())
             cache.close()
+
+    def test_persistent_cache_repeated_same_store_only_refreshes_lru(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.json"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            try:
+                cache.store("Hello", "en", "zh-CN", "custom_ai", "你好")
+                self.assertTrue(cache.flush())
+                cache_key = cache._generate_cache_key(
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    "custom_ai",
+                )
+                first_access_time = cache._access_times[cache_key]
+                persisted_generation = cache._persisted_generation
+
+                with patch("unified_translation_cache.time.time", return_value=first_access_time + 10.0):
+                    cache.store("Hello", "en", "zh-CN", "custom_ai", "你好")
+
+                self.assertEqual(cache._access_times[cache_key], first_access_time + 10.0)
+                self.assertEqual(cache._persistence_generation, persisted_generation)
+                self.assertIsNone(cache._persistence_timer)
+            finally:
+                cache.close()
 
     def test_persistent_cache_coalesces_multiple_stores(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

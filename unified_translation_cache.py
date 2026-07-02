@@ -1,5 +1,6 @@
 # unified_translation_cache.py
 import hashlib
+import heapq
 import json
 import os
 import threading
@@ -253,10 +254,18 @@ class UnifiedTranslationCache:
         cache_key = self._generate_cache_key(text, source_lang, target_lang, provider, **kwargs)
         
         with self.lock:
-            if cache_key in self._cache:
+            try:
+                translation = self._cache[cache_key]
+            except KeyError:
+                # Enhanced debug logging for DeepL model types
+                if provider.lower() == "deepl_api" and "model_type" in kwargs:
+                    log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang} (model_type={kwargs['model_type']})")
+                else:
+                    log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang}")
+                return None
+            else:
                 # Update access time for LRU
                 self._access_times[cache_key] = time.time()
-                translation = self._cache[cache_key]
                 
                 # Enhanced debug logging for DeepL model types
                 if provider.lower() == "deepl_api" and "model_type" in kwargs:
@@ -264,13 +273,6 @@ class UnifiedTranslationCache:
                 else:
                     log_debug(f"Unified cache HIT: {provider} {source_lang}->{target_lang}")
                 return translation
-            
-            # Enhanced debug logging for DeepL model types
-            if provider.lower() == "deepl_api" and "model_type" in kwargs:
-                log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang} (model_type={kwargs['model_type']})")
-            else:
-                log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang}")
-            return None
     
     def store(self, text, source_lang, target_lang, provider, translation, **kwargs):
         """
@@ -287,21 +289,27 @@ class UnifiedTranslationCache:
         cache_key = self._generate_cache_key(text, source_lang, target_lang, provider, **kwargs)
         late_snapshot = None
         late_generation = None
+        missing = object()
         
         with self.lock:
+            existing_translation = self._cache.get(cache_key, missing)
+            is_new_entry = existing_translation is missing
+            translation_changed = is_new_entry or existing_translation != translation
+
             # Evict old entries if cache is full
-            if cache_key not in self._cache and len(self._cache) >= self.max_size:
+            if is_new_entry and len(self._cache) >= self.max_size:
                 self._evict_lru_entries()
             
             # Store the translation
             self._cache[cache_key] = translation
             self._access_times[cache_key] = time.time()
-            self._persistence_generation += 1
-            if self._closed:
-                late_generation = self._persistence_generation
-                late_snapshot = self._snapshot_locked()
-            else:
-                self._schedule_persistence_locked()
+            if translation_changed:
+                self._persistence_generation += 1
+                if self._closed:
+                    late_generation = self._persistence_generation
+                    late_snapshot = self._snapshot_locked()
+                else:
+                    self._schedule_persistence_locked()
             
             # Enhanced debug logging for DeepL model types
             if provider.lower() == "deepl_api" and "model_type" in kwargs:
@@ -321,9 +329,13 @@ class UnifiedTranslationCache:
         )
         evict_count = min(evict_count, len(self._cache))
         
-        # Sort by access time and remove oldest
-        sorted_items = sorted(self._access_times.items(), key=lambda x: x[1])
-        for cache_key, _ in sorted_items[:evict_count]:
+        # Select only the entries we need instead of sorting the whole cache.
+        oldest_items = heapq.nsmallest(
+            evict_count,
+            enumerate(self._access_times.items()),
+            key=lambda indexed_item: (indexed_item[1][1], indexed_item[0]),
+        )
+        for _, (cache_key, _) in oldest_items:
             self._cache.pop(cache_key, None)
             self._access_times.pop(cache_key, None)
         
@@ -347,6 +359,10 @@ class UnifiedTranslationCache:
         with self.lock:
             provider_lower = provider.lower()
             keys_to_remove = [k for k in self._cache.keys() if k[3] == provider_lower]
+
+            if not keys_to_remove:
+                log_debug(f"Cleared 0 cache entries for provider: {provider}")
+                return
             
             for key in keys_to_remove:
                 self._cache.pop(key, None)
