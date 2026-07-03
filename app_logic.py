@@ -366,7 +366,7 @@ class GameChangingTranslator:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.custom_ai_translation_cache_file = os.path.join(
             self.base_dir,
-            "custom_ai_translation_cache.json",
+            "custom_ai_translation_cache.sqlite3",
         )
         
         # Initialize Handlers

@@ -104,6 +104,8 @@ ocr_translator_config.ini
 custom_ai_profiles.json
 custom_ai_translation_cache.json
 custom_ai_translation_cache.json.tmp
+custom_ai_translation_cache.sqlite3
+custom_ai_translation_cache.sqlite3.tmp
 
 # Codex session backups are local rollback artifacts
 .codex/backups/

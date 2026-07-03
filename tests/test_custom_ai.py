@@ -1496,6 +1496,56 @@ class CustomAIProviderTests(unittest.TestCase):
                 "Hello again",
             )
 
+    def test_persistent_cache_flush_creates_sqlite_database(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(max_size=10, persistence_path=cache_path)
+
+            cache.store("Bonjour", "fr", "en", "custom_ai", "Hello")
+
+            self.assertTrue(cache.flush())
+            self.assertTrue(cache_path.exists())
+            self.assertEqual(cache_path.read_bytes()[:16], b"SQLite format 3\x00")
+            cache.close()
+
+    def test_persistent_cache_migrates_legacy_json_to_sqlite(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sqlite_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            legacy_json_path = Path(tmp_dir) / "custom_ai_cache.json"
+            legacy_cache = UnifiedTranslationCache(max_size=10)
+            legacy_key = legacy_cache._generate_cache_key(
+                "Bonjour",
+                "fr",
+                "en",
+                "custom_ai",
+            )
+            legacy_json_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": CACHE_SCHEMA_VERSION,
+                        "entries": [
+                            {
+                                "key": list(legacy_key),
+                                "translation": "Legacy value",
+                                "access_time": time.time(),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cache = UnifiedTranslationCache(max_size=10, persistence_path=sqlite_path)
+
+            self.assertEqual(
+                cache.get("Bonjour", "fr", "en", "custom_ai"),
+                "Legacy value",
+            )
+            self.assertTrue(sqlite_path.exists())
+            self.assertEqual(sqlite_path.read_bytes()[:16], b"SQLite format 3\x00")
+            self.assertFalse(legacy_json_path.exists())
+            cache.close()
+
     def test_persistent_cache_clear_removes_saved_entries(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
