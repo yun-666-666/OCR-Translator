@@ -67,6 +67,7 @@ custom_ai_latency_mode_none,什么都不用
 custom_ai_latency_mode_safe,稳妥优先
 custom_ai_latency_mode_stream,流式刷新
 custom_ai_latency_mode_race,最快端点
+custom_ai_submit_interval_label,AI 翻译最小提交间隔（毫秒）：
 models_file_label,MarianMT 模型列表：
 beam_size_label,翻译 Beam Size（MarianMT）：
 tesseract_path_label,Tesseract 路径：

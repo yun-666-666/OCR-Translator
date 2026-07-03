@@ -36,6 +36,29 @@ class StartupOptimizationTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"], "safe")
 
+    def test_default_config_includes_custom_ai_submit_interval(self):
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_submit_interval_ms"], "300")
+
+    def test_custom_ai_submit_interval_is_wired_to_settings_and_localizations(self):
+        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("custom_ai_submit_interval_ms_var", gui_builder_source)
+        self.assertIn("custom_ai_submit_interval_label", gui_builder_source)
+        self.assertIn("custom_ai_submit_interval_ms", save_source)
+
+        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv"):
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+                labels = {
+                    row[0]: row[1]
+                    for row in csv.reader(f)
+                    if len(row) >= 2 and row[0]
+                }
+            self.assertIn("custom_ai_submit_interval_label", labels, msg=path)
+            self.assertTrue(labels["custom_ai_submit_interval_label"].strip(), msg=path)
+
     def test_app_logic_import_does_not_import_removed_provider_sdks(self):
         for optional_module in ("cv2", "pyautogui", "tesserocr"):
             if importlib.util.find_spec(optional_module) is None:

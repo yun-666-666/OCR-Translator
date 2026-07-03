@@ -1268,6 +1268,52 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(app.pending_translation_flush_generation, 2)
         self.assertEqual(app.pending_translation_flush_deadline_monotonic, 102.0)
 
+    def test_pending_translation_preserves_request_arrival_time_until_submit(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads._queue_pending_translation_request(
+                app,
+                "Latest",
+                2,
+                0.5,
+                "submit interval",
+                requested_at_monotonic=99.75,
+            )
+
+        self.assertEqual(
+            app.pending_translation_request["requested_at_monotonic"],
+            99.75,
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            with patch.object(worker_threads.time, "monotonic", return_value=100.5):
+                worker_threads._flush_pending_translation_request(
+                    app,
+                    app.pending_translation_flush_generation,
+                )
+
+        start_translation.assert_called_once_with(
+            app,
+            "Latest",
+            2,
+            requested_at_monotonic=99.75,
+        )
+
     def test_stale_pending_translation_timer_cannot_consume_latest_request(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []
@@ -1349,6 +1395,50 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(len(flush_calls), 1)
         self.assertLessEqual(flush_calls[0][0], 1)
 
+    def test_translation_timing_summary_is_numeric_and_content_free(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Handler:
+            def translate_text_with_timeout(self, text, **kwargs):
+                return "translated-secret"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=lambda *args: None),
+            translation_handler=Handler(),
+            active_translation_calls={7},
+            active_translation_inflight_keys=set(),
+            pending_translation_request=None,
+            custom_ai_latency_mode_var=types.SimpleNamespace(get=lambda: "safe"),
+        )
+
+        with patch.object(
+            worker_threads.time,
+            "monotonic",
+            side_effect=[100.0, 102.0],
+        ):
+            with patch.object(worker_threads, "log_debug") as debug_log:
+                worker_threads.process_translation_async(
+                    app,
+                    "source-secret",
+                    translation_sequence=7,
+                    ocr_sequence_number=6,
+                    requested_at_monotonic=99.5,
+                )
+
+        timing_messages = [
+            call.args[0]
+            for call in debug_log.call_args_list
+            if call.args and call.args[0].startswith("LATENCY: translation timing ")
+        ]
+        self.assertEqual(len(timing_messages), 1)
+        timing_message = timing_messages[0]
+        self.assertIn("sequence=7", timing_message)
+        self.assertIn("queue=0.500s", timing_message)
+        self.assertIn("worker=2.000s", timing_message)
+        self.assertIn("total=2.500s", timing_message)
+        self.assertNotIn("source-secret", timing_message)
+        self.assertNotIn("translated-secret", timing_message)
+
     def test_pending_translation_is_dropped_when_app_is_stopped(self):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace(
@@ -1382,9 +1472,33 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         short_interval = handler.get_translation_submit_interval_seconds("Hello")
         long_interval = handler.get_translation_submit_interval_seconds("Line " * 140)
 
-        self.assertEqual(short_interval, 1.0)
+        self.assertEqual(short_interval, 0.3)
         self.assertGreater(long_interval, short_interval)
         self.assertGreaterEqual(long_interval, 2.0)
+
+    def test_custom_ai_submit_interval_uses_clamped_user_milliseconds(self):
+        TranslationHandler = import_translation_handler_for_tests()
+
+        for milliseconds, expected_seconds in [
+            (0, 0.0),
+            (650, 0.65),
+            (-10, 0.0),
+            (6000, 5.0),
+        ]:
+            with self.subTest(milliseconds=milliseconds):
+                app = types.SimpleNamespace(
+                    custom_ai_submit_interval_ms_var=types.SimpleNamespace(
+                        get=lambda value=milliseconds: value
+                    ),
+                    min_translation_interval=0.3,
+                    translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+                )
+                handler = TranslationHandler(app)
+
+                self.assertEqual(
+                    handler.get_translation_submit_interval_seconds("Hello"),
+                    expected_seconds,
+                )
 
     def test_local_ocr_translation_gate_uses_provider_submit_interval_without_blocking_pending_refreshes(self):
         worker_threads = import_worker_threads_for_tests()

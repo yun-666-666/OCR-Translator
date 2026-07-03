@@ -58,6 +58,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_source_lang': 'auto',
     'custom_target_lang': 'en',
     'custom_ai_latency_mode': 'safe',
+    'custom_ai_submit_interval_ms': '300',
     # Adaptive thresholding parameters
     'adaptive_block_size': '41',
     'adaptive_c': '-60',

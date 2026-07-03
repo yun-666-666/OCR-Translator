@@ -247,6 +247,7 @@ def create_settings_tab(app):
     validate_beam_size = frame.register(lambda P: validate_int_range(P, 1, 50))
     validate_scan_interval = frame.register(lambda P: validate_int_range(P, 50, 2000))
     validate_custom_context_window = frame.register(lambda P: validate_int_range(P, 0, 10))
+    validate_custom_ai_submit_interval = frame.register(lambda P: validate_int_range(P, 0, 5000))
     validate_timeout = frame.register(lambda P: validate_int_range(P, 0, 60))
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_confidence = frame.register(lambda P: validate_int_range(P, 0, 100))
@@ -1256,7 +1257,40 @@ def create_settings_tab(app):
     )
     app.custom_ai_latency_mode_options = custom_ai_latency_mode_options
 
-    row_offset = 19
+    app.custom_ai_submit_interval_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "custom_ai_submit_interval_label",
+            "AI translation minimum interval (ms):",
+        ),
+    )
+    app.custom_ai_submit_interval_label.grid(row=19, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_submit_interval_spinbox = ttk.Spinbox(
+        frame,
+        from_=0,
+        to=5000,
+        increment=50,
+        textvariable=app.custom_ai_submit_interval_ms_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_custom_ai_submit_interval, '%P'),
+    )
+    app.custom_ai_submit_interval_spinbox.grid(row=19, column=1, padx=5, pady=5, sticky="w")
+
+    def on_custom_ai_submit_interval_focus_out(event):
+        try:
+            value = int(app.custom_ai_submit_interval_ms_var.get())
+            app.custom_ai_submit_interval_ms_var.set(max(0, min(5000, value)))
+        except (ValueError, tk.TclError):
+            app.custom_ai_submit_interval_ms_var.set(300)
+        app.save_settings()
+
+    app.custom_ai_submit_interval_spinbox.bind(
+        "<FocusOut>",
+        on_custom_ai_submit_interval_focus_out,
+    )
+
+    row_offset = 20
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),

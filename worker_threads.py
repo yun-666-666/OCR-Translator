@@ -900,6 +900,7 @@ def _flush_pending_translation_request(app, flush_generation=None):
             app,
             pending_request["text"],
             pending_request["ocr_sequence_number"],
+            requested_at_monotonic=pending_request.get("requested_at_monotonic"),
         )
     except Exception as flush_error:
         log_debug(
@@ -908,10 +909,21 @@ def _flush_pending_translation_request(app, flush_generation=None):
         )
 
 
-def _queue_pending_translation_request(app, text_to_translate, ocr_sequence_number, delay_seconds, reason):
+def _queue_pending_translation_request(
+    app,
+    text_to_translate,
+    ocr_sequence_number,
+    delay_seconds,
+    reason,
+    requested_at_monotonic=None,
+):
+    now = time.monotonic()
+    if requested_at_monotonic is None:
+        requested_at_monotonic = now
     app.pending_translation_request = {
         "text": text_to_translate,
         "ocr_sequence_number": ocr_sequence_number,
+        "requested_at_monotonic": float(requested_at_monotonic),
     }
     log_debug(
         "LATENCY: queued latest translation request "
@@ -919,7 +931,6 @@ def _queue_pending_translation_request(app, text_to_translate, ocr_sequence_numb
         f"reason={reason}: '{text_to_translate}'"
     )
 
-    now = time.monotonic()
     desired_deadline = now + max(0.0, float(delay_seconds or 0.0))
     current_deadline = float(
         getattr(app, 'pending_translation_flush_deadline_monotonic', 0.0) or 0.0
@@ -965,10 +976,17 @@ def _expedite_pending_translation_request(app):
         pending_request["ocr_sequence_number"],
         0.0,
         "active translation completed",
+        requested_at_monotonic=pending_request.get("requested_at_monotonic"),
     )
 
 
-def _submit_async_translation_request(app, text_to_translate, ocr_sequence_number, inflight_key):
+def _submit_async_translation_request(
+    app,
+    text_to_translate,
+    ocr_sequence_number,
+    inflight_key,
+    requested_at_monotonic=None,
+):
     app.translation_sequence_counter += 1
     translation_sequence = app.translation_sequence_counter
     app.latest_translation_sequence_started = translation_sequence
@@ -984,6 +1002,7 @@ def _submit_async_translation_request(app, text_to_translate, ocr_sequence_numbe
             translation_sequence,
             ocr_sequence_number,
             inflight_key,
+            requested_at_monotonic,
         )
     except Exception:
         app.active_translation_calls.discard(translation_sequence)
@@ -995,7 +1014,12 @@ def _submit_async_translation_request(app, text_to_translate, ocr_sequence_numbe
         f"(active calls: {len(app.active_translation_calls)}): '{text_to_translate}'"
     )
 
-def start_async_translation(app, text_to_translate, ocr_sequence_number):
+def start_async_translation(
+    app,
+    text_to_translate,
+    ocr_sequence_number,
+    requested_at_monotonic=None,
+):
     """Start async translation processing to eliminate queue bottlenecks."""
     try:
         app.initialize_async_translation_infrastructure()
@@ -1038,6 +1062,8 @@ def start_async_translation(app, text_to_translate, ocr_sequence_number):
             return
 
         now = time.monotonic()
+        if requested_at_monotonic is None:
+            requested_at_monotonic = now
         submit_interval = _get_translation_submit_interval_seconds(app, text_to_translate)
         cooldown_remaining = _get_translation_provider_cooldown_seconds(app)
         concurrency_limit = _get_translation_concurrency_limit(app)
@@ -1069,18 +1095,34 @@ def start_async_translation(app, text_to_translate, ocr_sequence_number):
                 ocr_sequence_number,
                 queue_delay,
                 ", ".join(queue_reasons),
+                requested_at_monotonic=requested_at_monotonic,
             )
             return
 
-        _submit_async_translation_request(app, text_to_translate, ocr_sequence_number, inflight_key)
+        _submit_async_translation_request(
+            app,
+            text_to_translate,
+            ocr_sequence_number,
+            inflight_key,
+            requested_at_monotonic=requested_at_monotonic,
+        )
         
     except Exception as e:
         log_debug(f"Error starting async translation: {type(e).__name__} - {e}")
 
 
-def process_translation_async(app, text_to_translate, translation_sequence, ocr_sequence_number, inflight_key=None):
+def process_translation_async(
+    app,
+    text_to_translate,
+    translation_sequence,
+    ocr_sequence_number,
+    inflight_key=None,
+    requested_at_monotonic=None,
+):
     """Process translation API call asynchronously with timeout and staleness handling."""
     start_time = time.monotonic()
+    if requested_at_monotonic is None:
+        requested_at_monotonic = start_time
     
     try:
         log_debug(f"Processing async translation {translation_sequence}")
@@ -1120,7 +1162,15 @@ def process_translation_async(app, text_to_translate, translation_sequence, ocr_
             translation_sequence=translation_sequence,
         )
         
-        elapsed_time = time.monotonic() - start_time
+        completed_at = time.monotonic()
+        elapsed_time = completed_at - start_time
+        queue_time = max(0.0, start_time - float(requested_at_monotonic))
+        total_time = max(0.0, completed_at - float(requested_at_monotonic))
+        log_debug(
+            "LATENCY: translation timing "
+            f"sequence={translation_sequence} queue={queue_time:.3f}s "
+            f"worker={elapsed_time:.3f}s total={total_time:.3f}s"
+        )
         if elapsed_time > 5.0:
             log_debug(f"Translation {translation_sequence} took {elapsed_time:.1f}s, may be stale but will attempt display")
         
@@ -1129,7 +1179,15 @@ def process_translation_async(app, text_to_translate, translation_sequence, ocr_
         app.root.after(0, process_translation_response, app, translation_result, translation_sequence, text_to_translate, ocr_sequence_number)
         
     except Exception as e:
-        elapsed_time = time.monotonic() - start_time
+        completed_at = time.monotonic()
+        elapsed_time = completed_at - start_time
+        queue_time = max(0.0, start_time - float(requested_at_monotonic))
+        total_time = max(0.0, completed_at - float(requested_at_monotonic))
+        log_debug(
+            "LATENCY: translation timing "
+            f"sequence={translation_sequence} queue={queue_time:.3f}s "
+            f"worker={elapsed_time:.3f}s total={total_time:.3f}s"
+        )
         log_debug(f"Error in async translation {translation_sequence} after {elapsed_time:.2f}s: {type(e).__name__} - {e}")
         
         error_msg = f"Translation error: {str(e)}"

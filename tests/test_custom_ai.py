@@ -1092,7 +1092,7 @@ class CustomAIProviderTests(unittest.TestCase):
             source_lang="fr",
             target_lang="en",
             custom_prompt="Use game subtitle style.",
-            context=["Salut", "Ca va?"],
+            context=[("Salut", "Hi"), ("Ca va?", "How are you?")],
             keep_linebreaks=False,
         )
 
@@ -1102,7 +1102,13 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("fr", serialized)
         self.assertIn("en", serialized)
         self.assertIn("Salut", serialized)
+        self.assertIn("Hi", serialized)
+        self.assertIn("How are you?", serialized)
         self.assertIn("Bonjour", serialized)
+        self.assertIn("Previous approved subtitle translations", serialized)
+        self.assertIn("Source:", serialized)
+        self.assertIn("Translation:", serialized)
+        self.assertIn("Translate only the current source text", serialized)
 
     def test_build_ocr_payload_contains_webp_data_url(self):
         provider = CustomAIProvider()
@@ -1855,12 +1861,17 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         for context_size, expected_context in [
             (0, []),
-            (3, ["two", "three", "four"]),
-            (5, ["one", "two", "three", "four"]),
+            (3, [("two", "二"), ("three", "三"), ("four", "四")]),
+            (5, [("one", "一"), ("two", "二"), ("three", "三"), ("four", "四")]),
         ]:
             with self.subTest(context_size=context_size):
                 handler = TranslationHandler(App(context_size))
-                handler.custom_context_window = ["one", "two", "three", "four"]
+                handler.custom_context_window = [
+                    ("one", "一"),
+                    ("two", "二"),
+                    ("three", "三"),
+                    ("four", "四"),
+                ]
                 handler.custom_ai_provider.translate = Mock(return_value=("translated", {}, 0.01))
 
                 handler._custom_ai_translate("current", 0.0)
@@ -1874,10 +1885,71 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         handler = TranslationHandler(App())
 
-        for subtitle in ["one", "two", "three", "four", "five"]:
-            handler._update_custom_context(subtitle)
+        for source, translation in [
+            ("one", "一"),
+            ("two", "二"),
+            ("three", "三"),
+            ("four", "四"),
+            ("five", "五"),
+        ]:
+            handler._update_custom_context(source, translation)
 
-        self.assertEqual(handler.custom_context_window, ["three", "four", "five"])
+        self.assertEqual(
+            handler.custom_context_window,
+            [("three", "三"), ("four", "四"), ("five", "五")],
+        )
+
+    def test_custom_ai_context_skips_duplicate_source_or_translation(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        handler._update_custom_context("Save", "保存")
+        handler._update_custom_context("Save", "另存")
+        handler._update_custom_context("Store", "保存")
+        handler._update_custom_context("Quit", "退出")
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [("Save", "保存"), ("Quit", "退出")],
+        )
+
+    def test_custom_ai_cache_hit_adds_source_and_translation_to_context(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Translator",
+            "base_url": "https://host.example/v1",
+            "model": "translation-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            translation_model_var = DummyVar("custom_ai")
+            custom_ai_profiles = Profiles()
+            custom_source_lang = "en"
+            custom_target_lang = "zh-CN"
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            keep_linebreaks_var = DummyVar(False)
+            custom_context_window_var = DummyVar(3)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+        cache_params = handler._cache_params_for_profile(profile)
+        handler.unified_cache.store(
+            "Save",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "保存",
+            **cache_params,
+        )
+
+        self.assertEqual(handler._get_custom_ai_cached_translation("Save"), "保存")
+        self.assertEqual(handler.custom_context_window, [("Save", "保存")])
 
     def test_custom_ai_race_mode_uses_fastest_same_model_profile(self):
         slow = {

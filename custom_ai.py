@@ -560,13 +560,28 @@ class CustomAIProvider:
             "Return only the translation. Do not add explanations, labels, or quotes.",
             linebreak_instruction,
         ]
+        if context:
+            system_parts.append(
+                "Use previous approved subtitle translations only as context for "
+                "terminology, tone, and character voice. Translate only the current source text."
+            )
         if custom_prompt:
             system_parts.append(f"User custom instruction: {custom_prompt}")
         user_parts = []
         if context:
-            user_parts.append("Previous subtitles:")
-            user_parts.extend(str(item) for item in context if item)
-        user_parts.append("Text to translate:")
+            user_parts.append("Previous approved subtitle translations:")
+            for item in context:
+                if (
+                    isinstance(item, (tuple, list))
+                    and len(item) >= 2
+                    and item[0]
+                ):
+                    user_parts.append(f"Source: {item[0]}")
+                    if item[1]:
+                        user_parts.append(f"Translation: {item[1]}")
+                elif item:
+                    user_parts.append(f"Source: {item}")
+        user_parts.append("Current source text:")
         user_parts.append(text)
         return {
             "model": profile["model"],

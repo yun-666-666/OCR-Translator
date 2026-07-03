@@ -284,6 +284,15 @@ class GameChangingTranslator:
                 self.config['Settings'].get('custom_ai_latency_mode', CUSTOM_AI_LATENCY_MODE_SAFE)
             )
         )
+        try:
+            custom_ai_submit_interval_ms = int(
+                self.config['Settings'].get('custom_ai_submit_interval_ms', '300')
+            )
+        except (TypeError, ValueError):
+            custom_ai_submit_interval_ms = 300
+        self.custom_ai_submit_interval_ms_var = tk.IntVar(
+            value=max(0, min(5000, custom_ai_submit_interval_ms))
+        )
         
         # Separate Gemini model selection for OCR and Translation
         self.gemini_translation_model_var = tk.StringVar(value=self.config['Settings'].get('gemini_translation_model', 'Gemini 2.5 Flash-Lite'))
@@ -448,6 +457,7 @@ class GameChangingTranslator:
         self.deepl_context_window_var.trace_add("write", self.settings_changed_callback)
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
         self.custom_ai_latency_mode_var.trace_add("write", self.settings_changed_callback)
+        self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
         self.preprocessing_mode_var.trace_add("write", self.settings_changed_callback)
         self.preprocessing_mode_var.trace_add("write", self.on_ocr_parameter_change)
         self.adaptive_block_size_var.trace_add("write", self.settings_changed_callback)

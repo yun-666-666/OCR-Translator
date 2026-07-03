@@ -67,6 +67,7 @@ custom_ai_latency_mode_none,None
 custom_ai_latency_mode_safe,Stable low latency
 custom_ai_latency_mode_stream,Streaming subtitles
 custom_ai_latency_mode_race,Fastest endpoint
+custom_ai_submit_interval_label,AI translation minimum interval (ms):
 models_file_label,MarianMT Model List:
 beam_size_label,Translation Beam Size (MarianMT):
 tesseract_path_label,Tesseract Path:

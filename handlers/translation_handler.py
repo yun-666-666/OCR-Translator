@@ -364,7 +364,7 @@ Call Duration: {call_duration:.3f} seconds
         if not cached_result:
             return None
 
-        self._update_custom_context(cleaned_text)
+        self._update_custom_context(cleaned_text, cached_result)
         return self._format_dialog_text(cached_result)
 
     def get_inflight_translation_key(self, text_content):
@@ -407,7 +407,18 @@ Call Duration: {call_duration:.3f} seconds
         return 1
 
     def get_translation_submit_interval_seconds(self, text_content=None):
-        base_interval = float(getattr(self.app, "min_translation_interval", 0.3) or 0.3)
+        interval_var = getattr(self.app, "custom_ai_submit_interval_ms_var", None)
+        try:
+            if interval_var is not None:
+                interval_ms = int(interval_var.get())
+                base_interval = max(0, min(5000, interval_ms)) / 1000.0
+            else:
+                base_interval = max(
+                    0.0,
+                    float(getattr(self.app, "min_translation_interval", 0.3)),
+                )
+        except (TypeError, ValueError):
+            base_interval = 0.3
         selected_model = self.app.translation_model_var.get()
         if selected_model != 'custom_ai':
             return max(0.0, base_interval)
@@ -418,11 +429,11 @@ Call Duration: {call_duration:.3f} seconds
 
         # Large OCR payloads consume more tokens and are more likely to hit relay limits,
         # so pace long-form submissions more conservatively than subtitle-sized text.
-        scaled_interval = 1.0
+        scaled_interval = base_interval
         if len(cleaned_text) > 80:
             scaled_interval += min(3.0, (len(cleaned_text) - 80) / 180.0)
 
-        return max(base_interval, min(4.0, scaled_interval))
+        return scaled_interval
 
     def get_translation_provider_cooldown_seconds(self):
         selected_model = self.app.translation_model_var.get()
@@ -514,7 +525,7 @@ Call Duration: {call_duration:.3f} seconds
                     translated_api_text,
                     **target_cache_params,
                 )
-            self._update_custom_context(cleaned_text_main)
+            self._update_custom_context(cleaned_text_main, translated_api_text)
 
         log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
         return self._format_dialog_text(translated_api_text)
@@ -632,14 +643,30 @@ Call Duration: {call_duration:.3f} seconds
             "context": tuple(self._get_custom_context_for_request()),
         }
 
-    def _update_custom_context(self, source_text):
+    def _update_custom_context(self, source_text, translated_text=None):
         context_size = self._get_custom_context_window_size()
         if context_size == 0:
             self.custom_context_window = []
             return
-        if self.custom_context_window and self.custom_context_window[-1] == source_text:
-            return
-        self.custom_context_window.append(source_text)
+
+        if translated_text is None:
+            context_entry = source_text
+            if self.custom_context_window and self.custom_context_window[-1] == context_entry:
+                return
+        else:
+            context_entry = (source_text, translated_text)
+            if self.custom_context_window:
+                previous_entry = self.custom_context_window[-1]
+                if isinstance(previous_entry, (tuple, list)) and len(previous_entry) >= 2:
+                    if (
+                        previous_entry[0] == source_text
+                        or previous_entry[1] == translated_text
+                    ):
+                        return
+                elif previous_entry == source_text:
+                    return
+
+        self.custom_context_window.append(context_entry)
         self.custom_context_window = self.custom_context_window[-context_size:]
 
     def _get_custom_context_for_request(self):
