@@ -1,6 +1,44 @@
 import re
 from logger import log_debug
 
+TRANSLATION_ERROR_PREFIXES = (
+    "err:",
+    "translation error:",
+    "custom ai translation error:",
+    "ai model profile for translation is missing",
+    "error: unknown translation model",
+    "no translation for model:",
+    "google api error:",
+    "google api key missing:",
+    "google translate api key missing",
+    "google translate api client not initialized",
+    "requests library not available for google translate",
+    "google translate api returned unexpected result:",
+    "google translate api request error:",
+    "google translate api error:",
+    "google client init error:",
+    "deepl api libraries not available",
+    "deepl api key missing",
+    "deepl client init error:",
+    "deepl api client not initialized",
+    "deepl api returned empty or invalid result",
+    "deepl api fallback returned empty or invalid result",
+    "deepl api error:",
+    "marianmt error:",
+    "marianmt not initialized",
+    "marianmt language pair not determined:",
+    "marianmt translator not initialized",
+    "marianmt translation error:",
+)
+
+
+def is_translation_error_result(value):
+    if not isinstance(value, str):
+        return True
+    normalized = value.lstrip().casefold()
+    return normalized.startswith(TRANSLATION_ERROR_PREFIXES)
+
+
 # Note: This function is retained for backward compatibility but should be replaced 
 # with the LanguageManager class for new code. Translation handlers should use
 # language_manager.get_tesseract_code() instead.

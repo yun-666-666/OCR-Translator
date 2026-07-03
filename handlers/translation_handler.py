@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 
 from logger import append_rotating_text, log_debug
 from unified_translation_cache import UnifiedTranslationCache
+from translation_utils import is_translation_error_result
 from custom_ai import (
     CustomAIProvider,
     CUSTOM_AI_LATENCY_MODE_RACE,
@@ -21,6 +22,7 @@ from custom_ai import (
 )
 
 REQUESTS_AVAILABLE = False
+CUSTOM_CONTEXT_CHAR_BUDGET = 4000
 
 
 class TranslationHandler:
@@ -35,6 +37,12 @@ class TranslationHandler:
         self.providers = {}
         self.ocr_providers = {}
         self.custom_context_window = []
+        self._custom_log_state_lock = threading.Lock()
+        self._custom_log_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="CustomAIShortLog",
+        )
+        self._custom_session_started = set()
         
         # Legacy DeepL-specific context storage retained only to keep old callbacks harmless.
         self.deepl_context_window = []  # List of source texts only
@@ -138,6 +146,15 @@ class TranslationHandler:
         self._clear_active_context()
 
     def close(self):
+        log_executor = None
+        try:
+            with self._custom_log_state_lock:
+                log_executor = self._custom_log_executor
+                self._custom_log_executor = None
+            if log_executor is not None:
+                log_executor.shutdown(wait=True, cancel_futures=False)
+        except Exception as e:
+            log_debug(f"Error flushing Custom AI short log: {e}")
         try:
             if hasattr(self.unified_cache, "close"):
                 self.unified_cache.close()
@@ -345,18 +362,23 @@ Call Duration: {call_duration:.3f} seconds
 
         return None
 
-    def _get_custom_ai_cache_profile_and_params(self):
+    def _get_custom_ai_cache_profile_and_params(self, current_source=None):
         profile = self.app.custom_ai_profiles.get_active_profile("translation")
         if not profile:
             return None, None, None, None
 
         source_lang = getattr(self.app, 'custom_source_lang', None) or self.app.source_lang_var.get()
         target_lang = getattr(self.app, 'custom_target_lang', None) or self.app.target_lang_var.get()
-        cache_params = self._cache_params_for_profile(profile)
+        cache_params = self._cache_params_for_profile(
+            profile,
+            current_source=current_source,
+        )
         return profile, source_lang, target_lang, cache_params
 
     def _get_custom_ai_cached_translation(self, cleaned_text):
-        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
+            current_source=cleaned_text,
+        )
         if not profile:
             return None
 
@@ -372,7 +394,9 @@ Call Duration: {call_duration:.3f} seconds
         if not cleaned_text or self.is_placeholder_text(cleaned_text):
             return None
 
-        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
+            current_source=cleaned_text,
+        )
         if not profile:
             return ("custom_ai", cleaned_text, "missing_profile")
 
@@ -464,7 +488,9 @@ Call Duration: {call_duration:.3f} seconds
         stream_callback=None,
         translation_sequence=None,
     ):
-        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params()
+        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
+            current_source=cleaned_text_main,
+        )
         if not profile:
             return "AI model profile for translation is missing."
 
@@ -473,7 +499,9 @@ Call Duration: {call_duration:.3f} seconds
             return cached_result
 
         latency_mode = self._get_custom_ai_latency_mode()
-        context = self._get_custom_context_for_request()
+        context = self._get_custom_context_for_request(
+            current_source=cleaned_text_main,
+        )
         keep_linebreaks = self.app.keep_linebreaks_var.get()
 
         try:
@@ -513,7 +541,10 @@ Call Duration: {call_duration:.3f} seconds
         if translated_api_text and not self._is_error_message(translated_api_text):
             cache_targets = [cache_params]
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
-                active_cache_params = self._cache_params_for_profile(profile)
+                active_cache_params = self._cache_params_for_profile(
+                    profile,
+                    current_source=cleaned_text_main,
+                )
                 if active_cache_params != cache_params:
                     cache_targets.append(active_cache_params)
             for target_cache_params in cache_targets:
@@ -543,7 +574,16 @@ Call Duration: {call_duration:.3f} seconds
                 keep_linebreaks=keep_linebreaks,
                 latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
             )
-            return translated, usage, duration, self._cache_params_for_profile(active_profile), active_profile
+            return (
+                translated,
+                usage,
+                duration,
+                self._cache_params_for_profile(
+                    active_profile,
+                    current_source=text,
+                ),
+                active_profile,
+            )
 
         executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=len(candidates),
@@ -580,7 +620,16 @@ Call Duration: {call_duration:.3f} seconds
                 )
                 executor.shutdown(wait=False, cancel_futures=True)
                 shutdown_started = True
-                return translated, usage, duration, self._cache_params_for_profile(candidate), candidate
+                return (
+                    translated,
+                    usage,
+                    duration,
+                    self._cache_params_for_profile(
+                        candidate,
+                        current_source=text,
+                    ),
+                    candidate,
+                )
         finally:
             if not shutdown_started:
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -619,7 +668,7 @@ Call Duration: {call_duration:.3f} seconds
             add_candidate(profile)
         return candidates
 
-    def _cache_params_for_profile(self, profile):
+    def _cache_params_for_profile(self, profile, current_source=None):
         keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
         try:
             keep_linebreaks = bool(keep_linebreaks_var.get()) if keep_linebreaks_var is not None else False
@@ -640,7 +689,11 @@ Call Duration: {call_duration:.3f} seconds
             ).strip().lower(),
             "custom_prompt": getattr(self.app, "custom_prompt_text", ""),
             "keep_linebreaks": keep_linebreaks,
-            "context": tuple(self._get_custom_context_for_request()),
+            "context": tuple(
+                self._get_custom_context_for_request(
+                    current_source=current_source,
+                )
+            ),
         }
 
     def _update_custom_context(self, source_text, translated_text=None):
@@ -651,29 +704,80 @@ Call Duration: {call_duration:.3f} seconds
 
         if translated_text is None:
             context_entry = source_text
-            if self.custom_context_window and self.custom_context_window[-1] == context_entry:
-                return
         else:
             context_entry = (source_text, translated_text)
-            if self.custom_context_window:
-                previous_entry = self.custom_context_window[-1]
-                if isinstance(previous_entry, (tuple, list)) and len(previous_entry) >= 2:
-                    if (
-                        previous_entry[0] == source_text
-                        or previous_entry[1] == translated_text
-                    ):
-                        return
-                elif previous_entry == source_text:
-                    return
 
-        self.custom_context_window.append(context_entry)
-        self.custom_context_window = self.custom_context_window[-context_size:]
+        refreshed_window = []
+        for entry in self.custom_context_window:
+            if isinstance(entry, (tuple, list)) and entry:
+                if entry[0] == source_text:
+                    continue
+            elif entry == source_text:
+                continue
+            refreshed_window.append(entry)
 
-    def _get_custom_context_for_request(self):
+        refreshed_window.append(context_entry)
+        self.custom_context_window = refreshed_window[-context_size:]
+
+    def _get_custom_context_for_request(self, current_source=None):
         context_size = self._get_custom_context_window_size()
         if context_size == 0:
             return []
-        return self.custom_context_window[-context_size:]
+
+        selected = []
+        selected_chars = 0
+        for entry in reversed(self.custom_context_window):
+            if (
+                current_source is not None
+                and isinstance(entry, (tuple, list))
+                and entry
+                and entry[0] == current_source
+            ):
+                continue
+            if current_source is not None and entry == current_source:
+                continue
+
+            entry_chars = self._get_custom_context_entry_char_count(entry)
+            remaining_chars = CUSTOM_CONTEXT_CHAR_BUDGET - selected_chars
+            if entry_chars > remaining_chars:
+                if not selected and remaining_chars > 0:
+                    selected.append(
+                        self._truncate_custom_context_entry(
+                            entry,
+                            remaining_chars,
+                        )
+                    )
+                break
+
+            selected.append(entry)
+            selected_chars += entry_chars
+            if len(selected) >= context_size:
+                break
+        return list(reversed(selected))
+
+    def _get_custom_context_entry_char_count(self, entry):
+        if isinstance(entry, (tuple, list)):
+            return sum(len(str(part or "")) for part in entry[:2])
+        return len(str(entry or ""))
+
+    def _truncate_custom_context_entry(self, entry, max_chars):
+        max_chars = max(0, int(max_chars))
+        if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+            source = str(entry[0] or "")
+            translation = str(entry[1] or "")
+            source_budget = min(len(source), max_chars // 2)
+            translation_budget = max_chars - source_budget
+            if len(translation) < translation_budget:
+                source_budget = min(
+                    len(source),
+                    max_chars - len(translation),
+                )
+                translation_budget = max_chars - source_budget
+            return (
+                source[:source_budget],
+                translation[:translation_budget],
+            )
+        return str(entry or "")[:max_chars]
 
     def _get_custom_context_window_size(self):
         var = getattr(self.app, 'custom_context_window_var', None)
@@ -683,41 +787,65 @@ Call Duration: {call_duration:.3f} seconds
             value = 5
         return max(0, min(10, value))
 
-    def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
+    def _write_custom_short_log(self, log_file, block):
         try:
-            log_file = "CustomAI_OCR_Short_Log.txt" if call_type == "ocr" else "CustomAI_Translation_Short_Log.txt"
-            if not hasattr(self, "_custom_session_started"):
-                self._custom_session_started = set()
-            session_header = ""
-            if call_type not in self._custom_session_started:
-                session_header = (
-                    f"\nSESSION 1 STARTED "
-                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
-                )
-            header = "========= OCR CALL ===========" if call_type == "ocr" else "===== TRANSLATION CALL ======="
-            cost = 0.0
-            prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
-            completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-            block = (
-                f"{session_header}"
-                f"{header}\n"
-                f"Provider: {profile.get('name')}\n"
-                f"Model: {profile.get('model')}\n"
-                f"Duration: {duration:.3f}s\n"
-                f"Input Tokens: {prompt_tokens}\n"
-                f"Output Tokens: {completion_tokens}\n"
-                f"Cost: ${cost:.8f}\n"
-                f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
-            )
             append_rotating_text(
                 log_file,
                 block,
                 max_bytes=2 * 1024 * 1024,
                 backup_count=2,
             )
-            self._custom_session_started.add(call_type)
         except Exception as e:
             log_debug(f"Custom AI short log write failed: {e}")
+
+    def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
+        try:
+            with self._custom_log_state_lock:
+                log_executor = self._custom_log_executor
+                if log_executor is None:
+                    log_debug("Custom AI short log skipped after handler close")
+                    return
+
+                log_file = (
+                    "CustomAI_OCR_Short_Log.txt"
+                    if call_type == "ocr"
+                    else "CustomAI_Translation_Short_Log.txt"
+                )
+                session_header = ""
+                if call_type not in self._custom_session_started:
+                    session_header = (
+                        f"\nSESSION 1 STARTED "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n"
+                    )
+                header = (
+                    "========= OCR CALL ==========="
+                    if call_type == "ocr"
+                    else "===== TRANSLATION CALL ======="
+                )
+                cost = 0.0
+                prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+                completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
+                cached_prompt_tokens = usage.get("cached_prompt_tokens", 0) if isinstance(usage, dict) else 0
+                block = (
+                    f"{session_header}"
+                    f"{header}\n"
+                    f"Provider: {profile.get('name')}\n"
+                    f"Model: {profile.get('model')}\n"
+                    f"Duration: {duration:.3f}s\n"
+                    f"Input Tokens: {prompt_tokens}\n"
+                    f"Cached Input Tokens: {cached_prompt_tokens}\n"
+                    f"Output Tokens: {completion_tokens}\n"
+                    f"Cost: ${cost:.8f}\n"
+                    f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
+                )
+                log_executor.submit(
+                    self._write_custom_short_log,
+                    log_file,
+                    block,
+                )
+                self._custom_session_started.add(call_type)
+        except Exception as e:
+            log_debug(f"Custom AI short log scheduling failed: {e}")
 
     def _legacy_translate_disabled(self):
         """Legacy provider code is kept below for reference but is no longer reached."""
@@ -1208,9 +1336,7 @@ Call Duration: {call_duration:.3f} seconds
         return formatted_text
     
     def _is_error_message(self, text):
-        if not isinstance(text, str): return True
-        error_indicators = ["error:", "api error", "not initialized", "missing", "failed", "not available", "not supported", "invalid result", "empty result"]
-        return any(indicator in text.lower() for indicator in error_indicators)
+        return is_translation_error_result(text)
     
     def is_placeholder_text(self, text_content):
         if not text_content: return True

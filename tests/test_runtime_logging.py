@@ -188,8 +188,7 @@ class RotatingTextWriterTests(unittest.TestCase):
             self.assertEqual(tail, [line.replace("\r\n", "\n") for line in lines[-3:]])
 
     def test_custom_ai_short_log_uses_shared_rotating_writer(self):
-        handler = object.__new__(TranslationHandler)
-        handler._custom_session_started = set()
+        handler = TranslationHandler(object())
         profile = {"name": "Test Provider", "model": "test-model"}
 
         with patch(
@@ -203,6 +202,7 @@ class RotatingTextWriterTests(unittest.TestCase):
                 {"prompt_tokens": 3, "completion_tokens": 2},
                 0.25,
             )
+            handler.close()
 
         append_text.assert_called_once()
         args, kwargs = append_text.call_args

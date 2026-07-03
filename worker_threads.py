@@ -11,6 +11,7 @@ import pyautogui
 import hashlib
 import random
 import re
+import threading
 import traceback 
 from datetime import datetime
 
@@ -23,7 +24,10 @@ from ocr_utils import (
     get_tesseract_ocr_config, resolve_tessdata_dir_from_tesseract_path,
     TesseractOcrUnavailableError,
 )
-from translation_utils import post_process_translation_text
+from translation_utils import (
+    is_translation_error_result,
+    post_process_translation_text,
+)
 from PIL import Image # For hashing in capture_thread
 
 
@@ -1111,6 +1115,66 @@ def start_async_translation(
         log_debug(f"Error starting async translation: {type(e).__name__} - {e}")
 
 
+def _build_streaming_display_callback(app, translation_sequence):
+    state_lock = threading.Lock()
+    state = {
+        "latest_text": None,
+        "scheduled": False,
+    }
+
+    def display_latest_partial():
+        with state_lock:
+            text = state["latest_text"]
+            state["scheduled"] = False
+
+        try:
+            if not getattr(app, 'is_running', True):
+                return
+            latest_started = getattr(
+                app,
+                'latest_translation_sequence_started',
+                translation_sequence,
+            )
+            if translation_sequence < latest_started:
+                return
+            last_displayed = getattr(
+                app,
+                'last_displayed_translation_sequence',
+                0,
+            )
+            if translation_sequence <= last_displayed:
+                return
+            if isinstance(text, str) and text.strip():
+                processed_text = post_process_translation_text(text)
+                app.update_translation_text(processed_text)
+                app.last_streamed_translation_display = (
+                    translation_sequence,
+                    processed_text,
+                )
+                app.last_successful_translation_time = time.monotonic()
+        except Exception as stream_error:
+            log_debug(
+                "Streaming translation display failed: "
+                f"{type(stream_error).__name__} - {stream_error}"
+            )
+
+    def stream_callback(partial_text):
+        with state_lock:
+            state["latest_text"] = partial_text
+            if state["scheduled"]:
+                return
+            state["scheduled"] = True
+
+        try:
+            app.root.after(0, display_latest_partial)
+        except Exception:
+            with state_lock:
+                state["scheduled"] = False
+            raise
+
+    return stream_callback
+
+
 def process_translation_async(
     app,
     text_to_translate,
@@ -1135,24 +1199,10 @@ def process_translation_async(
             latency_mode = ""
 
         if latency_mode == "stream":
-            def stream_callback(partial_text):
-                def display_partial(text=partial_text):
-                    try:
-                        if not getattr(app, 'is_running', True):
-                            return
-                        latest_started = getattr(app, 'latest_translation_sequence_started', translation_sequence)
-                        if translation_sequence < latest_started:
-                            return
-                        last_displayed = getattr(app, 'last_displayed_translation_sequence', 0)
-                        if translation_sequence < last_displayed:
-                            return
-                        if isinstance(text, str) and text.strip():
-                            app.update_translation_text(post_process_translation_text(text))
-                            app.last_successful_translation_time = time.monotonic()
-                    except Exception as stream_error:
-                        log_debug(f"Streaming translation display failed: {type(stream_error).__name__} - {stream_error}")
-
-                app.root.after(0, display_partial)
+            stream_callback = _build_streaming_display_callback(
+                app,
+                translation_sequence,
+            )
         
         translation_result = app.translation_handler.translate_text_with_timeout(
             text_to_translate,
@@ -1222,28 +1272,35 @@ def process_translation_response(app, translation_result, translation_sequence, 
         
         log_debug(f"Translation {translation_sequence}: Processing newer sequence (last displayed: {app.last_displayed_translation_sequence})")
         
-        error_prefixes = ("Err:", "MarianMT error:", "Google API error:", "DeepL API error:", 
-                          "No translation for model:", "MarianMT not initialized.", 
-                          "MarianMT language pair not determined:", "Google API key missing:",
-                          "DeepL API key missing:", "Google Client init error:", 
-                          "DeepL Client init error:", "Translation error:", 
-                          "Google Translate API client not initialized", 
-                          "DeepL API client not initialized", 
-                          "MarianMT translator not initialized")
-        
-        if isinstance(translation_result, str) and any(translation_result.startswith(p) for p in error_prefixes):
+        if is_translation_error_result(translation_result):
             log_debug(f"Translation error in sequence {translation_sequence}: {translation_result}")
             app.update_translation_text(f"Translation Error:\n{translation_result}")
             app.last_displayed_translation_sequence = translation_sequence
-            app.last_successful_translation_time = time.monotonic()
             _clear_local_ocr_submit_state(app)
             return
         
         if isinstance(translation_result, str) and translation_result.strip():
             final_processed_translation = post_process_translation_text(translation_result)
-            display_schedule_start = time.monotonic()
-            app.update_translation_text(final_processed_translation)
-            log_debug(f"LATENCY: display scheduling took {time.monotonic() - display_schedule_start:.3f}s")
+            streamed_display = getattr(
+                app,
+                'last_streamed_translation_display',
+                None,
+            )
+            if streamed_display != (
+                translation_sequence,
+                final_processed_translation,
+            ):
+                display_schedule_start = time.monotonic()
+                app.update_translation_text(final_processed_translation)
+                log_debug(
+                    "LATENCY: display scheduling took "
+                    f"{time.monotonic() - display_schedule_start:.3f}s"
+                )
+            else:
+                log_debug(
+                    "LATENCY: skipped duplicate final display after stream "
+                    f"for sequence={translation_sequence}"
+                )
             log_debug(f"Translation {translation_sequence} displayed: '{final_processed_translation}' (from OCR batch {ocr_sequence_number})")
             app.last_displayed_translation_sequence = translation_sequence
             app.last_successful_translation_time = time.monotonic()

@@ -1632,6 +1632,48 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(result, "translated")
         self.assertGreaterEqual(elapsed, 0.04)
 
+    def test_custom_ai_errors_do_not_enter_success_state(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        for error_result in [
+            "Custom AI translation error: ValueError - upstream busy",
+            "AI model profile for translation is missing.",
+        ]:
+            with self.subTest(error_result=error_result):
+                displayed = []
+                app = types.SimpleNamespace(
+                    last_displayed_translation_sequence=0,
+                    last_successful_translation_time=123.0,
+                    last_local_ocr_submitted_text="Hello",
+                    last_local_ocr_submitted_norm="hello",
+                    last_local_ocr_submitted_scope=("scope",),
+                    update_translation_text=displayed.append,
+                )
+
+                worker_threads.process_translation_response(
+                    app,
+                    error_result,
+                    1,
+                    "Hello",
+                    0,
+                )
+
+                self.assertEqual(
+                    displayed,
+                    [f"Translation Error:\n{error_result}"],
+                )
+                self.assertEqual(
+                    app.last_successful_translation_time,
+                    123.0,
+                )
+                self.assertEqual(
+                    app.last_displayed_translation_sequence,
+                    1,
+                )
+                self.assertIsNone(app.last_local_ocr_submitted_text)
+                self.assertIsNone(app.last_local_ocr_submitted_norm)
+                self.assertIsNone(app.last_local_ocr_submitted_scope)
+
     def test_streaming_translation_partial_updates_are_scheduled_on_ui_thread(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []
@@ -1665,11 +1707,64 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         worker_threads.process_translation_async(app, "Hello", 1, 7, ("custom_ai", "Hello"))
 
+        self.assertEqual(displayed, [])
         for _delay, callback, args in scheduled:
             callback(*args)
 
-        self.assertIn("Hel", displayed)
-        self.assertIn("Hello", displayed)
+        self.assertTrue(displayed)
+        self.assertTrue(all(text == "Hello" for text in displayed))
+
+    def test_streaming_translation_coalesces_pending_ui_updates(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        displayed = []
+
+        class Handler:
+            def translate_text_with_timeout(
+                self,
+                text,
+                timeout_seconds=10.0,
+                ocr_batch_number=None,
+                stream_callback=None,
+                translation_sequence=None,
+            ):
+                stream_callback("H")
+                stream_callback("He")
+                stream_callback("Hello")
+                return "Hello"
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            latest_translation_sequence_started=1,
+            last_displayed_translation_sequence=0,
+            active_translation_calls={1},
+            active_translation_inflight_keys=set(),
+            translation_handler=Handler(),
+            custom_ai_latency_mode_var=types.SimpleNamespace(get=lambda: "stream"),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            update_translation_text=lambda text: displayed.append(text),
+            last_successful_translation_time=0,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "Hello",
+            1,
+            7,
+            ("custom_ai", "Hello"),
+        )
+
+        self.assertEqual(len(scheduled), 2)
+        _delay, partial_callback, partial_args = scheduled[0]
+        partial_callback(*partial_args)
+        self.assertEqual(displayed, ["Hello"])
+        _delay, final_callback, final_args = scheduled[1]
+        final_callback(*final_args)
+        self.assertEqual(displayed, ["Hello"])
 
 
 class LatencyLegacyOcrRemovalTests(unittest.TestCase):
