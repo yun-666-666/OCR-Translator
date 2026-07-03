@@ -31,6 +31,10 @@ from translation_utils import (
 from PIL import Image # For hashing in capture_thread
 
 
+DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
+MAX_SUPERSEDED_TRANSLATION_CONCURRENCY = 2
+
+
 def _get_screenshot_frame_hash(screenshot_pil):
     frame_hash = getattr(screenshot_pil, '_gct_frame_hash', None)
     if frame_hash:
@@ -877,6 +881,53 @@ def _get_translation_concurrency_limit(app):
     return max(1, int(getattr(app, 'max_concurrent_translation_calls', 1) or 1))
 
 
+def _get_translation_supersede_after_seconds(app):
+    try:
+        configured = float(
+            getattr(
+                app,
+                'translation_supersede_after_seconds',
+                DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS,
+            )
+        )
+    except (TypeError, ValueError):
+        configured = DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS
+    return max(0.25, min(10.0, configured))
+
+
+def _get_translation_latency_mode(app):
+    latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
+    try:
+        return str(
+            latency_mode_var.get() if latency_mode_var is not None else ""
+        ).strip().lower()
+    except Exception:
+        return ""
+
+
+def _get_oldest_active_translation_age(app, now):
+    started_by_sequence = getattr(
+        app,
+        'active_translation_started_monotonic',
+        None,
+    )
+    if not isinstance(started_by_sequence, dict):
+        return None
+
+    active_sequences = tuple(getattr(app, 'active_translation_calls', ()))
+    started_values = []
+    for sequence in active_sequences:
+        if sequence not in started_by_sequence:
+            continue
+        try:
+            started_values.append(float(started_by_sequence[sequence]))
+        except (TypeError, ValueError):
+            continue
+    if not started_values:
+        return None
+    return max(0.0, float(now) - min(started_values))
+
+
 def _flush_pending_translation_request(app, flush_generation=None):
     try:
         current_generation = int(
@@ -994,9 +1045,19 @@ def _submit_async_translation_request(
     app.translation_sequence_counter += 1
     translation_sequence = app.translation_sequence_counter
     app.latest_translation_sequence_started = translation_sequence
-    app.last_translation_submit_monotonic = time.monotonic()
+    submitted_at = time.monotonic()
+    app.last_translation_submit_monotonic = submitted_at
     app.active_translation_calls.add(translation_sequence)
     app.active_translation_inflight_keys.add(inflight_key)
+    started_by_sequence = getattr(
+        app,
+        'active_translation_started_monotonic',
+        None,
+    )
+    if not isinstance(started_by_sequence, dict):
+        started_by_sequence = {}
+        app.active_translation_started_monotonic = started_by_sequence
+    started_by_sequence[translation_sequence] = submitted_at
 
     try:
         app.translation_thread_pool.submit(
@@ -1011,6 +1072,7 @@ def _submit_async_translation_request(
     except Exception:
         app.active_translation_calls.discard(translation_sequence)
         app.active_translation_inflight_keys.discard(inflight_key)
+        started_by_sequence.pop(translation_sequence, None)
         raise
 
     log_debug(
@@ -1086,11 +1148,31 @@ def start_async_translation(
             queue_delay = max(queue_delay, remaining_interval)
             queue_reasons.append(f"submit interval {remaining_interval:.3f}s")
 
+        may_supersede_stale_call = False
         if active_translation_count >= concurrency_limit:
-            queue_delay = max(queue_delay, submit_interval or 0.25, 0.25)
-            queue_reasons.append(
-                f"active calls {active_translation_count}/{concurrency_limit}"
+            oldest_active_age = _get_oldest_active_translation_age(app, now)
+            supersede_after = _get_translation_supersede_after_seconds(app)
+            may_use_overflow_slot = (
+                concurrency_limit == 1
+                and active_translation_count < MAX_SUPERSEDED_TRANSLATION_CONCURRENCY
+                and oldest_active_age is not None
+                and _get_translation_latency_mode(app) != "race"
             )
+            if may_use_overflow_slot and oldest_active_age >= supersede_after:
+                may_supersede_stale_call = True
+            else:
+                if may_use_overflow_slot:
+                    concurrency_delay = max(
+                        0.001,
+                        supersede_after - oldest_active_age,
+                    )
+                else:
+                    concurrency_delay = max(submit_interval or 0.25, 0.25)
+                queue_delay = max(queue_delay, concurrency_delay)
+                queue_reasons.append(
+                    f"active calls {active_translation_count}/"
+                    f"{MAX_SUPERSEDED_TRANSLATION_CONCURRENCY if concurrency_limit == 1 else concurrency_limit}"
+                )
 
         if queue_reasons:
             _queue_pending_translation_request(
@@ -1102,6 +1184,13 @@ def start_async_translation(
                 requested_at_monotonic=requested_at_monotonic,
             )
             return
+
+        if may_supersede_stale_call:
+            log_debug(
+                "LATENCY: newest translation using one bounded overflow slot "
+                f"for OCR batch {ocr_sequence_number} "
+                f"age={oldest_active_age:.3f}s threshold={supersede_after:.3f}s"
+            )
 
         _submit_async_translation_request(
             app,
@@ -1248,6 +1337,13 @@ def process_translation_async(
             app.active_translation_calls.discard(translation_sequence)
             if inflight_key is not None and hasattr(app, 'active_translation_inflight_keys'):
                 app.active_translation_inflight_keys.discard(inflight_key)
+            started_by_sequence = getattr(
+                app,
+                'active_translation_started_monotonic',
+                None,
+            )
+            if isinstance(started_by_sequence, dict):
+                started_by_sequence.pop(translation_sequence, None)
             log_debug(f"Translation {translation_sequence} finished (active calls: {len(app.active_translation_calls)})")
             _expedite_pending_translation_request(app)
         except Exception as cleanup_error:

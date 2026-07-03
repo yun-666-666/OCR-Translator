@@ -1240,6 +1240,243 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(pool.submissions[0][1][1], "Second")
 
+    def test_stale_active_translation_can_be_superseded_once(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(app, "Latest", 2)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(app.active_translation_calls, {1, 2})
+        self.assertEqual(
+            app.active_translation_started_monotonic,
+            {1: 100.0, 2: 101.6},
+        )
+
+    def test_stale_translation_supersession_never_exceeds_two_active_calls(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=2,
+            active_translation_calls={1, 2},
+            active_translation_inflight_keys={
+                ("custom_ai", "Old", "scope"),
+                ("custom_ai", "Newer", "scope"),
+            },
+            active_translation_started_monotonic={1: 100.0, 2: 101.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=101.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=103.0):
+            worker_threads.start_async_translation(app, "Latest", 3)
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(app.pending_translation_request["text"], "Latest")
+        self.assertEqual(len(scheduled), 1)
+
+    def test_race_mode_does_not_stack_stale_translation_supersession(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            custom_ai_latency_mode_var=types.SimpleNamespace(get=lambda: "race"),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=103.0):
+            worker_threads.start_async_translation(app, "Latest", 2)
+
+        app.translation_thread_pool.submit.assert_not_called()
+        self.assertEqual(app.pending_translation_request["text"], "Latest")
+        self.assertEqual(len(scheduled), 1)
+
+    def test_young_active_translation_queues_until_supersede_deadline(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.4):
+            worker_threads.start_async_translation(app, "Latest", 2)
+
+        self.assertEqual(len(scheduled), 1)
+        self.assertGreaterEqual(scheduled[0][0], 1099)
+        self.assertLessEqual(scheduled[0][0], 1101)
+        self.assertEqual(app.pending_translation_request["text"], "Latest")
+
+    def test_translation_completion_clears_active_start_time(self):
+        worker_threads = import_worker_threads_for_tests()
+        inflight_key = ("custom_ai", "Current", "scope")
+
+        class Handler:
+            def translate_text_with_timeout(self, text, **kwargs):
+                return "done"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
+            translation_handler=Handler(),
+            active_translation_calls={7},
+            active_translation_inflight_keys={inflight_key},
+            active_translation_started_monotonic={7: 100.0},
+            pending_translation_request=None,
+            is_running=True,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "Current",
+            translation_sequence=7,
+            ocr_sequence_number=6,
+            inflight_key=inflight_key,
+        )
+
+        self.assertEqual(app.active_translation_started_monotonic, {})
+
     def test_pending_translation_reschedules_when_latest_request_has_earlier_deadline(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []

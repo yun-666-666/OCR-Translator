@@ -172,7 +172,9 @@ class GameChangingTranslator:
         self.last_displayed_translation_sequence = 0  # Track chronological order for translations
         self.active_translation_calls = set()  # Track active async translation calls
         self.active_translation_inflight_keys = set()  # Track unique in-flight translation requests
+        self.active_translation_started_monotonic = {}  # Track request age for bounded stale-call supersession
         self.max_concurrent_translation_calls = 6  # Limit concurrent translation API calls
+        self.translation_supersede_after_seconds = 1.5  # Let the newest subtitle bypass one stale slow call
         self.last_translation_submit_monotonic = 0.0  # Track the last time we submitted a translation request
         self.pending_translation_request = None  # Latest queued translation request while throttled
         self.pending_translation_flush_scheduled = False  # Whether a queued translation flush is scheduled
@@ -1025,10 +1027,18 @@ class GameChangingTranslator:
         if not hasattr(self, 'active_translation_inflight_keys'):
             self.active_translation_inflight_keys = set()
             log_debug("Initialized active_translation_inflight_keys")
+
+        if not hasattr(self, 'active_translation_started_monotonic'):
+            self.active_translation_started_monotonic = {}
+            log_debug("Initialized active_translation_started_monotonic")
         
         if not hasattr(self, 'max_concurrent_translation_calls'):
             self.max_concurrent_translation_calls = 6
             log_debug("Initialized max_concurrent_translation_calls")
+
+        if not hasattr(self, 'translation_supersede_after_seconds'):
+            self.translation_supersede_after_seconds = 1.5
+            log_debug("Initialized translation_supersede_after_seconds")
 
         if not hasattr(self, 'last_translation_submit_monotonic'):
             self.last_translation_submit_monotonic = 0.0
