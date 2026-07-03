@@ -507,6 +507,98 @@ class CustomAIProvider:
             return send(retry_payload)
         return response
 
+    def _response_has_retry_after(self, response):
+        headers = getattr(response, "headers", None) or {}
+        if not hasattr(headers, "get"):
+            return False
+        return bool(
+            headers.get("Retry-After")
+            or headers.get("retry-after")
+        )
+
+    def _should_retry_transient_response(self, response, latency_mode):
+        if normalize_custom_ai_latency_mode(latency_mode) == CUSTOM_AI_LATENCY_MODE_NONE:
+            return False
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        return (
+            status_code in {502, 504}
+            and not self._response_has_retry_after(response)
+        )
+
+    def _should_retry_transient_exception(self, error, latency_mode):
+        return (
+            normalize_custom_ai_latency_mode(latency_mode)
+            != CUSTOM_AI_LATENCY_MODE_NONE
+            and self._is_transport_reset_error(error)
+        )
+
+    def _close_response_quietly(self, response):
+        close = getattr(response, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            pass
+
+    def _post_with_transient_recovery(
+        self,
+        http_client,
+        url,
+        headers,
+        payload,
+        profile,
+        api_key,
+        latency_mode,
+    ):
+        current_client = http_client
+        for attempt in range(2):
+            try:
+                response = self._post_with_output_limit_fallback(
+                    current_client,
+                    url,
+                    headers,
+                    payload,
+                    profile,
+                    api_key,
+                )
+            except Exception as error:
+                if (
+                    attempt == 0
+                    and self._should_retry_transient_exception(
+                        error,
+                        latency_mode,
+                    )
+                ):
+                    if self._discard_owned_http_client_for_transport_error(error):
+                        current_client = self._get_http_client(latency_mode)
+                    log_debug(
+                        "RECOVERY: retrying Custom AI request on the same URL "
+                        f"after {type(error).__name__}"
+                    )
+                    continue
+                raise
+
+            if (
+                attempt == 0
+                and self._should_retry_transient_response(
+                    response,
+                    latency_mode,
+                )
+            ):
+                status_code = int(
+                    getattr(response, "status_code", 0) or 0
+                )
+                self._close_response_quietly(response)
+                log_debug(
+                    "RECOVERY: retrying Custom AI request on the same URL "
+                    f"after HTTP {status_code}"
+                )
+                continue
+            return response, current_client
+
+        raise RuntimeError("Transient recovery loop ended without a response")
+
     def _parse_retry_after_seconds(self, response):
         headers = getattr(response, "headers", None) or {}
         header_value = None
@@ -523,6 +615,7 @@ class CustomAIProvider:
         status_code = int(getattr(response, "status_code", 0) or 0)
         if (
             status_code not in {429, 503}
+            and not self._response_has_retry_after(response)
             and not self._looks_like_rate_limit_error(detail)
             and not self._looks_like_capacity_error(detail)
         ):
@@ -1137,13 +1230,14 @@ class CustomAIProvider:
         for url in urls:
             try:
                 start = time.monotonic()
-                response = self._post_with_output_limit_fallback(
+                response, http_client = self._post_with_transient_recovery(
                     http_client,
                     url,
                     headers,
                     request_payload,
                     profile,
                     api_key,
+                    latency_mode,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -1158,11 +1252,18 @@ class CustomAIProvider:
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                     error_message = self._response_error_message(response, url, api_key)
-                    self._activate_rate_limit_cooldown(profile, response, error_message)
-                    errors.append(error_message)
-                    if self._should_stop_endpoint_fallback(
-                        status_code,
+                    cooldown_seconds = self._activate_rate_limit_cooldown(
+                        profile,
+                        response,
                         error_message,
+                    )
+                    errors.append(error_message)
+                    if (
+                        cooldown_seconds > 0
+                        or self._should_stop_endpoint_fallback(
+                            status_code,
+                            error_message,
+                        )
                     ):
                         break
                     continue
@@ -1200,13 +1301,14 @@ class CustomAIProvider:
         for url in urls:
             try:
                 start = time.monotonic()
-                response = self._post_with_output_limit_fallback(
+                response, http_client = self._post_with_transient_recovery(
                     http_client,
                     url,
                     headers,
                     request_payload,
                     profile,
                     api_key,
+                    latency_mode,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -1218,11 +1320,18 @@ class CustomAIProvider:
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                     error_message = self._response_error_message(response, url, api_key)
-                    self._activate_rate_limit_cooldown(profile, response, error_message)
-                    errors.append(error_message)
-                    if self._should_stop_endpoint_fallback(
-                        status_code,
+                    cooldown_seconds = self._activate_rate_limit_cooldown(
+                        profile,
+                        response,
                         error_message,
+                    )
+                    errors.append(error_message)
+                    if (
+                        cooldown_seconds > 0
+                        or self._should_stop_endpoint_fallback(
+                            status_code,
+                            error_message,
+                        )
                     ):
                         break
                     continue
@@ -1293,11 +1402,18 @@ class CustomAIProvider:
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                     error_message = self._response_error_message(response, url, api_key)
-                    self._activate_rate_limit_cooldown(profile, response, error_message)
-                    errors.append(error_message)
-                    if self._should_stop_endpoint_fallback(
-                        status_code,
+                    cooldown_seconds = self._activate_rate_limit_cooldown(
+                        profile,
+                        response,
                         error_message,
+                    )
+                    errors.append(error_message)
+                    if (
+                        cooldown_seconds > 0
+                        or self._should_stop_endpoint_fallback(
+                            status_code,
+                            error_message,
+                        )
                     ):
                         break
                     continue
@@ -1356,11 +1472,18 @@ class CustomAIProvider:
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                     error_message = self._response_error_message(response, url, api_key)
-                    self._activate_rate_limit_cooldown(profile, response, error_message)
-                    errors.append(error_message)
-                    if self._should_stop_endpoint_fallback(
-                        status_code,
+                    cooldown_seconds = self._activate_rate_limit_cooldown(
+                        profile,
+                        response,
                         error_message,
+                    )
+                    errors.append(error_message)
+                    if (
+                        cooldown_seconds > 0
+                        or self._should_stop_endpoint_fallback(
+                            status_code,
+                            error_message,
+                        )
                     ):
                         break
                     continue

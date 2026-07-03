@@ -317,6 +317,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "https://host.example/v1/chat/completions",
                 "https://host.example/chat/completions",
                 "https://host.example/chat/completions",
+                "https://host.example/chat/completions",
                 "https://host.example/v1/chat/completions",
             ],
         )

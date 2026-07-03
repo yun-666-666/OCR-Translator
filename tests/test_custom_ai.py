@@ -384,9 +384,246 @@ class CustomAIProviderTests(unittest.TestCase):
                 "https://host.example/v1/chat/completions",
                 "https://host.example/chat/completions",
                 "https://host.example/chat/completions",
+                "https://host.example/chat/completions",
                 "https://host.example/v1/chat/completions",
             ],
         )
+
+    def test_chat_post_retries_same_url_once_after_502(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.headers = {}
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                self.urls.append(url)
+                if self.calls == 1:
+                    return Response(502, {"error": {"message": "Bad gateway"}})
+                return Response(
+                    200,
+                    {"choices": [{"message": {"content": "Recovered"}}]},
+                )
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+        }
+
+        response_json, _duration = provider._post(
+            profile,
+            {"model": "demo", "messages": []},
+        )
+
+        self.assertEqual(
+            response_json["choices"][0]["message"]["content"],
+            "Recovered",
+        )
+        self.assertEqual(provider.http_client.calls, 2)
+        self.assertEqual(len(set(provider.http_client.urls)), 1)
+
+    def test_responses_post_retries_same_url_once_after_504(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.headers = {}
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return Response(504, {"error": {"message": "Gateway timeout"}})
+                return Response(200, {"output_text": "Recovered"})
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "wire_api": "responses",
+        }
+
+        response_json, _duration = provider._post(
+            profile,
+            {"model": "demo", "messages": []},
+        )
+
+        self.assertEqual(response_json["output_text"], "Recovered")
+        self.assertEqual(provider.http_client.calls, 2)
+
+    def test_post_rebuilds_owned_session_and_retries_after_tls_reset(self):
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return {"choices": [{"message": {"content": "Recovered"}}]}
+
+        class FakeAdapter:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeSession:
+            instances = []
+
+            def __init__(self):
+                self.closed = False
+                self.calls = 0
+                FakeSession.instances.append(self)
+
+            def mount(self, prefix, adapter):
+                return None
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                if len(FakeSession.instances) == 1:
+                    raise RuntimeError(
+                        "SSLEOFError: unexpected_eof_while_reading"
+                    )
+                return Response()
+
+            def close(self):
+                self.closed = True
+
+        fake_requests = types.SimpleNamespace(
+            Session=FakeSession,
+            adapters=types.SimpleNamespace(HTTPAdapter=FakeAdapter),
+        )
+        provider = CustomAIProvider()
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+        }
+
+        with unittest.mock.patch.dict(sys.modules, {"requests": fake_requests}):
+            response_json, _duration = provider._post(
+                profile,
+                {"model": "demo", "messages": []},
+            )
+
+        self.assertEqual(
+            response_json["choices"][0]["message"]["content"],
+            "Recovered",
+        )
+        self.assertEqual(len(FakeSession.instances), 2)
+        self.assertTrue(FakeSession.instances[0].closed)
+        self.assertIs(provider.http_client, FakeSession.instances[1])
+
+    def test_transient_post_retry_is_disabled_in_none_mode(self):
+        class Response:
+            status_code = 502
+            text = '{"error":{"message":"Bad gateway"}}'
+            headers = {}
+
+            def json(self):
+                return {"error": {"message": "Bad gateway"}}
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        with self.assertRaises(ValueError):
+            provider._post(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                },
+                {"model": "demo", "messages": []},
+                latency_mode="none",
+            )
+
+        self.assertEqual(provider.http_client.calls, 1)
+
+    def test_transient_post_retry_respects_retry_after(self):
+        class Response:
+            status_code = 502
+            text = '{"error":{"message":"Bad gateway"}}'
+            headers = {"Retry-After": "3"}
+
+            def json(self):
+                return {"error": {"message": "Bad gateway"}}
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        with self.assertRaises(ValueError):
+            provider._post(
+                {
+                    "base_url": "https://host.example",
+                    "api_key": "super-secret",
+                },
+                {"model": "demo", "messages": []},
+            )
+
+        self.assertEqual(provider.http_client.calls, 1)
+
+    def test_streaming_transient_502_is_not_retried(self):
+        class Response:
+            status_code = 502
+            text = '{"error":{"message":"Bad gateway"}}'
+            headers = {}
+
+            def json(self):
+                return {"error": {"message": "Bad gateway"}}
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                self.calls += 1
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        with self.assertRaises(ValueError):
+            provider._stream_post(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                },
+                {"model": "demo", "messages": []},
+            )
+
+        self.assertEqual(provider.http_client.calls, 1)
 
     def test_deterministic_http_errors_do_not_probe_alternate_endpoint_paths(self):
         class Response:
