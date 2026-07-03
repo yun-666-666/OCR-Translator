@@ -3082,6 +3082,202 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertIn("fast", called_profile_ids)
         self.assertNotIn("other", called_profile_ids)
 
+    def test_custom_ai_race_profiles_require_semantic_equivalence(self):
+        active = {
+            "id": "active",
+            "base_url": "https://active.example/v1",
+            "model": "same-model",
+            "wire_api": "responses",
+            "reasoning_effort": "high",
+        }
+        compatible = {
+            "id": "compatible",
+            "base_url": "https://compatible.example/v1",
+            "model": "same-model",
+            "wire_api": "responses",
+            "model_reasoning_effort": "high",
+        }
+        different_wire = {
+            "id": "different-wire",
+            "base_url": "https://chat.example/v1",
+            "model": "same-model",
+            "wire_api": "chat_completions",
+            "reasoning_effort": "high",
+        }
+        different_reasoning = {
+            "id": "different-reasoning",
+            "base_url": "https://low.example/v1",
+            "model": "same-model",
+            "wire_api": "responses",
+            "reasoning_effort": "low",
+        }
+        different_model = {
+            "id": "different-model",
+            "base_url": "https://other.example/v1",
+            "model": "other-model",
+            "wire_api": "responses",
+            "reasoning_effort": "high",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [
+                    active,
+                    compatible,
+                    different_wire,
+                    different_reasoning,
+                    different_model,
+                ]
+
+        app = types.SimpleNamespace(custom_ai_profiles=Profiles())
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            return_value=0.0
+        )
+
+        candidates = handler._get_custom_ai_race_profiles(active)
+
+        self.assertEqual(
+            [candidate["id"] for candidate in candidates],
+            ["active", "compatible"],
+        )
+        handler.close()
+
+    def test_custom_ai_race_cooldown_uses_healthy_equivalent_profile(self):
+        active = {
+            "id": "active",
+            "base_url": "https://active.example/v1",
+            "model": "same-model",
+        }
+        healthy = {
+            "id": "healthy",
+            "base_url": "https://healthy.example/v1",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, healthy]
+
+        mode = DummyVar("race")
+        app = types.SimpleNamespace(
+            translation_model_var=DummyVar("custom_ai"),
+            custom_ai_latency_mode_var=mode,
+            custom_ai_profiles=Profiles(),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            side_effect=lambda profile: (
+                8.0 if profile["id"] == "active" else 0.0
+            )
+        )
+
+        self.assertEqual(
+            handler.get_translation_provider_cooldown_seconds(),
+            0.0,
+        )
+
+        mode.value = "safe"
+        self.assertEqual(
+            handler.get_translation_provider_cooldown_seconds(),
+            8.0,
+        )
+        handler.close()
+
+    def test_custom_ai_race_single_healthy_alternative_is_called(self):
+        active = {
+            "id": "active",
+            "name": "Cooling",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+        }
+        healthy = {
+            "id": "healthy",
+            "name": "Healthy",
+            "base_url": "https://healthy.example/v1",
+            "api_key": "healthy-key",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, healthy]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_prompt_text="",
+            keep_linebreaks_var=DummyVar(False),
+            custom_context_window_var=DummyVar(0),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            side_effect=lambda profile: (
+                8.0 if profile["id"] == "active" else 0.0
+            )
+        )
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("translated", {}, 0.1)
+        )
+
+        result = handler._custom_ai_translate_race(
+            active,
+            "Bonjour",
+            "fr",
+            "en",
+            [],
+            False,
+        )
+
+        self.assertEqual(result[0], "translated")
+        self.assertEqual(result[4]["id"], "healthy")
+        self.assertEqual(
+            handler.custom_ai_provider.translate.call_args.args[0]["id"],
+            "healthy",
+        )
+        self.assertEqual(handler.custom_ai_provider.translate.call_count, 1)
+        handler.close()
+
+    def test_custom_ai_race_all_cooling_profiles_use_shortest_cooldown(self):
+        active = {
+            "id": "active",
+            "base_url": "https://active.example/v1",
+            "model": "same-model",
+        }
+        alternate = {
+            "id": "alternate",
+            "base_url": "https://alternate.example/v1",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, alternate]
+
+        app = types.SimpleNamespace(
+            translation_model_var=DummyVar("custom_ai"),
+            custom_ai_latency_mode_var=DummyVar("race"),
+            custom_ai_profiles=Profiles(),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            side_effect=lambda profile: (
+                9.0 if profile["id"] == "active" else 3.0
+            )
+        )
+
+        self.assertEqual(
+            handler.get_translation_provider_cooldown_seconds(),
+            3.0,
+        )
+        handler.close()
+
     def test_custom_ai_translation_uses_persistent_cache_between_handler_instances(self):
         profile = {
             "id": "profile-1",

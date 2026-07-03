@@ -19,6 +19,7 @@ from custom_ai import (
     CUSTOM_AI_LATENCY_MODE_SAFE,
     CUSTOM_AI_LATENCY_MODE_STREAM,
     normalize_custom_ai_latency_mode,
+    normalize_custom_ai_wire_api,
 )
 
 REQUESTS_AVAILABLE = False
@@ -473,7 +474,14 @@ Call Duration: {call_duration:.3f} seconds
             return 0.0
 
         try:
-            return max(0.0, float(cooldown_getter(profile)))
+            profiles = [profile]
+            if self._get_custom_ai_latency_mode() == CUSTOM_AI_LATENCY_MODE_RACE:
+                profiles = self._get_custom_ai_race_profiles(profile)
+            remaining_values = [
+                max(0.0, float(cooldown_getter(candidate)))
+                for candidate in profiles
+            ]
+            return min(remaining_values) if remaining_values else 0.0
         except Exception as cooldown_error:
             log_debug(
                 "Custom AI cooldown check failed: "
@@ -564,8 +572,9 @@ Call Duration: {call_duration:.3f} seconds
     def _custom_ai_translate_race(self, active_profile, text, source_lang, target_lang, context, keep_linebreaks):
         candidates = self._get_custom_ai_race_profiles(active_profile)
         if len(candidates) <= 1:
+            candidate = candidates[0] if candidates else active_profile
             translated, usage, duration = self.custom_ai_provider.translate(
-                active_profile,
+                candidate,
                 text,
                 source_lang,
                 target_lang,
@@ -579,10 +588,10 @@ Call Duration: {call_duration:.3f} seconds
                 usage,
                 duration,
                 self._cache_params_for_profile(
-                    active_profile,
+                    candidate,
                     current_source=text,
                 ),
-                active_profile,
+                candidate,
             )
 
         executor = concurrent.futures.ThreadPoolExecutor(
@@ -637,19 +646,24 @@ Call Duration: {call_duration:.3f} seconds
         raise ValueError("All Custom AI race endpoints failed. Tried: " + "; ".join(errors))
 
     def _get_custom_ai_race_profiles(self, active_profile):
-        active_model = str(active_profile.get("model", "")).strip()
+        active_signature = self._custom_ai_race_signature(active_profile)
         candidates = []
         seen = set()
 
         def add_candidate(profile):
             if not isinstance(profile, dict):
                 return
-            if str(profile.get("model", "")).strip() != active_model:
+            if self._custom_ai_race_signature(profile) != active_signature:
                 return
             identity = profile.get("id") or (
                 profile.get("base_url", ""),
-                profile.get("api_key", ""),
                 profile.get("model", ""),
+                normalize_custom_ai_wire_api(profile.get("wire_api")),
+                str(
+                    profile.get("reasoning_effort")
+                    or profile.get("model_reasoning_effort")
+                    or ""
+                ).strip().lower(),
             )
             if identity in seen:
                 return
@@ -666,7 +680,40 @@ Call Duration: {call_duration:.3f} seconds
             profiles = []
         for profile in profiles:
             add_candidate(profile)
-        return candidates
+
+        cooldown_getter = getattr(
+            self.custom_ai_provider,
+            "get_cooldown_remaining",
+            None,
+        )
+        if not callable(cooldown_getter):
+            return candidates
+
+        healthy_candidates = []
+        for candidate in candidates:
+            try:
+                remaining = max(0.0, float(cooldown_getter(candidate)))
+            except Exception as cooldown_error:
+                log_debug(
+                    "Custom AI race cooldown check failed: "
+                    f"{type(cooldown_error).__name__} - {cooldown_error}"
+                )
+                remaining = 0.0
+            if remaining <= 0.0:
+                healthy_candidates.append(candidate)
+        return healthy_candidates or candidates
+
+    def _custom_ai_race_signature(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
+        return (
+            str(profile.get("model") or "").strip(),
+            normalize_custom_ai_wire_api(profile.get("wire_api")),
+            str(
+                profile.get("reasoning_effort")
+                or profile.get("model_reasoning_effort")
+                or ""
+            ).strip().lower(),
+        )
 
     def _cache_params_for_profile(self, profile, current_source=None):
         keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
