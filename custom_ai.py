@@ -905,6 +905,128 @@ class CustomAIProvider:
             )
         return normalized
 
+    def _normalize_translation_stream_partial(
+        self,
+        source_text,
+        partial_text,
+    ):
+        raw = str(partial_text or "").lstrip("\ufeff")
+        if not raw:
+            return None
+
+        source = str(source_text or "").strip()
+        source_lines = source.splitlines()
+        source_is_fenced = (
+            len(source_lines) >= 2
+            and source_lines[0].strip().startswith("```")
+            and source_lines[-1].strip() == "```"
+        )
+        if source_is_fenced:
+            return raw
+
+        candidate = raw.lstrip()
+        candidate_casefold = candidate.casefold()
+        source_casefold = source.casefold()
+        source_first_line = (
+            source_lines[0].strip().casefold()
+            if source_lines
+            else ""
+        )
+
+        if "```".startswith(candidate) and len(candidate) < 3:
+            return None
+        if candidate.startswith("```"):
+            newline_index = candidate.find("\n")
+            if newline_index < 0:
+                fence_tag = candidate[3:].strip()
+                if (
+                    len(fence_tag) <= 24
+                    and all(
+                        char.isalnum() or char in {"_", "+", "-"}
+                        for char in fence_tag
+                    )
+                ):
+                    return None
+                return raw
+
+            fence_tag = candidate[3:newline_index].strip()
+            valid_fence_tag = (
+                not fence_tag
+                or all(
+                    char.isalnum() or char in {"_", "+", "-"}
+                    for char in fence_tag
+                )
+            )
+            if valid_fence_tag:
+                body = candidate[newline_index + 1:].rstrip()
+                if body.endswith("```"):
+                    body = body[:-3].rstrip()
+                else:
+                    trailing_backticks = len(body) - len(body.rstrip("`"))
+                    if trailing_backticks in {1, 2}:
+                        body = body[:-trailing_backticks].rstrip()
+                return body or None
+
+        active_preambles = tuple(
+            preamble
+            for preamble in TRANSLATION_OUTPUT_PREAMBLES
+            if not source_casefold.startswith(preamble)
+        )
+        if any(
+            preamble.startswith(candidate_casefold)
+            for preamble in active_preambles
+        ):
+            return None
+        for preamble in active_preambles:
+            if candidate_casefold.startswith(preamble):
+                remainder = candidate[len(preamble):].lstrip()
+                return remainder or None
+
+        active_labels = tuple(
+            label
+            for label in TRANSLATION_OUTPUT_WRAPPER_LABELS
+            if source_first_line != label
+        )
+        if any(
+            label.startswith(candidate_casefold)
+            for label in active_labels
+        ):
+            return None
+        for label in active_labels:
+            if not candidate_casefold.startswith(label):
+                continue
+            remainder = candidate[len(label):]
+            if not remainder or remainder == "\r":
+                return None
+            if remainder.startswith("\r\n"):
+                cleaned = remainder[2:].lstrip()
+                return cleaned or None
+            if remainder.startswith("\n"):
+                cleaned = remainder[1:].lstrip()
+                return cleaned or None
+            return raw
+
+        return raw
+
+    def _build_translation_stream_callback(
+        self,
+        source_text,
+        stream_callback,
+    ):
+        last_emitted = [None]
+
+        def filtered_callback(partial_text):
+            normalized = self._normalize_translation_stream_partial(
+                source_text,
+                partial_text,
+            )
+            if not normalized or normalized == last_emitted[0]:
+                return
+            last_emitted[0] = normalized
+            stream_callback(normalized)
+
+        return filtered_callback
+
     def build_translation_payload(
         self,
         profile,
@@ -1173,13 +1295,24 @@ class CustomAIProvider:
             keep_linebreaks=keep_linebreaks,
         )
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        effective_stream_callback = stream_callback
+        if (
+            latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM
+            and callable(stream_callback)
+        ):
+            effective_stream_callback = (
+                self._build_translation_stream_callback(
+                    text,
+                    stream_callback,
+                )
+            )
 
         def request(current_payload):
             if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM:
                 return self._stream_post(
                     profile,
                     current_payload,
-                    stream_callback=stream_callback,
+                    stream_callback=effective_stream_callback,
                     latency_mode=latency_mode,
                 )
             return self._post(

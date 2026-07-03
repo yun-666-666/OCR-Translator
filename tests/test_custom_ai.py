@@ -1844,6 +1844,154 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(responses_result, "Hello")
         self.assertEqual(stream_result, "Hello")
 
+    def test_stream_output_filter_holds_only_unresolved_wrapper_prefixes(self):
+        provider = CustomAIProvider()
+        emitted = []
+        callback = provider._build_translation_stream_callback(
+            "Bonjour",
+            emitted.append,
+        )
+
+        for partial in [
+            "H",
+            "He",
+            "Her",
+            "Here is the translation:",
+            "Here is the translation:\nH",
+            "Here is the translation:\nHello",
+            "Here is the translation:\nHello",
+        ]:
+            callback(partial)
+
+        self.assertEqual(emitted, ["H", "Hello"])
+
+        ordinary = []
+        ordinary_callback = provider._build_translation_stream_callback(
+            "Bonjour",
+            ordinary.append,
+        )
+        ordinary_callback("Hel")
+        ordinary_callback("Hello")
+
+        self.assertEqual(ordinary, ["Hel", "Hello"])
+
+    def test_stream_output_filter_removes_label_and_fence_incrementally(self):
+        provider = CustomAIProvider()
+
+        labeled = []
+        labeled_callback = provider._build_translation_stream_callback(
+            "Bonjour",
+            labeled.append,
+        )
+        for partial in [
+            "T",
+            "Translation:",
+            "Translation:\n",
+            "Translation:\nH",
+            "Translation:\nHello",
+        ]:
+            labeled_callback(partial)
+
+        fenced = []
+        fenced_callback = provider._build_translation_stream_callback(
+            "Bonjour",
+            fenced.append,
+        )
+        for partial in [
+            "`",
+            "```text",
+            "```text\nH",
+            "```text\nHello",
+            "```text\nHello\n`",
+            "```text\nHello\n``",
+            "```text\nHello\n```",
+        ]:
+            fenced_callback(partial)
+
+        self.assertEqual(labeled, ["H", "Hello"])
+        self.assertEqual(fenced, ["H", "Hello"])
+
+    def test_stream_output_filter_preserves_inline_and_source_owned_wrappers(self):
+        provider = CustomAIProvider()
+
+        inline = []
+        inline_callback = provider._build_translation_stream_callback(
+            "Traduction indisponible",
+            inline.append,
+        )
+        for partial in [
+            "T",
+            "Translation:",
+            "Translation: unavailable",
+        ]:
+            inline_callback(partial)
+
+        source_owned = []
+        source_owned_callback = provider._build_translation_stream_callback(
+            "Translation:\nunavailable",
+            source_owned.append,
+        )
+        source_owned_callback("Translation:")
+        source_owned_callback("Translation:\nunavailable")
+
+        fenced_source = []
+        fenced_source_callback = provider._build_translation_stream_callback(
+            "```text\nbonjour\n```",
+            fenced_source.append,
+        )
+        fenced_source_callback("```text\nhello")
+
+        self.assertEqual(inline, ["Translation: unavailable"])
+        self.assertEqual(
+            source_owned,
+            ["Translation:", "Translation:\nunavailable"],
+        )
+        self.assertEqual(fenced_source, ["```text\nhello"])
+
+    def test_translate_filters_stream_callbacks_for_chat_and_responses(self):
+        for wire_api in ["chat_completions", "responses"]:
+            with self.subTest(wire_api=wire_api):
+                provider = CustomAIProvider(http_client=object())
+                partials = []
+
+                def fake_stream_post(
+                    profile,
+                    payload,
+                    stream_callback=None,
+                    latency_mode="stream",
+                ):
+                    stream_callback("Translation:")
+                    stream_callback("Translation:\nHello")
+                    if wire_api == "responses":
+                        return {"output_text": "Translation:\nHello"}, 0.1
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "Translation:\nHello"
+                                }
+                            }
+                        ]
+                    }, 0.1
+
+                provider._stream_post = Mock(side_effect=fake_stream_post)
+                result, _usage, _duration = provider.translate(
+                    {
+                        "base_url": "https://host.example/v1",
+                        "api_key": "super-secret",
+                        "model": "demo",
+                        "wire_api": wire_api,
+                    },
+                    "Bonjour",
+                    "fr",
+                    "en",
+                    latency_mode="stream",
+                    stream_callback=partials.append,
+                )
+
+                self.assertEqual(partials, ["Hello"])
+                self.assertEqual(result, "Hello")
+
     def test_translation_payload_bounds_output_and_treats_source_as_data(self):
         provider = CustomAIProvider()
 
