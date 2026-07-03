@@ -3278,6 +3278,151 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         )
         handler.close()
 
+    def test_custom_ai_race_does_not_stack_running_loser_requests(self):
+        fast = {
+            "id": "fast",
+            "name": "Fast",
+            "base_url": "https://fast.example/v1",
+            "api_key": "fast-key",
+            "model": "same-model",
+        }
+        slow = {
+            "id": "slow",
+            "name": "Slow",
+            "base_url": "https://slow.example/v1",
+            "api_key": "slow-key",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [fast, slow]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_prompt_text="",
+            keep_linebreaks_var=DummyVar(False),
+            custom_context_window_var=DummyVar(0),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            return_value=0.0
+        )
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        calls = []
+
+        def fake_translate(profile, *args, **kwargs):
+            calls.append(profile["id"])
+            if profile["id"] == "slow":
+                slow_started.set()
+                release_slow.wait(timeout=2.0)
+                return "slow result", {}, 2.0
+            slow_started.wait(timeout=1.0)
+            return "fast result", {}, 0.01
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=fake_translate
+        )
+
+        try:
+            first = handler._custom_ai_translate_race(
+                fast,
+                "First",
+                "en",
+                "zh-CN",
+                [],
+                False,
+            )
+            self.assertEqual(first[0], "fast result")
+            self.assertTrue(slow_started.wait(timeout=1.0))
+            self.assertEqual(
+                [
+                    profile["id"]
+                    for profile in handler._get_custom_ai_race_profiles(fast)
+                ],
+                ["fast"],
+            )
+
+            second = handler._custom_ai_translate_race(
+                fast,
+                "Second",
+                "en",
+                "zh-CN",
+                [],
+                False,
+            )
+            self.assertEqual(second[0], "fast result")
+            self.assertEqual(calls.count("slow"), 1)
+        finally:
+            release_slow.set()
+
+        deadline = time.monotonic() + 1.0
+        eligible_ids = []
+        while time.monotonic() < deadline:
+            eligible_ids = [
+                profile["id"]
+                for profile in handler._get_custom_ai_race_profiles(fast)
+            ]
+            if "slow" in eligible_ids:
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(eligible_ids, ["fast", "slow"])
+        handler.close()
+
+    def test_custom_ai_race_submit_failure_rolls_back_busy_profile(self):
+        first = {
+            "id": "first",
+            "base_url": "https://first.example/v1",
+            "api_key": "first-key",
+            "model": "same-model",
+        }
+        second = {
+            "id": "second",
+            "base_url": "https://second.example/v1",
+            "api_key": "second-key",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [first, second]
+
+        class FailingExecutor:
+            def submit(self, *args, **kwargs):
+                raise RuntimeError("executor unavailable")
+
+            def shutdown(self, wait=False, cancel_futures=False):
+                return None
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_prompt_text="",
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(
+            return_value=0.0
+        )
+
+        with patch.object(
+            translation_handler_module.concurrent.futures,
+            "ThreadPoolExecutor",
+            return_value=FailingExecutor(),
+        ):
+            with self.assertRaises(RuntimeError):
+                handler._custom_ai_translate_race(
+                    first,
+                    "Bonjour",
+                    "fr",
+                    "en",
+                    [],
+                    False,
+                )
+
+        self.assertEqual(handler._custom_race_inflight_profiles, set())
+        handler.close()
+
     def test_custom_ai_translation_uses_persistent_cache_between_handler_instances(self):
         profile = {
             "id": "profile-1",

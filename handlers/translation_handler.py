@@ -44,6 +44,8 @@ class TranslationHandler:
             thread_name_prefix="CustomAIShortLog",
         )
         self._custom_session_started = set()
+        self._custom_race_state_lock = threading.Lock()
+        self._custom_race_inflight_profiles = set()
         
         # Legacy DeepL-specific context storage retained only to keep old callbacks harmless.
         self.deepl_context_window = []  # List of source texts only
@@ -598,23 +600,40 @@ Call Duration: {call_duration:.3f} seconds
             max_workers=len(candidates),
             thread_name_prefix="CustomAIRace",
         )
-        future_to_profile = {
-            executor.submit(
-                self.custom_ai_provider.translate,
-                candidate,
-                text,
-                source_lang,
-                target_lang,
-                custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
-                context=context,
-                keep_linebreaks=keep_linebreaks,
-                latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
-            ): candidate
-            for candidate in candidates
-        }
+        future_to_profile = {}
         shutdown_started = False
         errors = []
         try:
+            for candidate in candidates:
+                identity = self._custom_ai_race_profile_identity(candidate)
+                with self._custom_race_state_lock:
+                    self._custom_race_inflight_profiles.add(identity)
+                try:
+                    future = executor.submit(
+                        self.custom_ai_provider.translate,
+                        candidate,
+                        text,
+                        source_lang,
+                        target_lang,
+                        custom_prompt=getattr(
+                            self.app,
+                            'custom_prompt_text',
+                            '',
+                        ),
+                        context=context,
+                        keep_linebreaks=keep_linebreaks,
+                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                    )
+                except Exception:
+                    self._release_custom_ai_race_profile(identity)
+                    raise
+                future_to_profile[future] = candidate
+                future.add_done_callback(
+                    lambda _future, race_identity=identity: (
+                        self._release_custom_ai_race_profile(race_identity)
+                    )
+                )
+
             for future in concurrent.futures.as_completed(future_to_profile):
                 candidate = future_to_profile[future]
                 try:
@@ -626,6 +645,9 @@ Call Duration: {call_duration:.3f} seconds
                     "LATENCY: custom_ai race winner "
                     f"profile={candidate.get('name', 'Custom AI')} "
                     f"duration={duration:.3f}s candidates={len(candidates)}"
+                )
+                self._release_custom_ai_race_profile(
+                    self._custom_ai_race_profile_identity(candidate)
                 )
                 executor.shutdown(wait=False, cancel_futures=True)
                 shutdown_started = True
@@ -686,22 +708,31 @@ Call Duration: {call_duration:.3f} seconds
             "get_cooldown_remaining",
             None,
         )
-        if not callable(cooldown_getter):
-            return candidates
+        eligible_candidates = candidates
+        if callable(cooldown_getter):
+            healthy_candidates = []
+            for candidate in candidates:
+                try:
+                    remaining = max(0.0, float(cooldown_getter(candidate)))
+                except Exception as cooldown_error:
+                    log_debug(
+                        "Custom AI race cooldown check failed: "
+                        f"{type(cooldown_error).__name__} - {cooldown_error}"
+                    )
+                    remaining = 0.0
+                if remaining <= 0.0:
+                    healthy_candidates.append(candidate)
+            eligible_candidates = healthy_candidates or candidates
 
-        healthy_candidates = []
-        for candidate in candidates:
-            try:
-                remaining = max(0.0, float(cooldown_getter(candidate)))
-            except Exception as cooldown_error:
-                log_debug(
-                    "Custom AI race cooldown check failed: "
-                    f"{type(cooldown_error).__name__} - {cooldown_error}"
-                )
-                remaining = 0.0
-            if remaining <= 0.0:
-                healthy_candidates.append(candidate)
-        return healthy_candidates or candidates
+        with self._custom_race_state_lock:
+            busy_profiles = set(self._custom_race_inflight_profiles)
+        idle_candidates = [
+            candidate
+            for candidate in eligible_candidates
+            if self._custom_ai_race_profile_identity(candidate)
+            not in busy_profiles
+        ]
+        return idle_candidates or eligible_candidates
 
     def _custom_ai_race_signature(self, profile):
         profile = profile if isinstance(profile, dict) else {}
@@ -714,6 +745,21 @@ Call Duration: {call_duration:.3f} seconds
                 or ""
             ).strip().lower(),
         )
+
+    def _custom_ai_race_profile_identity(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
+        profile_id = str(profile.get("id") or "").strip()
+        if profile_id:
+            return ("id", profile_id)
+        return (
+            "profile",
+            str(profile.get("base_url") or "").strip().rstrip("/"),
+            *self._custom_ai_race_signature(profile),
+        )
+
+    def _release_custom_ai_race_profile(self, identity):
+        with self._custom_race_state_lock:
+            self._custom_race_inflight_profiles.discard(identity)
 
     def _cache_params_for_profile(self, profile, current_source=None):
         keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
