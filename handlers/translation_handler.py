@@ -69,6 +69,27 @@ class TranslationHandler:
         """Get the currently active OCR provider based on selected OCR model."""
         return None
 
+    def _sanitize_custom_ai_profile_error(self, error, profile):
+        error_text = str(error)
+        sanitizer = getattr(
+            self.custom_ai_provider,
+            "_sanitize_error",
+            None,
+        )
+        if callable(sanitizer):
+            try:
+                error_text = sanitizer(
+                    error_text,
+                    (
+                        profile.get("api_key", "")
+                        if isinstance(profile, dict)
+                        else ""
+                    ),
+                )
+            except Exception:
+                pass
+        return error_text
+
     def perform_ocr(self, image_data, source_lang):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
         profile = self.app.custom_ai_profiles.get_active_profile("ocr")
@@ -608,8 +629,18 @@ Call Duration: {call_duration:.3f} seconds
                 winning_profile = profile
             self._log_custom_short_call("translation", winning_profile, translated_api_text, usage, duration)
         except Exception as e:
-            log_debug(f"Custom AI translation error: {type(e).__name__} - {e}")
-            return f"Custom AI translation error: {type(e).__name__} - {e}"
+            error_text = self._sanitize_custom_ai_profile_error(
+                e,
+                profile,
+            )
+            log_debug(
+                "Custom AI translation error: "
+                f"{type(e).__name__} - {error_text}"
+            )
+            return (
+                "Custom AI translation error: "
+                f"{type(e).__name__} - {error_text}"
+            )
 
         if translated_api_text and not self._is_error_message(translated_api_text):
             cache_targets = [cache_params]
@@ -656,16 +687,28 @@ Call Duration: {call_duration:.3f} seconds
         candidates = self._get_custom_ai_race_profiles(active_profile)
         if len(candidates) <= 1:
             candidate = candidates[0] if candidates else active_profile
-            translated, usage, duration = self.custom_ai_provider.translate(
-                candidate,
-                text,
-                source_lang,
-                target_lang,
-                custom_prompt=custom_prompt,
-                context=context,
-                keep_linebreaks=keep_linebreaks,
-                latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
-            )
+            try:
+                translated, usage, duration = (
+                    self.custom_ai_provider.translate(
+                        candidate,
+                        text,
+                        source_lang,
+                        target_lang,
+                        custom_prompt=custom_prompt,
+                        context=context,
+                        keep_linebreaks=keep_linebreaks,
+                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                    )
+                )
+            except Exception as error:
+                error_text = self._sanitize_custom_ai_profile_error(
+                    error,
+                    candidate,
+                )
+                raise ValueError(
+                    f"{candidate.get('name', 'Custom AI')}: "
+                    f"{error_text}"
+                ) from None
             return (
                 translated,
                 usage,
@@ -718,7 +761,14 @@ Call Duration: {call_duration:.3f} seconds
                 try:
                     translated, usage, duration = future.result()
                 except Exception as e:
-                    errors.append(f"{candidate.get('name', 'Custom AI')}: {e}")
+                    error_text = self._sanitize_custom_ai_profile_error(
+                        e,
+                        candidate,
+                    )
+                    errors.append(
+                        f"{candidate.get('name', 'Custom AI')}: "
+                        f"{error_text}"
+                    )
                     continue
                 log_debug(
                     "LATENCY: custom_ai race winner "

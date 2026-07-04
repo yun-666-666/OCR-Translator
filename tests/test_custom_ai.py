@@ -3476,6 +3476,92 @@ class DummyVar:
 
 
 class TranslationHandlerCustomAITests(unittest.TestCase):
+    def test_custom_ai_translation_error_redacts_active_profile_key(self):
+        profile = {
+            "id": "active",
+            "base_url": "https://host.example/v1",
+            "api_key": "active-super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=ValueError(
+                "upstream rejected active-super-secret"
+            )
+        )
+
+        result = handler._custom_ai_translate("Hello", 0.0)
+
+        self.assertIn("upstream rejected", result)
+        self.assertNotIn("active-super-secret", result)
+        handler.close()
+
+    def test_custom_ai_race_error_redacts_each_candidate_key(self):
+        first = {
+            "id": "first",
+            "name": "First",
+            "base_url": "https://first.example/v1",
+            "api_key": "first-super-secret",
+            "model": "demo",
+        }
+        second = {
+            "id": "second",
+            "name": "Second",
+            "base_url": "https://second.example/v1",
+            "api_key": "second-super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [first, second]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=lambda profile, *args, **kwargs: (
+                (_ for _ in ()).throw(
+                    ValueError(
+                        f"failed with {profile['api_key']}"
+                    )
+                )
+            )
+        )
+
+        with self.assertRaises(ValueError) as context:
+            handler._custom_ai_translate_race(
+                first,
+                "Hello",
+                "en",
+                "zh-CN",
+                [],
+                False,
+            )
+
+        message = str(context.exception)
+        self.assertIn("All Custom AI race endpoints failed", message)
+        self.assertNotIn("first-super-secret", message)
+        self.assertNotIn("second-super-secret", message)
+        handler.close()
+
     def test_translation_error_classifier_accepts_legitimate_short_results(self):
         handler = TranslationHandler(object())
 
