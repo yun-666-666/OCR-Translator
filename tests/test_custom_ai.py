@@ -4543,6 +4543,68 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 )
         handler.close()
 
+    def test_custom_ai_race_canonicalizes_host_and_default_port(self):
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+        equivalent_cases = [
+            (
+                "HTTPS://HOST.EXAMPLE:443/v1",
+                "https://host.example/v1/chat/completions",
+            ),
+            (
+                "HTTP://HOST.EXAMPLE:80/v1",
+                "http://host.example/v1/chat/completions",
+            ),
+        ]
+
+        for base_url, equivalent_url in equivalent_cases:
+            with self.subTest(base_url=base_url):
+                left = {
+                    "base_url": base_url,
+                    "model": "demo",
+                }
+                right = {
+                    "base_url": equivalent_url,
+                    "model": "demo",
+                }
+                self.assertEqual(
+                    handler._custom_ai_race_profile_identity(left),
+                    handler._custom_ai_race_profile_identity(right),
+                )
+
+        handler.close()
+
+    def test_custom_ai_race_preserves_port_and_path_semantics(self):
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+        base = {
+            "base_url": "https://host.example:8443/API/v1",
+            "model": "demo",
+        }
+        different_port = {
+            "base_url": "https://host.example/API/v1",
+            "model": "demo",
+        }
+        different_path_case = {
+            "base_url": "https://host.example:8443/api/v1",
+            "model": "demo",
+        }
+
+        base_identity = handler._custom_ai_race_profile_identity(base)
+        self.assertNotEqual(
+            base_identity,
+            handler._custom_ai_race_profile_identity(different_port),
+        )
+        self.assertNotEqual(
+            base_identity,
+            handler._custom_ai_race_profile_identity(
+                different_path_case
+            ),
+        )
+        handler.close()
+
     def test_custom_ai_race_busy_endpoint_suppresses_duplicate_profile(self):
         active = {
             "id": "active",
