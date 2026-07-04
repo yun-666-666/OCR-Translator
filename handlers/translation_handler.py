@@ -479,6 +479,7 @@ Call Duration: {call_duration:.3f} seconds
             cache_params.get("profile_id", ""),
             cache_params.get("base_url", ""),
             cache_params.get("model", ""),
+            cache_params.get("credential_scope", ""),
             cache_params.get("wire_api", "chat_completions"),
             cache_params.get("reasoning_effort", ""),
             cache_params.get("custom_prompt", ""),
@@ -963,6 +964,9 @@ Call Duration: {call_duration:.3f} seconds
             "profile_id": profile.get("id", ""),
             "base_url": str(profile.get("base_url", "")).strip().rstrip("/"),
             "model": profile.get("model", ""),
+            "credential_scope": (
+                self.custom_ai_provider._credential_scope_key(profile)
+            ),
             "wire_api": str(
                 profile.get("wire_api") or "chat_completions"
             ).strip().lower(),

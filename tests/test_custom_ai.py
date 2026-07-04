@@ -2625,6 +2625,46 @@ class CustomAIProviderTests(unittest.TestCase):
             )
         )
 
+    def test_cache_key_is_isolated_by_credential_scope(self):
+        cache = UnifiedTranslationCache(max_size=10)
+        params = {
+            "profile_id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "model": "demo",
+            "credential_scope": "account-one-fingerprint",
+        }
+        cache.store(
+            "Hello",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "account-one-result",
+            **params,
+        )
+
+        self.assertEqual(
+            cache.get(
+                "Hello",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                **params,
+            ),
+            "account-one-result",
+        )
+        self.assertIsNone(
+            cache.get(
+                "Hello",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                **{
+                    **params,
+                    "credential_scope": "account-two-fingerprint",
+                },
+            )
+        )
+
     def test_full_cache_update_does_not_evict_another_entry(self):
         cache = UnifiedTranslationCache(max_size=3)
         for key in ("one", "two", "three"):
@@ -3723,6 +3763,44 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         stream_key = handler.get_inflight_translation_key("Hello")
 
         self.assertNotEqual(safe_key, stream_key)
+        handler.close()
+
+    def test_inflight_and_cache_params_change_when_profile_key_changes(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "first-super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+
+        first_key = handler.get_inflight_translation_key("Hello")
+        first_params = handler._cache_params_for_profile(profile)
+        profile["api_key"] = "second-super-secret"
+        second_key = handler.get_inflight_translation_key("Hello")
+        second_params = handler._cache_params_for_profile(profile)
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotEqual(
+            first_params["credential_scope"],
+            second_params["credential_scope"],
+        )
+        self.assertNotIn("first-super-secret", repr(first_params))
+        self.assertNotIn("second-super-secret", repr(second_params))
         handler.close()
 
     def test_custom_ai_translation_honors_latency_mode_snapshot(self):

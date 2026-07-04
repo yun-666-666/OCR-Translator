@@ -78,6 +78,10 @@ class UnifiedTranslationCache:
                     "profile_id": kwargs.get("profile_id", ""),
                     "base_url": str(kwargs.get("base_url", "")).strip().rstrip("/"),
                     "model": kwargs.get("model", ""),
+                    "credential_scope": kwargs.get(
+                        "credential_scope",
+                        "",
+                    ),
                     "wire_api": str(
                         kwargs.get("wire_api") or "chat_completions"
                     ).strip().lower(),
