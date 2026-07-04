@@ -1758,6 +1758,8 @@ class CustomAIProvider:
         accumulated = ""
         usage = None
         event_type = None
+        terminal_event_type = None
+        terminal_response = None
         for raw_line in self._iter_utf8_response_lines(response):
             if not raw_line:
                 continue
@@ -1779,9 +1781,10 @@ class CustomAIProvider:
             if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             chunk_type = str(chunk.get("type") or event_type or "").strip()
-            if chunk_type == "response.completed":
+            if chunk_type in {"response.completed", "response.incomplete"}:
                 response_obj = chunk.get("response")
                 if isinstance(response_obj, dict):
+                    terminal_response = response_obj
                     if isinstance(response_obj.get("usage"), dict):
                         usage = response_obj["usage"]
                     if not accumulated:
@@ -1789,6 +1792,7 @@ class CustomAIProvider:
                             accumulated = self.parse_responses_response(response_obj)
                         except Exception:
                             pass
+                terminal_event_type = chunk_type
                 break
             if chunk_type in {"response.output_text.delta", "response.output_text"}:
                 delta = chunk.get("delta")
@@ -1818,11 +1822,23 @@ class CustomAIProvider:
         result = {"output_text": accumulated}
         if usage:
             result["usage"] = usage
+        if terminal_response is not None:
+            if terminal_response.get("status"):
+                result["status"] = terminal_response["status"]
+            incomplete_details = terminal_response.get("incomplete_details")
+            if isinstance(incomplete_details, dict):
+                result["incomplete_details"] = incomplete_details
+        if (
+            terminal_event_type == "response.incomplete"
+            and "status" not in result
+        ):
+            result["status"] = "incomplete"
         return result
 
     def _parse_streaming_chat_response(self, response, stream_callback=None):
         accumulated = ""
         usage = None
+        finish_reason = None
         for raw_line in self._iter_utf8_response_lines(response):
             if not raw_line:
                 continue
@@ -1844,6 +1860,8 @@ class CustomAIProvider:
             if not choices:
                 continue
             choice = choices[0] if isinstance(choices[0], dict) else {}
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice["finish_reason"]
             delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
             content = delta.get("content")
             if content is None and isinstance(choice.get("message"), dict):
@@ -1858,7 +1876,10 @@ class CustomAIProvider:
                     log_debug(f"Custom AI stream callback failed: {e}")
         if not accumulated:
             raise ValueError("Streaming API response did not contain message content")
-        result = {"choices": [{"message": {"content": accumulated}}]}
+        result_choice = {"message": {"content": accumulated}}
+        if finish_reason is not None:
+            result_choice["finish_reason"] = finish_reason
+        result = {"choices": [result_choice]}
         if usage:
             result["usage"] = usage
         return result

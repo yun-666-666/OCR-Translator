@@ -861,6 +861,135 @@ class CustomAIProviderTests(unittest.TestCase):
                 self.assertIn(output_limit_field, client.payloads[0])
                 self.assertNotIn(output_limit_field, client.payloads[1])
 
+    def test_streaming_chat_truncation_retries_without_output_limit(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, truncated):
+                self.truncated = truncated
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                if self.truncated:
+                    lines = [
+                        'data: {"choices":[{"delta":{"content":"partial"}}]}',
+                        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+                    ]
+                else:
+                    lines = [
+                        'data: {"choices":[{"delta":{"content":"complete"}}]}',
+                        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                    ]
+                lines.append("data: [DONE]")
+                return iter(lines)
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                self.payloads.append(dict(json))
+                return Response(truncated="max_tokens" in json)
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+
+        translated, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+            },
+            "Hello",
+            "en",
+            "zh-CN",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(translated, "complete")
+        self.assertEqual(len(client.payloads), 2)
+        self.assertIn("max_tokens", client.payloads[0])
+        self.assertNotIn("max_tokens", client.payloads[1])
+
+    def test_streaming_responses_truncation_retries_without_output_limit(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, truncated):
+                self.truncated = truncated
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                if self.truncated:
+                    lines = [
+                        'event: response.output_text.delta',
+                        'data: {"type":"response.output_text.delta","delta":"partial"}',
+                        'event: response.incomplete',
+                        (
+                            'data: {"type":"response.incomplete","response":'
+                            '{"incomplete_details":'
+                            '{"reason":"max_output_tokens"}}}'
+                        ),
+                    ]
+                else:
+                    lines = [
+                        'event: response.output_text.delta',
+                        'data: {"type":"response.output_text.delta","delta":"complete"}',
+                        'event: response.completed',
+                        (
+                            'data: {"type":"response.completed","response":'
+                            '{"status":"completed"}}'
+                        ),
+                    ]
+                return iter(lines)
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                self.payloads.append(dict(json))
+                return Response(truncated="max_output_tokens" in json)
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+
+        translated, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "wire_api": "responses",
+            },
+            "Hello",
+            "en",
+            "zh-CN",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(translated, "complete")
+        self.assertEqual(len(client.payloads), 2)
+        self.assertIn("max_output_tokens", client.payloads[0])
+        self.assertNotIn("max_output_tokens", client.payloads[1])
+
     def test_fetch_models_reuses_successful_models_url_for_base_url(self):
         class Response:
             def __init__(self, payload=None, status_code=200, text=""):
