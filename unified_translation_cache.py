@@ -15,6 +15,8 @@ CACHE_SCHEMA_VERSION = 2
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_SUFFIXES = {".sqlite", ".sqlite3", ".db"}
 ACCESS_TIME_PERSIST_INTERVAL_SECONDS = 60.0
+PERSISTENCE_RETRY_INITIAL_DELAY_SECONDS = 1.0
+PERSISTENCE_RETRY_MAX_DELAY_SECONDS = 30.0
 
 
 class UnifiedTranslationCache:
@@ -38,6 +40,7 @@ class UnifiedTranslationCache:
         self._persistence_timer = None
         self._persistence_generation = 0
         self._persisted_generation = 0
+        self._consecutive_persistence_failures = 0
         self._closed = False
 
         # Unified cache storage
@@ -468,6 +471,40 @@ class UnifiedTranslationCache:
         else:
             self._mark_full_resync_dirty_locked()
 
+    def _persistence_retry_delay_locked(self):
+        exponent = min(
+            max(0, self._consecutive_persistence_failures - 1),
+            30,
+        )
+        return min(
+            PERSISTENCE_RETRY_INITIAL_DELAY_SECONDS * (2 ** exponent),
+            PERSISTENCE_RETRY_MAX_DELAY_SECONDS,
+        )
+
+    def _handle_persistence_result_locked(self, succeeded, operation):
+        if operation is None:
+            return
+
+        if succeeded:
+            self._consecutive_persistence_failures = 0
+            self._finalize_persistence_success_locked(operation["generation"])
+            if (
+                not self._closed
+                and self._persisted_generation < self._persistence_generation
+            ):
+                self._schedule_persistence_locked()
+            return
+
+        self._consecutive_persistence_failures += 1
+        if not self._closed:
+            retry_delay = self._persistence_retry_delay_locked()
+            if self._schedule_persistence_locked(retry_delay):
+                log_debug(
+                    "Unified cache persistence retry scheduled in "
+                    f"{retry_delay:.1f}s after "
+                    f"{self._consecutive_persistence_failures} failure(s)"
+                )
+
     def _load_sqlite_entries(self, path):
         connection = None
         try:
@@ -588,21 +625,27 @@ class UnifiedTranslationCache:
         if timer is not None:
             timer.cancel()
 
-    def _schedule_persistence_locked(self):
+    def _schedule_persistence_locked(self, delay_seconds=None):
         if (
             not self.persistence_path
             or self._closed
             or self._persistence_timer is not None
         ):
-            return
+            return False
 
+        delay = (
+            self.persistence_delay_seconds
+            if delay_seconds is None
+            else max(0.0, float(delay_seconds))
+        )
         timer = threading.Timer(
-            self.persistence_delay_seconds,
+            delay,
             self._run_scheduled_persistence,
         )
         timer.daemon = True
         self._persistence_timer = timer
         timer.start()
+        return True
 
     def _run_scheduled_persistence(self):
         with self.lock:
@@ -614,14 +657,7 @@ class UnifiedTranslationCache:
         succeeded = self._apply_persistence_operation(operation)
 
         with self.lock:
-            if succeeded and operation is not None:
-                self._finalize_persistence_success_locked(operation["generation"])
-            if (
-                succeeded
-                and not self._closed
-                and self._persisted_generation < self._persistence_generation
-            ):
-                self._schedule_persistence_locked()
+            self._handle_persistence_result_locked(succeeded, operation)
 
     def flush(self):
         """Synchronously persist the latest cache state."""
@@ -632,8 +668,7 @@ class UnifiedTranslationCache:
         succeeded = self._apply_persistence_operation(operation)
 
         with self.lock:
-            if succeeded and operation is not None:
-                self._finalize_persistence_success_locked(operation["generation"])
+            self._handle_persistence_result_locked(succeeded, operation)
 
         return succeeded
 
@@ -756,8 +791,7 @@ class UnifiedTranslationCache:
         if operation is not None:
             succeeded = self._apply_persistence_operation(operation)
             with self.lock:
-                if succeeded:
-                    self._finalize_persistence_success_locked(operation["generation"])
+                self._handle_persistence_result_locked(succeeded, operation)
 
     def _evict_lru_entries(self, entries_to_evict=None):
         """Evict least recently used entries (10% of cache size)."""
@@ -796,8 +830,7 @@ class UnifiedTranslationCache:
 
         succeeded = self._apply_persistence_operation(operation)
         with self.lock:
-            if succeeded and operation is not None:
-                self._finalize_persistence_success_locked(operation["generation"])
+            self._handle_persistence_result_locked(succeeded, operation)
 
         log_debug(f"Cleared unified translation cache ({entries_cleared} entries)")
 
@@ -821,8 +854,7 @@ class UnifiedTranslationCache:
 
         succeeded = self._apply_persistence_operation(operation)
         with self.lock:
-            if succeeded and operation is not None:
-                self._finalize_persistence_success_locked(operation["generation"])
+            self._handle_persistence_result_locked(succeeded, operation)
 
         log_debug(f"Cleared {len(keys_to_remove)} cache entries for provider: {provider}")
 

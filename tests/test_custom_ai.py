@@ -2744,6 +2744,184 @@ class CustomAIProviderTests(unittest.TestCase):
             cache.close()
             restored.close()
 
+    def test_persistent_cache_scheduled_failure_retries_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("retry", "en", "zh-CN", "custom_ai", "重试")
+            with cache.lock:
+                cache._cancel_persistence_timer_locked()
+            generation = cache._persistence_generation
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=False,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                cache._run_scheduled_persistence()
+
+            self.assertEqual(cache._consecutive_persistence_failures, 1)
+            self.assertEqual(cache._persisted_generation, 0)
+            schedule.assert_called_once_with(1.0)
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=True,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                cache._run_scheduled_persistence()
+
+            self.assertEqual(cache._consecutive_persistence_failures, 0)
+            self.assertEqual(cache._persisted_generation, generation)
+            schedule.assert_not_called()
+            cache.close()
+
+    def test_persistent_cache_retry_backoff_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("retry", "en", "zh-CN", "custom_ai", "重试")
+            with cache.lock:
+                cache._cancel_persistence_timer_locked()
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=False,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                for expected_delay in (1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0):
+                    cache._run_scheduled_persistence()
+                    self.assertEqual(
+                        schedule.call_args_list[-1].args,
+                        (expected_delay,),
+                    )
+
+            self.assertEqual(cache._consecutive_persistence_failures, 7)
+            cache.close()
+
+    def test_persistent_cache_failure_keeps_concurrent_pending_timer(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("retry", "en", "zh-CN", "custom_ai", "重试")
+            with cache.lock:
+                cache._cancel_persistence_timer_locked()
+            concurrent_timer = Mock()
+
+            def fail_after_concurrent_schedule(operation):
+                self.assertIsNotNone(operation)
+                with cache.lock:
+                    cache._persistence_timer = concurrent_timer
+                return False
+
+            with patch.object(
+                cache,
+                "_apply_persistence_operation",
+                side_effect=fail_after_concurrent_schedule,
+            ):
+                cache._run_scheduled_persistence()
+
+            self.assertIs(cache._persistence_timer, concurrent_timer)
+            self.assertEqual(cache._consecutive_persistence_failures, 1)
+            with cache.lock:
+                cache._persistence_timer = None
+            cache.close()
+
+    def test_persistent_cache_failed_flush_schedules_retry_while_open(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("retry", "en", "zh-CN", "custom_ai", "重试")
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=False,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                self.assertFalse(cache.flush())
+
+            self.assertEqual(cache._consecutive_persistence_failures, 1)
+            schedule.assert_called_once_with(1.0)
+            cache.close()
+
+    def test_persistent_cache_failed_close_does_not_schedule_retry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("retry", "en", "zh-CN", "custom_ai", "重试")
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=False,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                self.assertFalse(cache.close())
+
+            self.assertTrue(cache._closed)
+            self.assertIsNone(cache._persistence_timer)
+            schedule.assert_not_called()
+
+    def test_persistent_cache_failed_clear_schedules_retry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            cache.store("obsolete", "en", "zh-CN", "custom_ai", "旧值")
+            self.assertTrue(cache.flush())
+
+            with (
+                patch.object(
+                    cache,
+                    "_apply_persistence_operation",
+                    return_value=False,
+                ),
+                patch.object(cache, "_schedule_persistence_locked") as schedule,
+            ):
+                cache.clear_all()
+
+            self.assertEqual(cache._consecutive_persistence_failures, 1)
+            schedule.assert_called_once_with(1.0)
+            self.assertTrue(cache._full_resync_required)
+            cache.close()
+
     def test_persistent_cache_close_flushes_pending_entries(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
