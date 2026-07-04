@@ -160,6 +160,24 @@ class CustomAIProviderTests(unittest.TestCase):
             ),
         )
 
+    def test_provider_rate_limit_key_is_scoped_by_api_credential(self):
+        provider = CustomAIProvider()
+        base_profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "account-one-secret",
+        }
+        other_profile = {
+            "base_url": "HTTPS://HOST.EXAMPLE:443/v1/",
+            "api_key": "account-two-secret",
+        }
+
+        first_key = provider._rate_limit_cache_key(base_profile)
+        second_key = provider._rate_limit_cache_key(other_profile)
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertNotIn("account-one-secret", repr(first_key))
+        self.assertNotIn("account-two-secret", repr(second_key))
+
     def test_provider_successful_url_cache_reuses_equivalent_base_alias(self):
         provider = CustomAIProvider()
         cache = {}
@@ -4544,6 +4562,44 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         candidates = handler._get_custom_ai_race_profiles(active)
 
         self.assertEqual([profile["id"] for profile in candidates], ["active"])
+        handler.close()
+
+    def test_custom_ai_race_distinguishes_independent_api_credentials(self):
+        first = {
+            "id": "first",
+            "base_url": "https://same.example/v1",
+            "api_key": "first-secret",
+            "model": "same-model",
+        }
+        second = {
+            "id": "second",
+            "base_url": "https://same.example/v1/",
+            "api_key": "second-secret",
+            "model": "same-model",
+        }
+        same_as_first = {
+            "id": "same-as-first",
+            "base_url": "https://same.example/v1",
+            "api_key": "first-secret",
+            "model": "same-model",
+        }
+
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+
+        self.assertNotEqual(
+            handler._custom_ai_race_profile_identity(first),
+            handler._custom_ai_race_profile_identity(second),
+        )
+        self.assertEqual(
+            handler._custom_ai_race_profile_identity(first),
+            handler._custom_ai_race_profile_identity(same_as_first),
+        )
+        self.assertNotIn(
+            "first-secret",
+            repr(handler._custom_ai_race_profile_identity(first)),
+        )
         handler.close()
 
     def test_custom_ai_race_normalizes_explicit_wire_endpoint_paths(self):

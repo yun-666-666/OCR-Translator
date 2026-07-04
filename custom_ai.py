@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import threading
 import time
@@ -372,8 +373,21 @@ class CustomAIProvider:
 
     def _rate_limit_cache_key(self, profile):
         if isinstance(profile, dict):
-            return self._base_url_cache_key(profile.get("base_url"))
-        return self._base_url_cache_key(profile)
+            return (
+                self._base_url_cache_key(profile.get("base_url")),
+                self._credential_scope_key(profile),
+            )
+        return (self._base_url_cache_key(profile), "")
+
+    def _credential_scope_key(self, profile):
+        api_key = ""
+        if isinstance(profile, dict):
+            api_key = str(profile.get("api_key") or "")
+        if not api_key:
+            return ""
+        return hashlib.sha256(
+            api_key.encode("utf-8")
+        ).hexdigest()[:16]
 
     def _rate_limit_message(self, profile, remaining_seconds):
         provider_name = "Custom AI"

@@ -844,6 +844,7 @@ Call Duration: {call_duration:.3f} seconds
             "endpoint",
             base_url,
             *self._custom_ai_race_signature(profile),
+            self.custom_ai_provider._credential_scope_key(profile),
         )
 
     def _canonicalize_race_endpoint_url(self, endpoint_url):
