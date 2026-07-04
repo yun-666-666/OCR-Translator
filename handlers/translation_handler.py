@@ -23,7 +23,9 @@ from custom_ai import (
 )
 
 REQUESTS_AVAILABLE = False
-CUSTOM_CONTEXT_CHAR_BUDGET = 4000
+CUSTOM_CONTEXT_MAX_CHAR_BUDGET = 2400
+CUSTOM_CONTEXT_MIN_CHAR_BUDGET = 600
+CUSTOM_CONTEXT_SOURCE_PENALTY_CAP = 1800
 
 
 class TranslationHandler:
@@ -817,6 +819,7 @@ Call Duration: {call_duration:.3f} seconds
         if context_size == 0:
             return []
 
+        context_budget = self._get_custom_context_char_budget(current_source)
         selected = []
         selected_chars = 0
         for entry in reversed(self.custom_context_window):
@@ -831,7 +834,7 @@ Call Duration: {call_duration:.3f} seconds
                 continue
 
             entry_chars = self._get_custom_context_entry_char_count(entry)
-            remaining_chars = CUSTOM_CONTEXT_CHAR_BUDGET - selected_chars
+            remaining_chars = context_budget - selected_chars
             if entry_chars > remaining_chars:
                 if not selected and remaining_chars > 0:
                     selected.append(
@@ -847,6 +850,17 @@ Call Duration: {call_duration:.3f} seconds
             if len(selected) >= context_size:
                 break
         return list(reversed(selected))
+
+    def _get_custom_context_char_budget(self, current_source=None):
+        source_text = str(current_source or "")
+        source_penalty = min(
+            CUSTOM_CONTEXT_SOURCE_PENALTY_CAP,
+            len(source_text),
+        )
+        return max(
+            CUSTOM_CONTEXT_MIN_CHAR_BUDGET,
+            CUSTOM_CONTEXT_MAX_CHAR_BUDGET - source_penalty,
+        )
 
     def _get_custom_context_entry_char_count(self, entry):
         if isinstance(entry, (tuple, list)):

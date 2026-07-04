@@ -2931,7 +2931,67 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             [("Save", "另存"), ("Store", "保存"), ("Quit", "退出")],
         )
 
-    def test_custom_ai_request_context_obeys_character_budget(self):
+    def test_custom_ai_context_budget_adapts_to_current_source_length(self):
+        handler = TranslationHandler(object())
+
+        cases = [
+            (None, 2400),
+            ("x" * 40, 2360),
+            ("a<br>b", 2394),
+            ("x" * 600, 1800),
+            ("x" * 1200, 1200),
+            ("x" * 1800, 600),
+            ("x" * 4000, 600),
+        ]
+        for current_source, expected in cases:
+            with self.subTest(source_length=len(current_source or "")):
+                self.assertEqual(
+                    handler._get_custom_context_char_budget(current_source),
+                    expected,
+                )
+        handler.close()
+
+    def test_short_custom_ai_source_retains_multiple_recent_context_pairs(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        handler.custom_context_window = [
+            (f"source-{index}-" + ("s" * 240), f"translation-{index}-" + ("t" * 240))
+            for index in range(4)
+        ]
+
+        context = handler._get_custom_context_for_request("x" * 40)
+
+        self.assertEqual(context, handler.custom_context_window)
+        self.assertLessEqual(
+            sum(len(source) + len(translation) for source, translation in context),
+            handler._get_custom_context_char_budget("x" * 40),
+        )
+        handler.close()
+
+    def test_long_custom_ai_source_shrinks_context_to_minimum_budget(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        handler.custom_context_window = [
+            ("older-" + ("a" * 500), "older-result-" + ("b" * 500)),
+            ("newest-" + ("c" * 500), "newest-result-" + ("d" * 500)),
+        ]
+
+        context = handler._get_custom_context_for_request("x" * 1800)
+
+        self.assertEqual(len(context), 1)
+        self.assertEqual(
+            sum(len(source) + len(translation) for source, translation in context),
+            600,
+        )
+        self.assertTrue(context[0][0].startswith("newest-"))
+        self.assertTrue(context[0][1].startswith("newest-result-"))
+        handler.close()
+
+    def test_custom_ai_request_context_obeys_adaptive_character_budget(self):
         class App:
             custom_context_window_var = DummyVar(5)
 
@@ -2942,12 +3002,20 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         ]
 
         context = handler._get_custom_context_for_request()
+        budget = handler._get_custom_context_char_budget()
 
-        self.assertEqual(context, [handler.custom_context_window[-1]])
+        self.assertEqual(len(context), 1)
+        self.assertTrue(context[0][0].startswith("new-source-"))
+        self.assertTrue(context[0][1].startswith("new-translation-"))
         self.assertLessEqual(
             sum(len(source) + len(translation) for source, translation in context),
-            4000,
+            budget,
         )
+        self.assertEqual(
+            sum(len(source) + len(translation) for source, translation in context),
+            2400,
+        )
+        handler.close()
 
     def test_custom_ai_cache_hit_adds_source_and_translation_to_context(self):
         profile = {
