@@ -4354,6 +4354,56 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertEqual(handler.custom_ai_provider.translate.call_count, 1)
         handler.close()
 
+    def test_custom_ai_race_cache_identity_uses_request_snapshot(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active]
+
+        keep_linebreaks = DummyVar(False)
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_prompt_text="old prompt",
+            keep_linebreaks_var=keep_linebreaks,
+            custom_context_window_var=DummyVar(5),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_context_window = [("new context", "new result")]
+
+        def translate_then_change_settings(*args, **kwargs):
+            app.custom_prompt_text = "new prompt"
+            keep_linebreaks.value = False
+            handler.custom_context_window = [("changed", "changed result")]
+            return "translated", {}, 0.1
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=translate_then_change_settings
+        )
+        request_context = [("old context", "old result")]
+
+        result = handler._custom_ai_translate_race(
+            active,
+            "Bonjour",
+            "fr",
+            "en",
+            request_context,
+            True,
+            custom_prompt="old prompt",
+        )
+
+        cache_params = result[3]
+        self.assertEqual(cache_params["custom_prompt"], "old prompt")
+        self.assertTrue(cache_params["keep_linebreaks"])
+        self.assertEqual(cache_params["context"], tuple(request_context))
+        handler.close()
+
     def test_custom_ai_race_all_cooling_profiles_use_shortest_cooldown(self):
         active = {
             "id": "active",

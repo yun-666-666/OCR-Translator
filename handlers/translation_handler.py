@@ -552,6 +552,7 @@ Call Duration: {call_duration:.3f} seconds
             current_source=cleaned_text_main,
         )
         keep_linebreaks = self.app.keep_linebreaks_var.get()
+        custom_prompt = getattr(self.app, 'custom_prompt_text', '')
 
         try:
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
@@ -568,6 +569,7 @@ Call Duration: {call_duration:.3f} seconds
                     target_lang,
                     context,
                     keep_linebreaks,
+                    custom_prompt=custom_prompt,
                 )
             else:
                 translated_api_text, usage, duration = self.custom_ai_provider.translate(
@@ -575,7 +577,7 @@ Call Duration: {call_duration:.3f} seconds
                     cleaned_text_main,
                     source_lang,
                     target_lang,
-                    custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
+                    custom_prompt=custom_prompt,
                     context=context,
                     keep_linebreaks=keep_linebreaks,
                     latency_mode=latency_mode,
@@ -592,7 +594,9 @@ Call Duration: {call_duration:.3f} seconds
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
                 active_cache_params = self._cache_params_for_profile(
                     profile,
-                    current_source=cleaned_text_main,
+                    custom_prompt=custom_prompt,
+                    keep_linebreaks=keep_linebreaks,
+                    context=context,
                 )
                 if active_cache_params != cache_params:
                     cache_targets.append(active_cache_params)
@@ -615,7 +619,18 @@ Call Duration: {call_duration:.3f} seconds
         log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
         return self._format_dialog_text(translated_api_text)
 
-    def _custom_ai_translate_race(self, active_profile, text, source_lang, target_lang, context, keep_linebreaks):
+    def _custom_ai_translate_race(
+        self,
+        active_profile,
+        text,
+        source_lang,
+        target_lang,
+        context,
+        keep_linebreaks,
+        custom_prompt=None,
+    ):
+        if custom_prompt is None:
+            custom_prompt = getattr(self.app, 'custom_prompt_text', '')
         candidates = self._get_custom_ai_race_profiles(active_profile)
         if len(candidates) <= 1:
             candidate = candidates[0] if candidates else active_profile
@@ -624,7 +639,7 @@ Call Duration: {call_duration:.3f} seconds
                 text,
                 source_lang,
                 target_lang,
-                custom_prompt=getattr(self.app, 'custom_prompt_text', ''),
+                custom_prompt=custom_prompt,
                 context=context,
                 keep_linebreaks=keep_linebreaks,
                 latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
@@ -635,7 +650,9 @@ Call Duration: {call_duration:.3f} seconds
                 duration,
                 self._cache_params_for_profile(
                     candidate,
-                    current_source=text,
+                    custom_prompt=custom_prompt,
+                    keep_linebreaks=keep_linebreaks,
+                    context=context,
                 ),
                 candidate,
             )
@@ -659,11 +676,7 @@ Call Duration: {call_duration:.3f} seconds
                         text,
                         source_lang,
                         target_lang,
-                        custom_prompt=getattr(
-                            self.app,
-                            'custom_prompt_text',
-                            '',
-                        ),
+                        custom_prompt=custom_prompt,
                         context=context,
                         keep_linebreaks=keep_linebreaks,
                         latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
@@ -701,7 +714,9 @@ Call Duration: {call_duration:.3f} seconds
                     duration,
                     self._cache_params_for_profile(
                         candidate,
-                        current_source=text,
+                        custom_prompt=custom_prompt,
+                        keep_linebreaks=keep_linebreaks,
+                        context=context,
                     ),
                     candidate,
                 )
@@ -805,12 +820,26 @@ Call Duration: {call_duration:.3f} seconds
         with self._custom_race_state_lock:
             self._custom_race_inflight_profiles.discard(identity)
 
-    def _cache_params_for_profile(self, profile, current_source=None):
-        keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
-        try:
-            keep_linebreaks = bool(keep_linebreaks_var.get()) if keep_linebreaks_var is not None else False
-        except Exception:
-            keep_linebreaks = False
+    def _cache_params_for_profile(
+        self,
+        profile,
+        current_source=None,
+        custom_prompt=None,
+        keep_linebreaks=None,
+        context=None,
+    ):
+        if keep_linebreaks is None:
+            keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
+            try:
+                keep_linebreaks = bool(keep_linebreaks_var.get()) if keep_linebreaks_var is not None else False
+            except Exception:
+                keep_linebreaks = False
+        if custom_prompt is None:
+            custom_prompt = getattr(self.app, "custom_prompt_text", "")
+        if context is None:
+            context = self._get_custom_context_for_request(
+                current_source=current_source,
+            )
 
         return {
             "profile_id": profile.get("id", ""),
@@ -824,13 +853,9 @@ Call Duration: {call_duration:.3f} seconds
                 or profile.get("model_reasoning_effort")
                 or ""
             ).strip().lower(),
-            "custom_prompt": getattr(self.app, "custom_prompt_text", ""),
+            "custom_prompt": custom_prompt,
             "keep_linebreaks": keep_linebreaks,
-            "context": tuple(
-                self._get_custom_context_for_request(
-                    current_source=current_source,
-                )
-            ),
+            "context": tuple(context),
         }
 
     def _custom_context_entry_source(self, entry):
