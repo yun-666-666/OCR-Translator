@@ -483,6 +483,63 @@ class CustomAIProvider:
         first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
         return first_choice.get("finish_reason") == "length"
 
+    def _translation_terminal_error(self, profile, response_json):
+        if not isinstance(response_json, dict):
+            return None
+
+        if self._uses_responses_api(profile):
+            status = str(response_json.get("status") or "").strip().lower()
+            if not status or status == "completed":
+                return None
+            if status == "incomplete":
+                incomplete_details = response_json.get("incomplete_details")
+                reason = ""
+                if isinstance(incomplete_details, dict):
+                    reason = str(
+                        incomplete_details.get("reason") or ""
+                    ).strip()
+                if reason == "max_output_tokens":
+                    return (
+                        "Translation response remained incomplete after "
+                        "output-limit recovery (max_output_tokens)"
+                    )
+                return (
+                    "Translation response was incomplete"
+                    + (f": {reason}" if reason else "")
+                )
+            if status == "failed":
+                error_detail = self._format_api_error_value(
+                    response_json.get("error")
+                )
+                if error_detail:
+                    error_detail = self._sanitize_error(
+                        error_detail,
+                        profile.get("api_key", ""),
+                    )
+                return (
+                    "Translation response failed"
+                    + (f": {error_detail}" if error_detail else "")
+                )
+            return f"Translation response ended with status={status}"
+
+        choices = response_json.get("choices") or []
+        first_choice = (
+            choices[0]
+            if choices and isinstance(choices[0], dict)
+            else {}
+        )
+        finish_reason = str(
+            first_choice.get("finish_reason") or ""
+        ).strip().lower()
+        if not finish_reason or finish_reason == "stop":
+            return None
+        if finish_reason == "length":
+            return "Translation response remained truncated after output-limit recovery"
+        return (
+            "Translation response ended with "
+            f"finish_reason={finish_reason}"
+        )
+
     def _post_with_output_limit_fallback(
         self,
         http_client,
@@ -1335,6 +1392,12 @@ class CustomAIProvider:
             )
             response_json, retry_duration = request(retry_payload)
             duration += retry_duration
+        terminal_error = self._translation_terminal_error(
+            profile,
+            response_json,
+        )
+        if terminal_error:
+            raise ValueError(terminal_error)
         result = self._normalize_translation_output(
             text,
             self._parse_response_text(profile, response_json),
@@ -1781,7 +1844,11 @@ class CustomAIProvider:
             if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             chunk_type = str(chunk.get("type") or event_type or "").strip()
-            if chunk_type in {"response.completed", "response.incomplete"}:
+            if chunk_type in {
+                "response.completed",
+                "response.incomplete",
+                "response.failed",
+            }:
                 response_obj = chunk.get("response")
                 if isinstance(response_obj, dict):
                     terminal_response = response_obj
@@ -1817,7 +1884,10 @@ class CustomAIProvider:
                             stream_callback(accumulated)
                         except Exception as e:
                             log_debug(f"Custom AI stream callback failed: {e}")
-        if not accumulated:
+        if (
+            not accumulated
+            and terminal_event_type != "response.failed"
+        ):
             raise ValueError("Streaming Responses API response did not contain output text")
         result = {"output_text": accumulated}
         if usage:
@@ -1828,11 +1898,18 @@ class CustomAIProvider:
             incomplete_details = terminal_response.get("incomplete_details")
             if isinstance(incomplete_details, dict):
                 result["incomplete_details"] = incomplete_details
+            if terminal_response.get("error") is not None:
+                result["error"] = terminal_response["error"]
         if (
             terminal_event_type == "response.incomplete"
             and "status" not in result
         ):
             result["status"] = "incomplete"
+        elif (
+            terminal_event_type == "response.failed"
+            and "status" not in result
+        ):
+            result["status"] = "failed"
         return result
 
     def _parse_streaming_chat_response(self, response, stream_callback=None):

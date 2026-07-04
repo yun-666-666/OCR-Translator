@@ -990,6 +990,197 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("max_output_tokens", client.payloads[0])
         self.assertNotIn("max_output_tokens", client.payloads[1])
 
+    def test_translation_rejects_persistent_truncation_after_repair(self):
+        cases = [
+            (
+                {},
+                {
+                    "choices": [{
+                        "message": {"content": "still partial"},
+                        "finish_reason": "length",
+                    }]
+                },
+            ),
+            (
+                {"wire_api": "responses"},
+                {
+                    "output_text": "still partial",
+                    "status": "incomplete",
+                    "incomplete_details": {
+                        "reason": "max_output_tokens",
+                    },
+                },
+            ),
+        ]
+
+        for profile_updates, response_json in cases:
+            with self.subTest(profile_updates=profile_updates):
+                provider = CustomAIProvider(http_client=object())
+                provider._post = Mock(return_value=(response_json, 0.1))
+                profile = {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                    **profile_updates,
+                }
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "incomplete|truncated",
+                ):
+                    provider.translate(
+                        profile,
+                        "Hello",
+                        "en",
+                        "zh-CN",
+                    )
+
+                self.assertEqual(provider._post.call_count, 2)
+
+    def test_translation_rejects_content_filtered_chat_completion(self):
+        provider = CustomAIProvider(http_client=object())
+        provider._post = Mock(return_value=(
+            {
+                "choices": [{
+                    "message": {"content": "partial"},
+                    "finish_reason": "content_filter",
+                }]
+            },
+            0.1,
+        ))
+
+        with self.assertRaisesRegex(ValueError, "content_filter"):
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                },
+                "Hello",
+                "en",
+                "zh-CN",
+            )
+
+    def test_translation_rejects_non_token_responses_incomplete_reason(self):
+        provider = CustomAIProvider(http_client=object())
+        provider._post = Mock(return_value=(
+            {
+                "output_text": "partial",
+                "status": "incomplete",
+                "incomplete_details": {
+                    "reason": "content_filter",
+                },
+            },
+            0.1,
+        ))
+
+        with self.assertRaisesRegex(ValueError, "content_filter"):
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                    "wire_api": "responses",
+                },
+                "Hello",
+                "en",
+                "zh-CN",
+            )
+
+    def test_streaming_responses_failed_event_rejects_partial_output(self):
+        class Response:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter([
+                    'event: response.output_text.delta',
+                    'data: {"type":"response.output_text.delta","delta":"partial"}',
+                    'event: response.failed',
+                    (
+                        'data: {"type":"response.failed","response":'
+                        '{"status":"failed","error":'
+                        '{"message":"upstream generation failed"}}}'
+                    ),
+                ])
+
+        class Client:
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        with self.assertRaisesRegex(ValueError, "upstream generation failed"):
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                    "wire_api": "responses",
+                },
+                "Hello",
+                "en",
+                "zh-CN",
+                latency_mode="stream",
+            )
+
+    def test_streaming_responses_failed_event_without_text_preserves_error(self):
+        class Response:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter([
+                    'event: response.failed',
+                    (
+                        'data: {"type":"response.failed","response":'
+                        '{"error":{"message":'
+                        '"model unavailable for super-secret"}}}'
+                    ),
+                ])
+
+        class Client:
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "model unavailable",
+        ) as context:
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                    "wire_api": "responses",
+                },
+                "Hello",
+                "en",
+                "zh-CN",
+                latency_mode="stream",
+            )
+        self.assertNotIn("super-secret", str(context.exception))
+
     def test_fetch_models_reuses_successful_models_url_for_base_url(self):
         class Response:
             def __init__(self, payload=None, status_code=200, text=""):
