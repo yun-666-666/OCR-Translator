@@ -3762,6 +3762,119 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         )
         handler.close()
 
+    def test_custom_ai_context_clear_invalidates_stale_generation_write(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        stale_generation = handler._custom_context_generation
+        handler._clear_active_context()
+
+        handler._update_custom_context(
+            "stale",
+            "stale-result",
+            translation_sequence=1,
+            context_generation=stale_generation,
+        )
+        current_generation = handler._custom_context_generation
+        handler._update_custom_context(
+            "current",
+            "current-result",
+            translation_sequence=2,
+            context_generation=current_generation,
+        )
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [("current", "current-result")],
+        )
+        handler.close()
+
+    def test_custom_ai_provider_result_after_context_clear_is_not_reinserted(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+        request_started = threading.Event()
+        release_request = threading.Event()
+
+        def delayed_translate(*args, **kwargs):
+            request_started.set()
+            self.assertTrue(release_request.wait(timeout=1.0))
+            return "stale-result", {}, 0.01
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=delayed_translate
+        )
+        caller = threading.Thread(
+            target=handler._custom_ai_translate,
+            args=("stale", 0.0),
+            kwargs={"translation_sequence": 1},
+        )
+        caller.start()
+        self.assertTrue(request_started.wait(timeout=1.0))
+
+        handler._clear_active_context()
+        release_request.set()
+        caller.join(timeout=1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(handler.custom_context_window, [])
+        handler.close()
+
+    def test_custom_ai_cache_hit_after_concurrent_clear_cannot_restore_old_context(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+
+        def clear_then_return(*args, **kwargs):
+            handler._clear_active_context()
+            return "cached-stale-result"
+
+        handler.unified_cache.get = Mock(side_effect=clear_then_return)
+
+        self.assertEqual(
+            handler._get_custom_ai_cached_translation(
+                "stale",
+                translation_sequence=1,
+            ),
+            "cached-stale-result",
+        )
+        self.assertEqual(handler.custom_context_window, [])
+        handler.close()
+
     def test_custom_ai_translate_propagates_sequence_to_context_order(self):
         profile = {
             "id": "profile-1",

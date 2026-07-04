@@ -41,6 +41,7 @@ class TranslationHandler:
         self.ocr_providers = {}
         self._custom_context_lock = threading.RLock()
         self.custom_context_window = []
+        self._custom_context_generation = 0
         self._custom_context_order_by_source = {}
         self._custom_context_fallback_order = 0
         self._custom_log_state_lock = threading.Lock()
@@ -114,6 +115,7 @@ class TranslationHandler:
         """Clear context window for the currently active LLM provider. Called when language, model, or settings change."""
         with self._custom_context_lock:
             self.custom_context_window = []
+            self._custom_context_generation += 1
             self._custom_context_order_by_source.clear()
             self._custom_context_fallback_order = 0
         log_debug("Custom AI context cleared")
@@ -400,7 +402,11 @@ Call Duration: {call_duration:.3f} seconds
         self,
         cleaned_text,
         translation_sequence=None,
+        context_generation=None,
     ):
+        if context_generation is None:
+            with self._custom_context_lock:
+                context_generation = self._custom_context_generation
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text,
         )
@@ -415,6 +421,7 @@ Call Duration: {call_duration:.3f} seconds
             cleaned_text,
             cached_result,
             translation_sequence=translation_sequence,
+            context_generation=context_generation,
         )
         return self._format_dialog_text(cached_result)
 
@@ -524,6 +531,8 @@ Call Duration: {call_duration:.3f} seconds
         stream_callback=None,
         translation_sequence=None,
     ):
+        with self._custom_context_lock:
+            context_generation = self._custom_context_generation
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text_main,
         )
@@ -533,6 +542,7 @@ Call Duration: {call_duration:.3f} seconds
         cached_result = self._get_custom_ai_cached_translation(
             cleaned_text_main,
             translation_sequence=translation_sequence,
+            context_generation=context_generation,
         )
         if cached_result:
             return cached_result
@@ -599,6 +609,7 @@ Call Duration: {call_duration:.3f} seconds
                 cleaned_text_main,
                 translated_api_text,
                 translation_sequence=translation_sequence,
+                context_generation=context_generation,
             )
 
         log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
@@ -869,10 +880,21 @@ Call Duration: {call_duration:.3f} seconds
         source_text,
         translated_text=None,
         translation_sequence=None,
+        context_generation=None,
     ):
         context_size = self._get_custom_context_window_size()
         source_key = str(source_text)
         with self._custom_context_lock:
+            if (
+                context_generation is not None
+                and context_generation != self._custom_context_generation
+            ):
+                log_debug(
+                    "Ignored stale Custom AI context update "
+                    f"generation={context_generation} "
+                    f"current={self._custom_context_generation}"
+                )
+                return
             if context_size == 0:
                 self.custom_context_window = []
                 self._custom_context_order_by_source.clear()
