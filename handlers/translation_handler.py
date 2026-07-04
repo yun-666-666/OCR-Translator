@@ -819,9 +819,28 @@ Call Duration: {call_duration:.3f} seconds
 
     def _custom_ai_race_profile_identity(self, profile):
         profile = profile if isinstance(profile, dict) else {}
+        base_url = str(
+            profile.get("base_url") or ""
+        ).strip().rstrip("/")
+        try:
+            if (
+                normalize_custom_ai_wire_api(profile.get("wire_api"))
+                == "responses"
+            ):
+                base_url = (
+                    self.custom_ai_provider
+                    .normalize_responses_url_candidates(base_url)[0]
+                )
+            else:
+                base_url = (
+                    self.custom_ai_provider
+                    .normalize_chat_completions_url_candidates(base_url)[0]
+                )
+        except (TypeError, ValueError, IndexError):
+            pass
         return (
             "endpoint",
-            str(profile.get("base_url") or "").strip().rstrip("/"),
+            base_url,
             *self._custom_ai_race_signature(profile),
         )
 

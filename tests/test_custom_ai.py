@@ -4504,6 +4504,45 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertEqual([profile["id"] for profile in candidates], ["active"])
         handler.close()
 
+    def test_custom_ai_race_normalizes_explicit_wire_endpoint_paths(self):
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+        cases = [
+            (
+                {
+                    "base_url": "https://host.example/v1",
+                    "model": "demo",
+                },
+                {
+                    "base_url": (
+                        "https://host.example/v1/chat/completions"
+                    ),
+                    "model": "demo",
+                },
+            ),
+            (
+                {
+                    "base_url": "https://host.example/v1",
+                    "model": "demo",
+                    "wire_api": "responses",
+                },
+                {
+                    "base_url": "https://host.example/v1/responses",
+                    "model": "demo",
+                    "wire_api": "responses",
+                },
+            ),
+        ]
+
+        for base_profile, explicit_profile in cases:
+            with self.subTest(wire_api=base_profile.get("wire_api")):
+                self.assertEqual(
+                    handler._custom_ai_race_profile_identity(base_profile),
+                    handler._custom_ai_race_profile_identity(explicit_profile),
+                )
+        handler.close()
+
     def test_custom_ai_race_busy_endpoint_suppresses_duplicate_profile(self):
         active = {
             "id": "active",
