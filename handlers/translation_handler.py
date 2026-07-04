@@ -325,6 +325,7 @@ Call Duration: {call_duration:.3f} seconds
         ocr_batch_number=None,
         stream_callback=None,
         translation_sequence=None,
+        latency_mode=None,
     ):
         # Translation already runs inside the background translation worker pool.
         # Avoid spawning an extra daemon thread here, otherwise the outer worker
@@ -335,12 +336,13 @@ Call Duration: {call_duration:.3f} seconds
                 ocr_batch_number,
                 stream_callback=stream_callback,
                 translation_sequence=translation_sequence,
+                latency_mode=latency_mode,
             )
         except Exception as e:
             log_debug(f"Translation exception: {e}")
             return f"Translation error: {str(e)}"
 
-    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None):
+    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None):
         cleaned_text_main = text_content_main.strip() if text_content_main else ""
         if not cleaned_text_main or self.is_placeholder_text(cleaned_text_main):
             return None
@@ -358,6 +360,7 @@ Call Duration: {call_duration:.3f} seconds
             translation_start_monotonic,
             stream_callback=stream_callback,
             translation_sequence=translation_sequence,
+            latency_mode=latency_mode,
         )
 
     def get_cached_translation_for_display(self, text_content):
@@ -459,6 +462,7 @@ Call Duration: {call_duration:.3f} seconds
             cache_params.get("custom_prompt", ""),
             cache_params.get("keep_linebreaks", False),
             cache_params.get("context", ()),
+            self._get_custom_ai_latency_mode(),
         )
 
     def _get_custom_ai_latency_mode(self):
@@ -540,6 +544,7 @@ Call Duration: {call_duration:.3f} seconds
         translation_start_monotonic,
         stream_callback=None,
         translation_sequence=None,
+        latency_mode=None,
     ):
         with self._custom_context_lock:
             context_generation = self._custom_context_generation
@@ -561,7 +566,11 @@ Call Duration: {call_duration:.3f} seconds
         if cached_result:
             return cached_result
 
-        latency_mode = self._get_custom_ai_latency_mode()
+        latency_mode = normalize_custom_ai_latency_mode(
+            self._get_custom_ai_latency_mode()
+            if latency_mode is None
+            else latency_mode
+        )
         context = list(cache_params.get("context", ()))
         keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
         custom_prompt = cache_params.get("custom_prompt", "")

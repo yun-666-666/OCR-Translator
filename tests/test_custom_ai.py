@@ -3549,6 +3549,77 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertNotEqual(chat_xhigh_key, chat_low_key)
         handler.close()
 
+    def test_inflight_key_isolated_by_latency_mode(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        mode = DummyVar("safe")
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=mode,
+        )
+        handler = TranslationHandler(app)
+
+        safe_key = handler.get_inflight_translation_key("Hello")
+        mode.value = "stream"
+        stream_key = handler.get_inflight_translation_key("Hello")
+
+        self.assertNotEqual(safe_key, stream_key)
+        handler.close()
+
+    def test_custom_ai_translation_honors_latency_mode_snapshot(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("translated", {}, 0.01)
+        )
+
+        result = handler._custom_ai_translate(
+            "Hello",
+            0.0,
+            latency_mode="stream",
+        )
+
+        self.assertEqual(result, "translated")
+        self.assertEqual(
+            handler.custom_ai_provider.translate.call_args.kwargs[
+                "latency_mode"
+            ],
+            "stream",
+        )
+        handler.close()
+
     def test_close_flushes_cache_and_closes_provider(self):
         handler = TranslationHandler(object())
         events = []

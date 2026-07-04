@@ -2010,6 +2010,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 ocr_batch_number=None,
                 stream_callback=None,
                 translation_sequence=None,
+                latency_mode=None,
             ):
                 stream_callback("Hel")
                 stream_callback("Hello")
@@ -2050,6 +2051,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 ocr_batch_number=None,
                 stream_callback=None,
                 translation_sequence=None,
+                latency_mode=None,
             ):
                 stream_callback("H")
                 stream_callback("He")

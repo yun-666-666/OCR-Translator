@@ -1326,6 +1326,7 @@ def process_translation_async(
             ocr_batch_number=ocr_sequence_number,
             stream_callback=stream_callback,
             translation_sequence=translation_sequence,
+            latency_mode=latency_mode,
         )
         
         completed_at = time.monotonic()
