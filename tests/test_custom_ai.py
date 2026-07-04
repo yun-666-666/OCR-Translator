@@ -3624,6 +3624,58 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 passed_context = handler.custom_ai_provider.translate.call_args.kwargs["context"]
                 self.assertEqual(passed_context, expected_context)
 
+    def test_custom_ai_request_reuses_single_semantic_snapshot(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(True)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = "snapshot prompt"
+
+        handler = TranslationHandler(App())
+        request_context = [("old", "旧")]
+        handler._get_custom_context_for_request = Mock(
+            side_effect=[
+                request_context,
+                [("changed-cache", "变化")],
+                [("changed-provider", "变化")],
+            ]
+        )
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("translated", {}, 0.01)
+        )
+
+        self.assertEqual(
+            handler._custom_ai_translate("current", 0.0),
+            "translated",
+        )
+
+        self.assertEqual(
+            handler._get_custom_context_for_request.call_count,
+            1,
+        )
+        provider_context = (
+            handler.custom_ai_provider.translate.call_args.kwargs["context"]
+        )
+        stored_context = handler.unified_cache.store.call_args.kwargs["context"]
+        self.assertEqual(provider_context, request_context)
+        self.assertEqual(stored_context, tuple(request_context))
+        handler.close()
+
     def test_custom_ai_context_window_keeps_configured_history_limit(self):
         class App:
             custom_context_window_var = DummyVar(3)

@@ -403,13 +403,23 @@ Call Duration: {call_duration:.3f} seconds
         cleaned_text,
         translation_sequence=None,
         context_generation=None,
+        profile=None,
+        source_lang=None,
+        target_lang=None,
+        cache_params=None,
     ):
         if context_generation is None:
             with self._custom_context_lock:
                 context_generation = self._custom_context_generation
-        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
-            current_source=cleaned_text,
-        )
+        if cache_params is None:
+            (
+                profile,
+                source_lang,
+                target_lang,
+                cache_params,
+            ) = self._get_custom_ai_cache_profile_and_params(
+                current_source=cleaned_text,
+            )
         if not profile:
             return None
 
@@ -543,16 +553,18 @@ Call Duration: {call_duration:.3f} seconds
             cleaned_text_main,
             translation_sequence=translation_sequence,
             context_generation=context_generation,
+            profile=profile,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            cache_params=cache_params,
         )
         if cached_result:
             return cached_result
 
         latency_mode = self._get_custom_ai_latency_mode()
-        context = self._get_custom_context_for_request(
-            current_source=cleaned_text_main,
-        )
-        keep_linebreaks = self.app.keep_linebreaks_var.get()
-        custom_prompt = getattr(self.app, 'custom_prompt_text', '')
+        context = list(cache_params.get("context", ()))
+        keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
+        custom_prompt = cache_params.get("custom_prompt", "")
 
         try:
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
