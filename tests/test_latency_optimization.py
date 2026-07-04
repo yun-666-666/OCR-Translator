@@ -1096,6 +1096,92 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(handler.get_cached_translation_for_display("こんにちは"), "Hello")
 
+    def test_instant_cache_hit_invalidates_older_pending_translation(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        displayed = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return "Cached latest"
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=4,
+            latest_translation_sequence_started=3,
+            last_displayed_translation_sequence=3,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=lambda: True
+            ),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            update_translation_text=displayed.append,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            last_successful_translation_time=0.0,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads._queue_pending_translation_request(
+                app,
+                "Older uncached text",
+                1,
+                5.0,
+                "active translation",
+            )
+
+        old_generation = app.pending_translation_flush_generation
+        old_timer = scheduled[0]
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.1):
+            worker_threads.start_async_translation(
+                app,
+                "Newest cached text",
+                2,
+            )
+
+        self.assertIsNone(app.pending_translation_request)
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_deadline_monotonic, 0.0)
+        self.assertEqual(
+            app.pending_translation_flush_generation,
+            old_generation + 1,
+        )
+        self.assertEqual(displayed, ["Cached latest"])
+        self.assertEqual(app.translation_sequence_counter, 5)
+        self.assertEqual(app.last_displayed_translation_sequence, 5)
+        self.assertEqual(app.latest_translation_sequence_started, 5)
+        app.translation_thread_pool.submit.assert_not_called()
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+        ) as restart_translation:
+            old_timer[1](*old_timer[2])
+
+        restart_translation.assert_not_called()
+        self.assertIsNone(app.pending_translation_request)
+
+        worker_threads.process_translation_response(
+            app,
+            "Obsolete network result",
+            4,
+            "Older uncached text",
+            1,
+        )
+        self.assertEqual(displayed, ["Cached latest"])
+
     def test_duplicate_inflight_translation_is_not_submitted_twice(self):
         worker_threads = import_worker_threads_for_tests()
 

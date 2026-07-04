@@ -928,6 +928,26 @@ def _get_oldest_active_translation_age(app, now):
     return max(0.0, float(now) - min(started_values))
 
 
+def _invalidate_pending_translation_request(app, reason):
+    had_pending_state = bool(
+        getattr(app, 'pending_translation_request', None)
+        or getattr(app, 'pending_translation_flush_scheduled', False)
+    )
+    generation = int(
+        getattr(app, 'pending_translation_flush_generation', 0) or 0
+    ) + 1
+    app.pending_translation_flush_generation = generation
+    app.pending_translation_request = None
+    app.pending_translation_flush_scheduled = False
+    app.pending_translation_flush_deadline_monotonic = 0.0
+    if had_pending_state:
+        log_debug(
+            "LATENCY: invalidated pending translation request "
+            f"generation={generation} reason={reason}"
+        )
+    return generation
+
+
 def _flush_pending_translation_request(app, flush_generation=None):
     try:
         current_generation = int(
@@ -1096,10 +1116,17 @@ def start_async_translation(
             cached_translation = app.translation_handler.get_cached_translation_for_display(text_to_translate)
             if cached_translation:
                 final_processed_translation = post_process_translation_text(cached_translation)
+                _invalidate_pending_translation_request(
+                    app,
+                    "newest subtitle satisfied by instant cache",
+                )
                 display_schedule_start = time.monotonic()
                 app.update_translation_text(final_processed_translation)
                 log_debug(f"LATENCY: display scheduling took {time.monotonic() - display_schedule_start:.3f}s")
                 app.translation_sequence_counter += 1
+                app.latest_translation_sequence_started = (
+                    app.translation_sequence_counter
+                )
                 app.last_displayed_translation_sequence = app.translation_sequence_counter
                 app.last_successful_translation_time = time.monotonic()
                 log_debug(
