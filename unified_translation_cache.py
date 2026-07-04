@@ -14,6 +14,7 @@ from logger import log_debug
 CACHE_SCHEMA_VERSION = 2
 SQLITE_HEADER = b"SQLite format 3\x00"
 SQLITE_SUFFIXES = {".sqlite", ".sqlite3", ".db"}
+ACCESS_TIME_PERSIST_INTERVAL_SECONDS = 60.0
 
 
 class UnifiedTranslationCache:
@@ -44,6 +45,7 @@ class UnifiedTranslationCache:
         self._cache = {}
         self._access_times = {}
         self._provider_keys = {}
+        self._last_access_persist_request_times = {}
 
         # Dirty persistence state
         self._dirty_upserts = {}
@@ -114,6 +116,7 @@ class UnifiedTranslationCache:
     def _remove_cache_entry_locked(self, cache_key):
         self._cache.pop(cache_key, None)
         self._access_times.pop(cache_key, None)
+        self._last_access_persist_request_times.pop(cache_key, None)
         self._discard_provider_key_locked(cache_key)
 
     def _mark_entry_upsert_dirty_locked(self, cache_key):
@@ -208,6 +211,7 @@ class UnifiedTranslationCache:
         self._cache.clear()
         self._access_times.clear()
         self._provider_keys.clear()
+        self._last_access_persist_request_times.clear()
 
         for entry in entries:
             key_parts = entry.get("key")
@@ -218,9 +222,11 @@ class UnifiedTranslationCache:
             self._cache[cache_key] = translation
             self._add_provider_key_locked(cache_key)
             try:
-                self._access_times[cache_key] = float(entry.get("access_time", now))
+                access_time = float(entry.get("access_time", now))
             except Exception:
-                self._access_times[cache_key] = now
+                access_time = now
+            self._access_times[cache_key] = access_time
+            self._last_access_persist_request_times[cache_key] = access_time
 
         excess_entries = len(self._cache) - self.max_size
         if excess_entries > 0:
@@ -492,6 +498,7 @@ class UnifiedTranslationCache:
             self._cache.clear()
             self._access_times.clear()
             self._provider_keys.clear()
+            self._last_access_persist_request_times.clear()
             for row in rows:
                 cache_key = (
                     str(row[0]),
@@ -503,9 +510,11 @@ class UnifiedTranslationCache:
                 self._cache[cache_key] = row[5]
                 self._add_provider_key_locked(cache_key)
                 try:
-                    self._access_times[cache_key] = float(row[6])
+                    access_time = float(row[6])
                 except Exception:
-                    self._access_times[cache_key] = time.time()
+                    access_time = time.time()
+                self._access_times[cache_key] = access_time
+                self._last_access_persist_request_times[cache_key] = access_time
 
             excess_entries = len(self._cache) - self.max_size
             if excess_entries > 0:
@@ -631,6 +640,20 @@ class UnifiedTranslationCache:
     def close(self):
         """Flush pending persistence and stop future timer scheduling."""
         with self.lock:
+            access_updates_pending = False
+            if self.persistence_path:
+                for cache_key, access_time in self._access_times.items():
+                    last_requested = self._last_access_persist_request_times.get(
+                        cache_key,
+                        0.0,
+                    )
+                    if access_time <= last_requested:
+                        continue
+                    self._mark_entry_upsert_dirty_locked(cache_key)
+                    self._last_access_persist_request_times[cache_key] = access_time
+                    access_updates_pending = True
+            if access_updates_pending:
+                self._persistence_generation += 1
             self._closed = True
             self._cancel_persistence_timer_locked()
         return self.flush()
@@ -660,7 +683,22 @@ class UnifiedTranslationCache:
                     log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang}")
                 return None
             else:
-                self._access_times[cache_key] = time.time()
+                access_time = time.time()
+                self._access_times[cache_key] = access_time
+                last_requested = self._last_access_persist_request_times.get(
+                    cache_key,
+                    0.0,
+                )
+                if (
+                    self.persistence_path
+                    and not self._closed
+                    and access_time - last_requested
+                    >= ACCESS_TIME_PERSIST_INTERVAL_SECONDS
+                ):
+                    self._persistence_generation += 1
+                    self._mark_entry_upsert_dirty_locked(cache_key)
+                    self._last_access_persist_request_times[cache_key] = access_time
+                    self._schedule_persistence_locked()
                 if provider.lower() == "deepl_api" and "model_type" in kwargs:
                     log_debug(
                         f"Unified cache HIT: {provider} {source_lang}->{target_lang} "
@@ -695,11 +733,13 @@ class UnifiedTranslationCache:
             self._cache[cache_key] = translation
             if is_new_entry:
                 self._add_provider_key_locked(cache_key)
-            self._access_times[cache_key] = time.time()
+            access_time = time.time()
+            self._access_times[cache_key] = access_time
 
             if translation_changed:
                 self._persistence_generation += 1
                 self._mark_entry_upsert_dirty_locked(cache_key)
+                self._last_access_persist_request_times[cache_key] = access_time
                 if self._closed:
                     operation = self._capture_persistence_operation_locked()
                 else:
@@ -748,6 +788,7 @@ class UnifiedTranslationCache:
             self._cache.clear()
             self._access_times.clear()
             self._provider_keys.clear()
+            self._last_access_persist_request_times.clear()
             self._persistence_generation += 1
             self._mark_full_resync_dirty_locked()
             self._cancel_persistence_timer_locked()

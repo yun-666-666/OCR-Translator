@@ -2571,6 +2571,158 @@ class CustomAIProviderTests(unittest.TestCase):
             finally:
                 cache.close()
 
+    def test_persistent_cache_hit_recency_survives_restart_trimming(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=2,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=100.0,
+            ):
+                cache.store("older-hot", "en", "zh-CN", "custom_ai", "A")
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=200.0,
+            ):
+                cache.store("newer-cold", "en", "zh-CN", "custom_ai", "B")
+            self.assertTrue(cache.flush())
+
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=300.0,
+            ):
+                self.assertEqual(
+                    cache.get("older-hot", "en", "zh-CN", "custom_ai"),
+                    "A",
+                )
+            cache.close()
+
+            restored = UnifiedTranslationCache(
+                max_size=1,
+                persistence_path=cache_path,
+            )
+            self.assertEqual(
+                restored.get("older-hot", "en", "zh-CN", "custom_ai"),
+                "A",
+            )
+            self.assertIsNone(
+                restored.get("newer-cold", "en", "zh-CN", "custom_ai")
+            )
+            restored.close()
+
+    def test_persistent_cache_hit_recency_is_throttled_per_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=2,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+            try:
+                with patch(
+                    "unified_translation_cache.time.time",
+                    return_value=100.0,
+                ):
+                    cache.store("hot", "en", "zh-CN", "custom_ai", "A")
+                self.assertTrue(cache.flush())
+                persisted_generation = cache._persisted_generation
+
+                with patch(
+                    "unified_translation_cache.time.time",
+                    return_value=150.0,
+                ):
+                    self.assertEqual(
+                        cache.get("hot", "en", "zh-CN", "custom_ai"),
+                        "A",
+                    )
+                self.assertEqual(
+                    cache._persistence_generation,
+                    persisted_generation,
+                )
+                self.assertIsNone(cache._persistence_timer)
+
+                with patch(
+                    "unified_translation_cache.time.time",
+                    return_value=170.0,
+                ):
+                    self.assertEqual(
+                        cache.get("hot", "en", "zh-CN", "custom_ai"),
+                        "A",
+                    )
+                scheduled_generation = cache._persistence_generation
+                scheduled_timer = cache._persistence_timer
+                self.assertEqual(
+                    scheduled_generation,
+                    persisted_generation + 1,
+                )
+                self.assertIsNotNone(scheduled_timer)
+
+                with patch(
+                    "unified_translation_cache.time.time",
+                    return_value=180.0,
+                ):
+                    self.assertEqual(
+                        cache.get("hot", "en", "zh-CN", "custom_ai"),
+                        "A",
+                    )
+                self.assertEqual(
+                    cache._persistence_generation,
+                    scheduled_generation,
+                )
+                self.assertIs(cache._persistence_timer, scheduled_timer)
+            finally:
+                cache.close()
+
+    def test_persistent_cache_close_flushes_recent_throttled_hit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=2,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=100.0,
+            ):
+                cache.store("older-hot", "en", "zh-CN", "custom_ai", "A")
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=140.0,
+            ):
+                cache.store("newer-cold", "en", "zh-CN", "custom_ai", "B")
+            self.assertTrue(cache.flush())
+
+            with patch(
+                "unified_translation_cache.time.time",
+                return_value=150.0,
+            ):
+                self.assertEqual(
+                    cache.get("older-hot", "en", "zh-CN", "custom_ai"),
+                    "A",
+                )
+            self.assertIsNone(cache._persistence_timer)
+            cache.close()
+
+            restored = UnifiedTranslationCache(
+                max_size=1,
+                persistence_path=cache_path,
+            )
+            self.assertEqual(
+                restored.get("older-hot", "en", "zh-CN", "custom_ai"),
+                "A",
+            )
+            self.assertIsNone(
+                restored.get("newer-cold", "en", "zh-CN", "custom_ai")
+            )
+            restored.close()
+
     def test_persistent_cache_coalesces_multiple_stores(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.json"
