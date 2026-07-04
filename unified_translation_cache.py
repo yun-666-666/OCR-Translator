@@ -40,6 +40,7 @@ class UnifiedTranslationCache:
         self._persistence_timer = None
         self._persistence_generation = 0
         self._persisted_generation = 0
+        self._last_applied_persistence_generation = -1
         self._consecutive_persistence_failures = 0
         self._closed = False
 
@@ -460,9 +461,26 @@ class UnifiedTranslationCache:
             return True
 
         with self._persistence_lock:
+            generation = int(operation.get("generation", -1))
+            if generation < self._last_applied_persistence_generation:
+                log_debug(
+                    "Unified cache skipped stale persistence generation "
+                    f"{generation}; latest applied generation is "
+                    f"{self._last_applied_persistence_generation}"
+                )
+                return True
             if operation["mode"] == "full":
-                return self._write_full_snapshot_sqlite_locked(operation["snapshot"])
-            return self._apply_sqlite_delta_locked(operation)
+                succeeded = self._write_full_snapshot_sqlite_locked(
+                    operation["snapshot"]
+                )
+            else:
+                succeeded = self._apply_sqlite_delta_locked(operation)
+            if succeeded:
+                self._last_applied_persistence_generation = max(
+                    self._last_applied_persistence_generation,
+                    generation,
+                )
+            return succeeded
 
     def _finalize_persistence_success_locked(self, generation):
         self._persisted_generation = max(self._persisted_generation, generation)
@@ -487,7 +505,9 @@ class UnifiedTranslationCache:
 
         if succeeded:
             self._consecutive_persistence_failures = 0
-            self._finalize_persistence_success_locked(operation["generation"])
+            generation = operation["generation"]
+            if generation > self._persisted_generation:
+                self._finalize_persistence_success_locked(generation)
             if (
                 not self._closed
                 and self._persisted_generation < self._persistence_generation

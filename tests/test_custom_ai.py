@@ -3168,6 +3168,84 @@ class CustomAIProviderTests(unittest.TestCase):
                 cache._persistence_timer = None
             cache.close()
 
+    def test_persistent_cache_older_operation_cannot_overwrite_newer_commit(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
+            cache = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+                persistence_delay_seconds=60.0,
+            )
+
+            cache.store("key", "en", "zh-CN", "custom_ai", "old")
+            with cache.lock:
+                cache._cancel_persistence_timer_locked()
+                older_operation = cache._capture_persistence_operation_locked()
+
+            cache.store("key", "en", "zh-CN", "custom_ai", "new")
+            with cache.lock:
+                cache._cancel_persistence_timer_locked()
+                newer_operation = cache._capture_persistence_operation_locked()
+
+            self.assertLess(
+                older_operation["generation"],
+                newer_operation["generation"],
+            )
+            self.assertTrue(cache._apply_persistence_operation(newer_operation))
+            self.assertTrue(cache._apply_persistence_operation(older_operation))
+
+            restored = UnifiedTranslationCache(
+                max_size=10,
+                persistence_path=cache_path,
+            )
+            self.assertEqual(
+                restored.get("key", "en", "zh-CN", "custom_ai"),
+                "new",
+            )
+            restored.close()
+            cache.close()
+
+    def test_persistent_cache_stale_success_does_not_redirty_newer_commit(self):
+        cache = UnifiedTranslationCache(max_size=10)
+        cache._persistence_generation = 2
+        cache._persisted_generation = 2
+
+        with cache.lock:
+            cache._handle_persistence_result_locked(
+                True,
+                {"generation": 1},
+            )
+
+        self.assertEqual(cache._persisted_generation, 2)
+        self.assertFalse(cache._full_resync_required)
+        self.assertEqual(cache._consecutive_persistence_failures, 0)
+
+    def test_persistent_cache_failed_newer_operation_does_not_block_older_retry(self):
+        cache = UnifiedTranslationCache(max_size=10)
+        newer_operation = {
+            "mode": "delta",
+            "generation": 2,
+        }
+        older_operation = {
+            "mode": "delta",
+            "generation": 1,
+        }
+
+        with patch.object(
+            cache,
+            "_apply_sqlite_delta_locked",
+            side_effect=[False, True],
+        ) as apply_delta:
+            self.assertFalse(
+                cache._apply_persistence_operation(newer_operation)
+            )
+            self.assertTrue(
+                cache._apply_persistence_operation(older_operation)
+            )
+
+        self.assertEqual(apply_delta.call_count, 2)
+        self.assertEqual(cache._last_applied_persistence_generation, 1)
+
     def test_persistent_cache_failed_flush_schedules_retry_while_open(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             cache_path = Path(tmp_dir) / "custom_ai_cache.sqlite3"
