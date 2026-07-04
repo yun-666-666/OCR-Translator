@@ -140,6 +140,48 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
 
 class CustomAIProviderTests(unittest.TestCase):
+    def test_provider_base_url_key_canonicalizes_network_equivalence(self):
+        provider = CustomAIProvider()
+
+        self.assertEqual(
+            provider._base_url_cache_key(
+                "HTTPS://HOST.EXAMPLE:443/v1/"
+            ),
+            provider._base_url_cache_key(
+                "https://host.example/v1"
+            ),
+        )
+        self.assertNotEqual(
+            provider._base_url_cache_key(
+                "https://host.example:8443/API"
+            ),
+            provider._base_url_cache_key(
+                "https://host.example/api"
+            ),
+        )
+
+    def test_provider_successful_url_cache_reuses_equivalent_base_alias(self):
+        provider = CustomAIProvider()
+        cache = {}
+        upper_base = "HTTPS://HOST.EXAMPLE:443/v1"
+        lower_base = "https://host.example/v1"
+        upper_url = provider.normalize_chat_completions_url(upper_base)
+        upper_key = provider._base_url_cache_key(upper_base)
+        provider._remember_successful_url(cache, upper_key, upper_url)
+
+        key, candidates, cached_url = provider._ordered_candidates(
+            lower_base,
+            cache,
+            provider.normalize_chat_completions_url_candidates,
+        )
+
+        self.assertEqual(key, upper_key)
+        self.assertEqual(cached_url, candidates[0])
+        self.assertEqual(
+            cached_url,
+            "https://host.example/v1/chat/completions",
+        )
+
     def test_extract_usage_preserves_cached_input_token_counts(self):
         provider = CustomAIProvider()
 

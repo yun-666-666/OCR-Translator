@@ -4,7 +4,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from logger import log_debug
 
@@ -334,7 +334,41 @@ class CustomAIProvider:
         self._owns_http_client = True
 
     def _base_url_cache_key(self, base_url):
-        return (base_url or "").strip().rstrip("/")
+        url = (base_url or "").strip().rstrip("/")
+        try:
+            parts = urlsplit(url)
+            scheme = parts.scheme.lower()
+            hostname = parts.hostname
+            if not scheme or not hostname:
+                return url
+            port = parts.port
+        except (TypeError, ValueError):
+            return url
+
+        userinfo = ""
+        if "@" in parts.netloc:
+            userinfo = parts.netloc.rsplit("@", 1)[0] + "@"
+        host = hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        default_port = (
+            (scheme == "https" and port == 443)
+            or (scheme == "http" and port == 80)
+        )
+        port_suffix = (
+            f":{port}"
+            if port is not None and not default_port
+            else ""
+        )
+        return urlunsplit(
+            (
+                scheme,
+                f"{userinfo}{host}{port_suffix}",
+                parts.path.rstrip("/"),
+                parts.query,
+                parts.fragment,
+            )
+        )
 
     def _rate_limit_cache_key(self, profile):
         if isinstance(profile, dict):
@@ -756,9 +790,23 @@ class CustomAIProvider:
             return None, candidates, None
         with self._url_cache_lock:
             cached_url = cache.get(cache_key)
-        if cached_url and cached_url in candidates:
-            ordered = [cached_url] + [url for url in candidates if url != cached_url]
-            return cache_key, ordered, cached_url
+        matched_cached_url = None
+        if cached_url:
+            cached_key = self._base_url_cache_key(cached_url)
+            matched_cached_url = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if self._base_url_cache_key(candidate) == cached_key
+                ),
+                None,
+            )
+        if matched_cached_url:
+            ordered = [matched_cached_url] + [
+                url for url in candidates
+                if url != matched_cached_url
+            ]
+            return cache_key, ordered, matched_cached_url
         return cache_key, candidates, None
 
     def _remember_successful_url(self, cache, cache_key, url):
@@ -769,7 +817,12 @@ class CustomAIProvider:
     def _forget_successful_url(self, cache, cache_key, url):
         if cache_key:
             with self._url_cache_lock:
-                if cache.get(cache_key) == url:
+                cached_url = cache.get(cache_key)
+                if (
+                    cached_url
+                    and self._base_url_cache_key(cached_url)
+                    == self._base_url_cache_key(url)
+                ):
                     cache.pop(cache_key, None)
 
     def _is_openrouter_profile(self, profile):
