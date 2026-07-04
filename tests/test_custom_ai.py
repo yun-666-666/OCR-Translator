@@ -4477,6 +4477,71 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertEqual(handler.custom_ai_provider.translate.call_count, 1)
         handler.close()
 
+    def test_custom_ai_race_deduplicates_profiles_for_same_endpoint(self):
+        active = {
+            "id": "active",
+            "base_url": "https://same.example/v1/",
+            "model": "same-model",
+        }
+        duplicate = {
+            "id": "duplicate",
+            "base_url": "https://same.example/v1",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, duplicate]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_context_window_var=DummyVar(0),
+        )
+        handler = TranslationHandler(app)
+
+        candidates = handler._get_custom_ai_race_profiles(active)
+
+        self.assertEqual([profile["id"] for profile in candidates], ["active"])
+        handler.close()
+
+    def test_custom_ai_race_busy_endpoint_suppresses_duplicate_profile(self):
+        active = {
+            "id": "active",
+            "base_url": "https://same.example/v1",
+            "model": "same-model",
+        }
+        duplicate = {
+            "id": "duplicate",
+            "base_url": "https://same.example/v1/",
+            "model": "same-model",
+        }
+        alternate = {
+            "id": "alternate",
+            "base_url": "https://other.example/v1",
+            "model": "same-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, duplicate, alternate]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_context_window_var=DummyVar(0),
+        )
+        handler = TranslationHandler(app)
+        handler._custom_race_inflight_profiles.add(
+            handler._custom_ai_race_profile_identity(active)
+        )
+
+        candidates = handler._get_custom_ai_race_profiles(active)
+
+        self.assertEqual(
+            [profile["id"] for profile in candidates],
+            ["alternate"],
+        )
+        handler.close()
+
     def test_custom_ai_race_cache_identity_uses_request_snapshot(self):
         active = {
             "id": "active",

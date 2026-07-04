@@ -757,16 +757,7 @@ Call Duration: {call_duration:.3f} seconds
                 return
             if self._custom_ai_race_signature(profile) != active_signature:
                 return
-            identity = profile.get("id") or (
-                profile.get("base_url", ""),
-                profile.get("model", ""),
-                normalize_custom_ai_wire_api(profile.get("wire_api")),
-                str(
-                    profile.get("reasoning_effort")
-                    or profile.get("model_reasoning_effort")
-                    or ""
-                ).strip().lower(),
-            )
+            identity = self._custom_ai_race_profile_identity(profile)
             if identity in seen:
                 return
             seen.add(identity)
@@ -828,11 +819,8 @@ Call Duration: {call_duration:.3f} seconds
 
     def _custom_ai_race_profile_identity(self, profile):
         profile = profile if isinstance(profile, dict) else {}
-        profile_id = str(profile.get("id") or "").strip()
-        if profile_id:
-            return ("id", profile_id)
         return (
-            "profile",
+            "endpoint",
             str(profile.get("base_url") or "").strip().rstrip("/"),
             *self._custom_ai_race_signature(profile),
         )
