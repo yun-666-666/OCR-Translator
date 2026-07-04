@@ -3659,6 +3659,157 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             [("Save", "另存"), ("Store", "保存"), ("Quit", "退出")],
         )
 
+    def test_custom_ai_context_orders_late_results_by_translation_sequence(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        handler._update_custom_context(
+            "newer",
+            "newer-result",
+            translation_sequence=2,
+        )
+        handler._update_custom_context(
+            "older",
+            "older-result",
+            translation_sequence=1,
+        )
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [
+                ("older", "older-result"),
+                ("newer", "newer-result"),
+            ],
+        )
+        handler.close()
+
+    def test_custom_ai_context_stale_result_cannot_displace_newer_small_window(self):
+        class App:
+            custom_context_window_var = DummyVar(1)
+
+        handler = TranslationHandler(App())
+        handler._update_custom_context(
+            "newer",
+            "newer-result",
+            translation_sequence=2,
+        )
+        handler._update_custom_context(
+            "older",
+            "older-result",
+            translation_sequence=1,
+        )
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [("newer", "newer-result")],
+        )
+        handler.close()
+
+    def test_custom_ai_context_stale_duplicate_cannot_replace_newer_translation(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        handler._update_custom_context(
+            "Save",
+            "new-translation",
+            translation_sequence=2,
+        )
+        handler._update_custom_context(
+            "Save",
+            "stale-translation",
+            translation_sequence=1,
+        )
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [("Save", "new-translation")],
+        )
+        handler.close()
+
+    def test_custom_ai_context_concurrent_updates_preserve_all_sequence_order(self):
+        class App:
+            custom_context_window_var = DummyVar(10)
+
+        handler = TranslationHandler(App())
+        barrier = threading.Barrier(10)
+
+        def update_context(sequence):
+            barrier.wait(timeout=1.0)
+            handler._update_custom_context(
+                f"source-{sequence}",
+                f"result-{sequence}",
+                translation_sequence=sequence,
+            )
+
+        threads = [
+            threading.Thread(target=update_context, args=(sequence,))
+            for sequence in range(10, 0, -1)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(
+            handler.custom_context_window,
+            [
+                (f"source-{sequence}", f"result-{sequence}")
+                for sequence in range(1, 11)
+            ],
+        )
+        handler.close()
+
+    def test_custom_ai_translate_propagates_sequence_to_context_order(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=[
+                ("newer-result", {}, 0.01),
+                ("older-result", {}, 0.01),
+            ]
+        )
+
+        handler._custom_ai_translate(
+            "newer",
+            0.0,
+            translation_sequence=2,
+        )
+        handler._custom_ai_translate(
+            "older",
+            0.0,
+            translation_sequence=1,
+        )
+
+        self.assertEqual(
+            handler.custom_context_window,
+            [
+                ("older", "older-result"),
+                ("newer", "newer-result"),
+            ],
+        )
+        handler.close()
+
     def test_custom_ai_context_budget_adapts_to_current_source_length(self):
         handler = TranslationHandler(object())
 
@@ -3781,6 +3932,59 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         self.assertEqual(handler._get_custom_ai_cached_translation("Save"), "保存")
         self.assertEqual(handler.custom_context_window, [("Save", "保存")])
+
+    def test_instant_cache_context_uses_next_translation_sequence(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Translator",
+            "base_url": "https://host.example/v1",
+            "model": "translation-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            translation_model_var = DummyVar("custom_ai")
+            translation_sequence_counter = 4
+            custom_ai_profiles = Profiles()
+            custom_source_lang = "en"
+            custom_target_lang = "zh-CN"
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            keep_linebreaks_var = DummyVar(False)
+            custom_context_window_var = DummyVar(3)
+            custom_prompt_text = ""
+
+        handler = TranslationHandler(App())
+        cache_params = handler._cache_params_for_profile(profile)
+        handler.unified_cache.store(
+            "newer",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "newer-result",
+            **cache_params,
+        )
+
+        self.assertEqual(
+            handler.get_cached_translation_for_display("newer"),
+            "newer-result",
+        )
+        handler._update_custom_context(
+            "older",
+            "older-result",
+            translation_sequence=4,
+        )
+        self.assertEqual(
+            handler.custom_context_window,
+            [
+                ("older", "older-result"),
+                ("newer", "newer-result"),
+            ],
+        )
+        handler.close()
 
     def test_immediately_repeated_custom_ai_subtitle_reuses_cache_with_context_enabled(self):
         profile = {

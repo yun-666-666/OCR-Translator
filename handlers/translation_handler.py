@@ -39,7 +39,10 @@ class TranslationHandler:
         self.custom_ai_provider = CustomAIProvider()
         self.providers = {}
         self.ocr_providers = {}
+        self._custom_context_lock = threading.RLock()
         self.custom_context_window = []
+        self._custom_context_order_by_source = {}
+        self._custom_context_fallback_order = 0
         self._custom_log_state_lock = threading.Lock()
         self._custom_log_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=1,
@@ -109,7 +112,10 @@ class TranslationHandler:
     # === CONTEXT MANAGEMENT ===
     def _clear_active_context(self):
         """Clear context window for the currently active LLM provider. Called when language, model, or settings change."""
-        self.custom_context_window = []
+        with self._custom_context_lock:
+            self.custom_context_window = []
+            self._custom_context_order_by_source.clear()
+            self._custom_context_fallback_order = 0
         log_debug("Custom AI context cleared")
         provider = self._get_active_llm_provider()
         if provider:
@@ -363,7 +369,17 @@ Call Duration: {call_duration:.3f} seconds
             selected_model = 'custom_ai'
 
         if selected_model == 'custom_ai':
-            return self._get_custom_ai_cached_translation(cleaned_text)
+            translation_sequence = None
+            try:
+                translation_sequence = (
+                    int(self.app.translation_sequence_counter) + 1
+                )
+            except (AttributeError, TypeError, ValueError):
+                pass
+            return self._get_custom_ai_cached_translation(
+                cleaned_text,
+                translation_sequence=translation_sequence,
+            )
 
         return None
 
@@ -380,7 +396,11 @@ Call Duration: {call_duration:.3f} seconds
         )
         return profile, source_lang, target_lang, cache_params
 
-    def _get_custom_ai_cached_translation(self, cleaned_text):
+    def _get_custom_ai_cached_translation(
+        self,
+        cleaned_text,
+        translation_sequence=None,
+    ):
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text,
         )
@@ -391,7 +411,11 @@ Call Duration: {call_duration:.3f} seconds
         if not cached_result:
             return None
 
-        self._update_custom_context(cleaned_text, cached_result)
+        self._update_custom_context(
+            cleaned_text,
+            cached_result,
+            translation_sequence=translation_sequence,
+        )
         return self._format_dialog_text(cached_result)
 
     def get_inflight_translation_key(self, text_content):
@@ -506,7 +530,10 @@ Call Duration: {call_duration:.3f} seconds
         if not profile:
             return "AI model profile for translation is missing."
 
-        cached_result = self._get_custom_ai_cached_translation(cleaned_text_main)
+        cached_result = self._get_custom_ai_cached_translation(
+            cleaned_text_main,
+            translation_sequence=translation_sequence,
+        )
         if cached_result:
             return cached_result
 
@@ -568,7 +595,11 @@ Call Duration: {call_duration:.3f} seconds
                     translated_api_text,
                     **target_cache_params,
                 )
-            self._update_custom_context(cleaned_text_main, translated_api_text)
+            self._update_custom_context(
+                cleaned_text_main,
+                translated_api_text,
+                translation_sequence=translation_sequence,
+            )
 
         log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
         return self._format_dialog_text(translated_api_text)
@@ -791,28 +822,104 @@ Call Duration: {call_duration:.3f} seconds
             ),
         }
 
-    def _update_custom_context(self, source_text, translated_text=None):
-        context_size = self._get_custom_context_window_size()
-        if context_size == 0:
-            self.custom_context_window = []
-            return
+    def _custom_context_entry_source(self, entry):
+        if isinstance(entry, (tuple, list)) and entry:
+            return str(entry[0])
+        return str(entry)
 
-        if translated_text is None:
-            context_entry = source_text
-        else:
-            context_entry = (source_text, translated_text)
-
-        refreshed_window = []
+    def _sync_custom_context_order_locked(self):
+        current_sources = []
         for entry in self.custom_context_window:
-            if isinstance(entry, (tuple, list)) and entry:
-                if entry[0] == source_text:
-                    continue
-            elif entry == source_text:
+            source = self._custom_context_entry_source(entry)
+            current_sources.append(source)
+            if source in self._custom_context_order_by_source:
                 continue
-            refreshed_window.append(entry)
+            self._custom_context_fallback_order += 1
+            self._custom_context_order_by_source[source] = (
+                self._custom_context_fallback_order
+            )
+        current_source_set = set(current_sources)
+        self._custom_context_order_by_source = {
+            source: order
+            for source, order in self._custom_context_order_by_source.items()
+            if source in current_source_set
+        }
+        if self._custom_context_order_by_source:
+            self._custom_context_fallback_order = max(
+                self._custom_context_fallback_order,
+                max(self._custom_context_order_by_source.values()),
+            )
 
-        refreshed_window.append(context_entry)
-        self.custom_context_window = refreshed_window[-context_size:]
+    def _next_custom_context_order_locked(self, translation_sequence):
+        try:
+            sequence_order = int(translation_sequence)
+        except (TypeError, ValueError):
+            sequence_order = None
+        if sequence_order is not None:
+            self._custom_context_fallback_order = max(
+                self._custom_context_fallback_order,
+                sequence_order,
+            )
+            return sequence_order
+        self._custom_context_fallback_order += 1
+        return self._custom_context_fallback_order
+
+    def _update_custom_context(
+        self,
+        source_text,
+        translated_text=None,
+        translation_sequence=None,
+    ):
+        context_size = self._get_custom_context_window_size()
+        source_key = str(source_text)
+        with self._custom_context_lock:
+            if context_size == 0:
+                self.custom_context_window = []
+                self._custom_context_order_by_source.clear()
+                self._custom_context_fallback_order = 0
+                return
+
+            self._sync_custom_context_order_locked()
+            context_order = self._next_custom_context_order_locked(
+                translation_sequence
+            )
+            existing_order = self._custom_context_order_by_source.get(
+                source_key
+            )
+            if (
+                existing_order is not None
+                and translation_sequence is not None
+                and context_order < existing_order
+            ):
+                return
+
+            if translated_text is None:
+                context_entry = source_text
+            else:
+                context_entry = (source_text, translated_text)
+
+            refreshed_window = [
+                entry
+                for entry in self.custom_context_window
+                if self._custom_context_entry_source(entry) != source_key
+            ]
+            refreshed_window.append(context_entry)
+            self._custom_context_order_by_source[source_key] = context_order
+            refreshed_window.sort(
+                key=lambda entry: self._custom_context_order_by_source[
+                    self._custom_context_entry_source(entry)
+                ]
+            )
+            self.custom_context_window = refreshed_window[-context_size:]
+            retained_sources = {
+                self._custom_context_entry_source(entry)
+                for entry in self.custom_context_window
+            }
+            self._custom_context_order_by_source = {
+                source: order
+                for source, order in self._custom_context_order_by_source.items()
+                if source in retained_sources
+            }
 
     def _get_custom_context_for_request(self, current_source=None):
         context_size = self._get_custom_context_window_size()
@@ -820,9 +927,11 @@ Call Duration: {call_duration:.3f} seconds
             return []
 
         context_budget = self._get_custom_context_char_budget(current_source)
+        with self._custom_context_lock:
+            context_window = list(self.custom_context_window)
         selected = []
         selected_chars = 0
-        for entry in reversed(self.custom_context_window):
+        for entry in reversed(context_window):
             if (
                 current_source is not None
                 and isinstance(entry, (tuple, list))
