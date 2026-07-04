@@ -9,7 +9,6 @@ import traceback
 import threading
 import concurrent.futures
 from datetime import datetime, timedelta
-from urllib.parse import urlsplit, urlunsplit
 
 from logger import append_rotating_text, log_debug
 from unified_translation_cache import UnifiedTranslationCache
@@ -871,6 +870,16 @@ Call Duration: {call_duration:.3f} seconds
 
     def _custom_ai_race_profile_identity(self, profile):
         profile = profile if isinstance(profile, dict) else {}
+        base_url = self._canonical_custom_ai_profile_endpoint(profile)
+        return (
+            "endpoint",
+            base_url,
+            *self._custom_ai_race_signature(profile),
+            self.custom_ai_provider._credential_scope_key(profile),
+        )
+
+    def _canonical_custom_ai_profile_endpoint(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
         base_url = str(
             profile.get("base_url") or ""
         ).strip().rstrip("/")
@@ -890,49 +899,8 @@ Call Duration: {call_duration:.3f} seconds
                 )
         except (TypeError, ValueError, IndexError):
             pass
-        base_url = self._canonicalize_race_endpoint_url(base_url)
-        return (
-            "endpoint",
-            base_url,
-            *self._custom_ai_race_signature(profile),
-            self.custom_ai_provider._credential_scope_key(profile),
-        )
-
-    def _canonicalize_race_endpoint_url(self, endpoint_url):
-        try:
-            parts = urlsplit(str(endpoint_url or ""))
-            scheme = parts.scheme.lower()
-            hostname = parts.hostname
-            if not scheme or not hostname:
-                return str(endpoint_url or "")
-            port = parts.port
-        except (TypeError, ValueError):
-            return str(endpoint_url or "")
-
-        userinfo = ""
-        if "@" in parts.netloc:
-            userinfo = parts.netloc.rsplit("@", 1)[0] + "@"
-        canonical_host = hostname.lower()
-        if ":" in canonical_host:
-            canonical_host = f"[{canonical_host}]"
-        is_default_port = (
-            (scheme == "https" and port == 443)
-            or (scheme == "http" and port == 80)
-        )
-        port_suffix = (
-            f":{port}"
-            if port is not None and not is_default_port
-            else ""
-        )
-        netloc = f"{userinfo}{canonical_host}{port_suffix}"
-        return urlunsplit(
-            (
-                scheme,
-                netloc,
-                parts.path,
-                parts.query,
-                parts.fragment,
-            )
+        return self.custom_ai_provider._base_url_cache_key(
+            base_url
         )
 
     def _release_custom_ai_race_profile(self, identity):
@@ -962,7 +930,9 @@ Call Duration: {call_duration:.3f} seconds
 
         return {
             "profile_id": profile.get("id", ""),
-            "base_url": str(profile.get("base_url", "")).strip().rstrip("/"),
+            "base_url": self._canonical_custom_ai_profile_endpoint(
+                profile
+            ),
             "model": profile.get("model", ""),
             "credential_scope": (
                 self.custom_ai_provider._credential_scope_key(profile)

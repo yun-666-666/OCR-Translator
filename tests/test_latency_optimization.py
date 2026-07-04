@@ -1083,15 +1083,14 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
         )
         handler = TranslationHandler(app)
+        cache_params = handler._cache_params_for_profile(profile)
         handler.unified_cache.store(
             "こんにちは",
             "ja",
             "en",
             "custom_ai",
             "Hello",
-            profile_id="profile-1",
-            base_url="https://example.test/v1",
-            model="fast-model",
+            **cache_params,
         )
 
         self.assertEqual(handler.get_cached_translation_for_display("こんにちは"), "Hello")

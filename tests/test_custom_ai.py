@@ -3803,6 +3803,40 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertNotIn("second-super-secret", repr(second_params))
         handler.close()
 
+    def test_cache_params_share_equivalent_configured_endpoint_urls(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "HTTPS://HOST.EXAMPLE:443/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+        app = types.SimpleNamespace(
+            keep_linebreaks_var=DummyVar(False),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+        )
+        handler = TranslationHandler(app)
+
+        base_params = handler._cache_params_for_profile(profile)
+        profile["base_url"] = (
+            "https://host.example/v1/chat/completions"
+        )
+        explicit_params = handler._cache_params_for_profile(profile)
+
+        self.assertEqual(base_params, explicit_params)
+        self.assertEqual(
+            base_params["base_url"],
+            "https://host.example/v1/chat/completions",
+        )
+
+        profile["wire_api"] = "responses"
+        responses_params = handler._cache_params_for_profile(profile)
+        self.assertNotEqual(
+            explicit_params["base_url"],
+            responses_params["base_url"],
+        )
+        handler.close()
+
     def test_custom_ai_translation_honors_latency_mode_snapshot(self):
         profile = {
             "id": "profile-1",
