@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gui_builder
+import custom_ai as custom_ai_module
 from custom_ai import CustomAIProfileManager, CustomAIProvider
 from gui_builder import filter_model_values, run_profile_network_task_async
 from language_ui import UILanguageManager
@@ -4277,6 +4278,129 @@ class DummyVar:
         return self.value
 
 
+class CustomAILatencyModeAdvisorTests(unittest.TestCase):
+    def _make_advisor(self):
+        advisor_cls = getattr(
+            custom_ai_module,
+            "CustomAILatencyModeAdvisor",
+            None,
+        )
+        self.assertIsNotNone(
+            advisor_cls,
+            "CustomAILatencyModeAdvisor should exist for adaptive mode",
+        )
+        return advisor_cls(
+            min_samples=3,
+            stream_latency_threshold_seconds=1.5,
+            race_latency_threshold_seconds=3.0,
+            race_cooldown_seconds=30.0,
+            clock=lambda: self.now,
+        )
+
+    def setUp(self):
+        self.now = 100.0
+
+    def test_explicit_latency_mode_is_not_overridden_by_adaptive_advisor(self):
+        advisor = self._make_advisor()
+        for duration in (3.2, 3.4, 3.6):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "safe",
+            stream_supported=True,
+            healthy_race_profile_count=3,
+            primary_cooldown_seconds=0.0,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+        self.assertEqual(decision.reason, "configured")
+
+    def test_adaptive_low_latency_resolves_to_safe(self):
+        advisor = self._make_advisor()
+        for duration in (0.20, 0.24, 0.28):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=1,
+            primary_cooldown_seconds=0.0,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+        self.assertEqual(decision.reason, "low_latency")
+
+    def test_adaptive_high_p90_with_stream_support_resolves_to_stream(self):
+        advisor = self._make_advisor()
+        for duration in (0.30, 1.70, 1.90):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=1,
+            primary_cooldown_seconds=0.0,
+        )
+
+        self.assertEqual(decision.mode, "stream")
+        self.assertEqual(decision.reason, "p90_high")
+
+    def test_adaptive_very_slow_with_multiple_healthy_profiles_resolves_to_race(self):
+        advisor = self._make_advisor()
+        for duration in (2.9, 3.4, 3.8):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=2,
+            primary_cooldown_seconds=0.0,
+            commit=True,
+        )
+
+        self.assertEqual(decision.mode, "race")
+        self.assertEqual(decision.reason, "p90_very_high")
+
+    def test_adaptive_race_has_frequency_limit(self):
+        advisor = self._make_advisor()
+        for duration in (3.1, 3.5, 3.9):
+            advisor.observe_request(duration, success=True)
+
+        first = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=2,
+            primary_cooldown_seconds=0.0,
+            commit=True,
+        )
+        second = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=2,
+            primary_cooldown_seconds=0.0,
+            commit=True,
+        )
+
+        self.assertEqual(first.mode, "race")
+        self.assertEqual(second.mode, "stream")
+        self.assertEqual(second.reason, "race_cooldown")
+
+    def test_adaptive_cooldown_without_healthy_alternative_resolves_to_safe(self):
+        advisor = self._make_advisor()
+        for duration in (2.5, 3.0, 3.5):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=0,
+            primary_cooldown_seconds=9.0,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+        self.assertEqual(decision.reason, "cooldown")
+
+
 class TranslationHandlerCustomAITests(unittest.TestCase):
     def test_custom_ai_translation_error_redacts_active_profile_key(self):
         profile = {
@@ -4594,6 +4718,91 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         stream_key = handler.get_inflight_translation_key("Hello")
 
         self.assertNotEqual(safe_key, stream_key)
+        handler.close()
+
+    def test_adaptive_inflight_key_uses_resolved_mode(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("adaptive"),
+        )
+        handler = TranslationHandler(app)
+        advisor = getattr(handler, "_custom_latency_advisor", None)
+        self.assertIsNotNone(advisor)
+        for duration in (0.3, 1.8, 2.0):
+            advisor.observe_request(duration, success=True)
+
+        key = handler.get_inflight_translation_key("Hello")
+
+        self.assertEqual(key[-1], "stream")
+        self.assertNotIn("adaptive", key)
+        handler.close()
+
+    def test_adaptive_translation_uses_one_resolved_mode_snapshot(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "model": "demo",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [profile]
+
+        mode = DummyVar("adaptive")
+        app = types.SimpleNamespace(
+            translation_model_var=DummyVar("custom_ai"),
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=mode,
+        )
+        handler = TranslationHandler(app)
+        advisor = getattr(handler, "_custom_latency_advisor", None)
+        self.assertIsNotNone(advisor)
+        for duration in (0.4, 1.7, 1.9):
+            advisor.observe_request(duration, success=True)
+
+        def translate_then_change_setting(*args, **kwargs):
+            mode.value = "safe"
+            return "translated", {}, 0.1
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=translate_then_change_setting
+        )
+
+        result = handler._custom_ai_translate("Hello", 0.0)
+
+        self.assertEqual(result, "translated")
+        self.assertEqual(
+            handler.custom_ai_provider.translate.call_args.kwargs[
+                "latency_mode"
+            ],
+            "stream",
+        )
         handler.close()
 
     def test_inflight_and_cache_params_include_structured_output_contract(self):

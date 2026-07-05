@@ -14,7 +14,9 @@ from logger import append_rotating_text, log_debug
 from unified_translation_cache import UnifiedTranslationCache
 from translation_utils import is_translation_error_result
 from custom_ai import (
+    CustomAILatencyModeAdvisor,
     CustomAIProvider,
+    CUSTOM_AI_LATENCY_MODE_ADAPTIVE,
     CUSTOM_AI_LATENCY_MODE_RACE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
     CUSTOM_AI_LATENCY_MODE_STREAM,
@@ -61,6 +63,7 @@ class TranslationHandler:
         self._custom_prompt_cache_sample_count = 0
         self._custom_cached_input_ratio_ema = None
         self._custom_input_tokens_ema = None
+        self._custom_latency_advisor = CustomAILatencyModeAdvisor()
         self._custom_race_state_lock = threading.Lock()
         self._custom_race_inflight_profiles = set()
         
@@ -132,12 +135,15 @@ class TranslationHandler:
             log_debug("No active custom AI model profile configured for OCR")
             return "<e>: AI model profile for OCR is missing"
         try:
+            latency_mode = self._get_custom_ai_latency_mode()
+            if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+                latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
             result, usage, duration = self.custom_ai_provider.recognize(
                 profile,
                 image_data,
                 source_lang,
                 keep_linebreaks=self.app.keep_linebreaks_var.get(),
-                latency_mode=self._get_custom_ai_latency_mode(),
+                latency_mode=latency_mode,
                 image_detail=(
                     self.app.get_custom_ai_ocr_image_detail()
                     if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
@@ -506,16 +512,94 @@ Call Duration: {call_duration:.3f} seconds
         return self._format_dialog_text(cached_result)
 
     def get_inflight_translation_key(self, text_content):
+        snapshot = self.get_custom_ai_translation_request_snapshot(
+            text_content,
+            commit=False,
+        )
+        if snapshot:
+            return snapshot.get("inflight_key")
+        return None
+
+    def get_custom_ai_translation_request_snapshot(
+        self,
+        text_content,
+        commit=False,
+    ):
         cleaned_text = text_content.strip() if text_content else ""
         if not cleaned_text or self.is_placeholder_text(cleaned_text):
             return None
 
+        configured_latency_mode = self._get_custom_ai_latency_mode()
+        decision = self._resolve_custom_ai_latency_mode_for_request(
+            current_source=cleaned_text,
+            configured_mode=configured_latency_mode,
+            commit=commit,
+        )
+        latency_mode = decision.mode
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text,
+            latency_mode=latency_mode,
         )
         if not profile:
-            return ("custom_ai", cleaned_text, "missing_profile")
+            inflight_key = ("custom_ai", cleaned_text, "missing_profile")
+        else:
+            inflight_key = self._build_custom_ai_inflight_key(
+                cleaned_text,
+                source_lang,
+                target_lang,
+                cache_params,
+                latency_mode,
+            )
 
+        return {
+            "inflight_key": inflight_key,
+            "latency_mode": latency_mode,
+            "configured_latency_mode": configured_latency_mode,
+            "reason": decision.reason,
+            "p90_seconds": decision.p90_seconds,
+            "sample_count": decision.sample_count,
+        }
+
+    def commit_custom_ai_latency_mode_snapshot(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return
+        self._commit_custom_ai_latency_mode(
+            snapshot.get("configured_latency_mode"),
+            snapshot.get("latency_mode"),
+            snapshot.get("reason", ""),
+            snapshot.get("p90_seconds", 0.0),
+            snapshot.get("sample_count", 0),
+        )
+
+    def _commit_custom_ai_latency_mode(
+        self,
+        configured_mode,
+        resolved_mode,
+        reason,
+        p90_seconds=0.0,
+        sample_count=0,
+    ):
+        configured_mode = normalize_custom_ai_latency_mode(configured_mode)
+        resolved_mode = normalize_custom_ai_latency_mode(resolved_mode)
+        if configured_mode != CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+            return
+        self._custom_latency_advisor.commit_mode(resolved_mode)
+        log_debug(
+            "LATENCY: adaptive_latency_mode "
+            f"resolved={resolved_mode} "
+            f"reason={reason} "
+            f"p90={float(p90_seconds or 0.0):.3f}s "
+            f"samples={int(sample_count or 0)}"
+        )
+
+    def _build_custom_ai_inflight_key(
+        self,
+        cleaned_text,
+        source_lang,
+        target_lang,
+        cache_params,
+        latency_mode,
+    ):
         return (
             "custom_ai",
             cleaned_text,
@@ -531,17 +615,123 @@ Call Duration: {call_duration:.3f} seconds
             cache_params.get("custom_prompt", ""),
             cache_params.get("keep_linebreaks", False),
             cache_params.get("context", ()),
-            self._get_custom_ai_latency_mode(),
+            latency_mode,
         )
 
     def _get_custom_ai_latency_mode(self):
         if hasattr(self.app, 'get_custom_ai_latency_mode'):
-            return self.app.get_custom_ai_latency_mode()
+            return normalize_custom_ai_latency_mode(
+                self.app.get_custom_ai_latency_mode()
+            )
         var = getattr(self.app, 'custom_ai_latency_mode_var', None)
         try:
             return normalize_custom_ai_latency_mode(var.get() if var is not None else CUSTOM_AI_LATENCY_MODE_SAFE)
         except Exception:
             return CUSTOM_AI_LATENCY_MODE_SAFE
+
+    def _resolve_custom_ai_latency_mode_for_request(
+        self,
+        current_source=None,
+        configured_mode=None,
+        commit=False,
+    ):
+        configured_mode = normalize_custom_ai_latency_mode(
+            configured_mode
+            if configured_mode is not None
+            else self._get_custom_ai_latency_mode()
+        )
+        if configured_mode != CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+            return self._custom_latency_advisor.resolve(configured_mode)
+
+        try:
+            profile = self.app.custom_ai_profiles.get_active_profile(
+                "translation"
+            )
+        except Exception:
+            profile = None
+
+        stream_supported = self._custom_ai_profile_supports_stream(profile)
+        primary_cooldown = self._custom_ai_profile_cooldown_seconds(profile)
+        healthy_race_count = len(
+            self._get_healthy_custom_ai_race_profiles(profile)
+        )
+        decision = self._custom_latency_advisor.resolve(
+            configured_mode,
+            stream_supported=stream_supported,
+            healthy_race_profile_count=healthy_race_count,
+            primary_cooldown_seconds=primary_cooldown,
+            commit=commit,
+        )
+        if commit:
+            log_debug(
+                "LATENCY: adaptive_latency_mode "
+                f"resolved={decision.mode} reason={decision.reason} "
+                f"p90={decision.p90_seconds:.3f}s "
+                f"samples={decision.sample_count} "
+                f"healthy_race_profiles={healthy_race_count} "
+                f"cooldown={primary_cooldown:.3f}s"
+            )
+        return decision
+
+    def _custom_ai_profile_supports_stream(self, profile):
+        checker = getattr(
+            self.custom_ai_provider,
+            "profile_supports_streaming",
+            None,
+        )
+        if callable(checker):
+            try:
+                return bool(checker(profile))
+            except Exception as stream_error:
+                log_debug(
+                    "Custom AI stream capability check failed: "
+                    f"{type(stream_error).__name__} - {stream_error}"
+                )
+        return bool(profile)
+
+    def _custom_ai_profile_cooldown_seconds(self, profile):
+        if not isinstance(profile, dict):
+            return 0.0
+        cooldown_getter = getattr(
+            self.custom_ai_provider,
+            "get_cooldown_remaining",
+            None,
+        )
+        if not callable(cooldown_getter):
+            return 0.0
+        try:
+            return max(0.0, float(cooldown_getter(profile)))
+        except Exception as cooldown_error:
+            log_debug(
+                "Custom AI cooldown check failed: "
+                f"{type(cooldown_error).__name__} - {cooldown_error}"
+            )
+            return 0.0
+
+    def _get_healthy_custom_ai_race_profiles(self, active_profile):
+        if not isinstance(active_profile, dict):
+            return []
+        candidates = self._get_custom_ai_race_profiles(active_profile)
+        cooldown_getter = getattr(
+            self.custom_ai_provider,
+            "get_cooldown_remaining",
+            None,
+        )
+        if not callable(cooldown_getter):
+            return candidates
+        healthy = []
+        for candidate in candidates:
+            try:
+                remaining = max(0.0, float(cooldown_getter(candidate)))
+            except Exception as cooldown_error:
+                log_debug(
+                    "Custom AI adaptive cooldown check failed: "
+                    f"{type(cooldown_error).__name__} - {cooldown_error}"
+                )
+                remaining = 0.0
+            if remaining <= 0.0:
+                healthy.append(candidate)
+        return healthy
 
     def get_translation_concurrency_limit(self):
         selected_model = self.app.translation_model_var.get()
@@ -578,7 +768,7 @@ Call Duration: {call_duration:.3f} seconds
 
         return scaled_interval
 
-    def get_translation_provider_cooldown_seconds(self):
+    def get_translation_provider_cooldown_seconds(self, latency_mode=None):
         selected_model = self.app.translation_model_var.get()
         if selected_model != 'custom_ai':
             self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
@@ -595,8 +785,17 @@ Call Duration: {call_duration:.3f} seconds
             return 0.0
 
         try:
+            request_latency_mode = normalize_custom_ai_latency_mode(
+                latency_mode
+                if latency_mode is not None
+                else self._get_custom_ai_latency_mode()
+            )
+            if request_latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+                request_latency_mode = (
+                    self._resolve_custom_ai_latency_mode_for_request().mode
+                )
             profiles = [profile]
-            if self._get_custom_ai_latency_mode() == CUSTOM_AI_LATENCY_MODE_RACE:
+            if request_latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
                 profiles = self._get_custom_ai_race_profiles(profile)
             remaining_values = [
                 max(0.0, float(cooldown_getter(candidate)))
@@ -623,11 +822,17 @@ Call Duration: {call_duration:.3f} seconds
     ):
         with self._custom_context_lock:
             context_generation = self._custom_context_generation
-        latency_mode = normalize_custom_ai_latency_mode(
+        configured_latency_mode = normalize_custom_ai_latency_mode(
             self._get_custom_ai_latency_mode()
             if latency_mode is None
             else latency_mode
         )
+        decision = self._resolve_custom_ai_latency_mode_for_request(
+            current_source=cleaned_text_main,
+            configured_mode=configured_latency_mode,
+            commit=False,
+        )
+        latency_mode = decision.mode
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text_main,
             latency_mode=latency_mode,
@@ -650,6 +855,13 @@ Call Duration: {call_duration:.3f} seconds
         context = list(cache_params.get("context", ()))
         keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
         custom_prompt = cache_params.get("custom_prompt", "")
+        self._commit_custom_ai_latency_mode(
+            configured_latency_mode,
+            latency_mode,
+            decision.reason,
+            decision.p90_seconds,
+            decision.sample_count,
+        )
 
         try:
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
@@ -687,9 +899,13 @@ Call Duration: {call_duration:.3f} seconds
                     keep_linebreaks=keep_linebreaks,
                     context=context,
                     latency_mode=latency_mode,
-                )
+            )
             self._log_custom_short_call("translation", winning_profile, translated_api_text, usage, duration)
         except Exception as e:
+            self._record_custom_ai_latency_observation(
+                time.monotonic() - translation_start_monotonic,
+                success=False,
+            )
             error_text = self._sanitize_custom_ai_profile_error(
                 e,
                 profile,
@@ -1331,6 +1547,19 @@ Call Duration: {call_duration:.3f} seconds
         )
         return cached_ratio
 
+    def _record_custom_ai_latency_observation(self, duration, success=True):
+        advisor = getattr(self, "_custom_latency_advisor", None)
+        observer = getattr(advisor, "observe_request", None)
+        if not callable(observer):
+            return
+        try:
+            observer(duration, success=success)
+        except Exception as observe_error:
+            log_debug(
+                "Custom AI adaptive latency observation failed: "
+                f"{type(observe_error).__name__} - {observe_error}"
+            )
+
     def _write_custom_short_log(self, log_file, block):
         try:
             append_rotating_text(
@@ -1386,6 +1615,11 @@ Call Duration: {call_duration:.3f} seconds
                     call_type,
                     usage,
                 )
+                if call_type == "translation":
+                    self._record_custom_ai_latency_observation(
+                        duration,
+                        success=True,
+                    )
                 block = (
                     f"{session_header}"
                     f"{header}\n"

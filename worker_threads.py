@@ -1491,12 +1491,20 @@ def _get_translation_submit_interval_seconds(app, text_to_translate):
     return max(0.0, float(getattr(app, 'min_translation_interval', 0.3) or 0.3))
 
 
-def _get_translation_provider_cooldown_seconds(app):
+def _get_translation_provider_cooldown_seconds(app, latency_mode=None):
     handler = getattr(app, 'translation_handler', None)
     getter = getattr(handler, 'get_translation_provider_cooldown_seconds', None)
     if callable(getter):
         try:
-            return max(0.0, float(getter()))
+            return max(0.0, float(getter(latency_mode=latency_mode)))
+        except TypeError:
+            try:
+                return max(0.0, float(getter()))
+            except Exception as cooldown_error:
+                log_debug(
+                    "LATENCY: failed to read translation provider cooldown: "
+                    f"{type(cooldown_error).__name__} - {cooldown_error}"
+                )
         except Exception as cooldown_error:
             log_debug(
                 "LATENCY: failed to read translation provider cooldown: "
@@ -1552,7 +1560,9 @@ def _get_translation_supersede_after_seconds(app):
     return max(0.25, min(10.0, configured))
 
 
-def _get_translation_latency_mode(app):
+def _get_translation_latency_mode(app, latency_mode=None):
+    if latency_mode:
+        return str(latency_mode).strip().lower()
     latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
     try:
         return str(
@@ -1719,6 +1729,7 @@ def _submit_async_translation_request(
     ocr_sequence_number,
     inflight_key,
     requested_at_monotonic=None,
+    latency_mode=None,
 ):
     app.translation_sequence_counter += 1
     translation_sequence = app.translation_sequence_counter
@@ -1747,6 +1758,7 @@ def _submit_async_translation_request(
             ocr_sequence_number,
             inflight_key,
             requested_at_monotonic,
+            latency_mode,
         )
     except Exception:
         app.active_translation_calls.discard(translation_sequence)
@@ -1800,13 +1812,38 @@ def start_async_translation(
             app.active_translation_inflight_keys = set()
 
         inflight_key = None
-        if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, 'get_inflight_translation_key'):
+        latency_mode = None
+        request_snapshot = None
+        handler = getattr(app, 'translation_handler', None)
+        snapshot_getter = getattr(
+            handler,
+            'get_custom_ai_translation_request_snapshot',
+            None,
+        )
+        if callable(snapshot_getter):
+            try:
+                request_snapshot = snapshot_getter(
+                    text_to_translate,
+                    commit=False,
+                )
+            except Exception as snapshot_error:
+                log_debug(
+                    "LATENCY: failed to build translation request snapshot: "
+                    f"{type(snapshot_error).__name__} - {snapshot_error}"
+                )
+                request_snapshot = None
+        if isinstance(request_snapshot, dict):
+            inflight_key = request_snapshot.get("inflight_key")
+            latency_mode = request_snapshot.get("latency_mode")
+        if inflight_key is None and hasattr(app, 'translation_handler') and hasattr(app.translation_handler, 'get_inflight_translation_key'):
             try:
                 inflight_key = app.translation_handler.get_inflight_translation_key(text_to_translate)
             except Exception as key_error:
                 log_debug(f"LATENCY: failed to build translation inflight key: {type(key_error).__name__} - {key_error}")
         if inflight_key is None:
             inflight_key = ("raw", text_to_translate)
+        if latency_mode is None:
+            latency_mode = _get_translation_latency_mode(app)
 
         if inflight_key in app.active_translation_inflight_keys:
             _increment_metric(app, "duplicate_inflight_skip")
@@ -1820,7 +1857,10 @@ def start_async_translation(
         if requested_at_monotonic is None:
             requested_at_monotonic = now
         submit_interval = _get_translation_submit_interval_seconds(app, text_to_translate)
-        cooldown_remaining = _get_translation_provider_cooldown_seconds(app)
+        cooldown_remaining = _get_translation_provider_cooldown_seconds(
+            app,
+            latency_mode=latency_mode,
+        )
         concurrency_limit = _get_translation_concurrency_limit(app)
         active_translation_count = len(app.active_translation_calls)
         _refresh_translation_metric_gauges(
@@ -1850,7 +1890,7 @@ def start_async_translation(
                 concurrency_limit == 1
                 and active_translation_count < MAX_SUPERSEDED_TRANSLATION_CONCURRENCY
                 and oldest_active_age is not None
-                and _get_translation_latency_mode(app) != "race"
+                and _get_translation_latency_mode(app, latency_mode) != "race"
             )
             if may_use_overflow_slot and oldest_active_age >= supersede_after:
                 may_supersede_stale_call = True
@@ -1892,7 +1932,21 @@ def start_async_translation(
             ocr_sequence_number,
             inflight_key,
             requested_at_monotonic=requested_at_monotonic,
+            latency_mode=latency_mode,
         )
+        commit_snapshot = getattr(
+            getattr(app, 'translation_handler', None),
+            'commit_custom_ai_latency_mode_snapshot',
+            None,
+        )
+        if callable(commit_snapshot) and isinstance(request_snapshot, dict):
+            try:
+                commit_snapshot(request_snapshot)
+            except Exception as commit_error:
+                log_debug(
+                    "LATENCY: failed to commit translation latency snapshot: "
+                    f"{type(commit_error).__name__} - {commit_error}"
+                )
         
     except Exception as e:
         log_debug(f"Error starting async translation: {type(e).__name__} - {e}")
@@ -1966,6 +2020,7 @@ def process_translation_async(
     ocr_sequence_number,
     inflight_key=None,
     requested_at_monotonic=None,
+    latency_mode=None,
 ):
     """Process translation API call asynchronously with timeout and staleness handling."""
     start_time = time.monotonic()
@@ -1976,11 +2031,13 @@ def process_translation_async(
         log_debug(f"Processing async translation {translation_sequence}")
 
         stream_callback = None
-        latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
-        try:
-            latency_mode = latency_mode_var.get() if latency_mode_var is not None else ""
-        except Exception:
-            latency_mode = ""
+        if latency_mode is None:
+            latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
+            try:
+                latency_mode = latency_mode_var.get() if latency_mode_var is not None else ""
+            except Exception:
+                latency_mode = ""
+        latency_mode = str(latency_mode or "").strip().lower()
 
         if latency_mode == "stream":
             stream_callback = _build_streaming_display_callback(

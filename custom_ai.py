@@ -1,9 +1,11 @@
 import base64
 import hashlib
 import json
+import math
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -18,11 +20,13 @@ CUSTOM_AI_LATENCY_MODE_NONE = "none"
 CUSTOM_AI_LATENCY_MODE_SAFE = "safe"
 CUSTOM_AI_LATENCY_MODE_STREAM = "stream"
 CUSTOM_AI_LATENCY_MODE_RACE = "race"
+CUSTOM_AI_LATENCY_MODE_ADAPTIVE = "adaptive"
 CUSTOM_AI_LATENCY_MODES = {
     CUSTOM_AI_LATENCY_MODE_NONE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
     CUSTOM_AI_LATENCY_MODE_STREAM,
     CUSTOM_AI_LATENCY_MODE_RACE,
+    CUSTOM_AI_LATENCY_MODE_ADAPTIVE,
 }
 CUSTOM_AI_SAFE_TRANSPORT_MODES = {
     CUSTOM_AI_LATENCY_MODE_SAFE,
@@ -116,6 +120,189 @@ def build_translation_response_format():
             "schema": build_translation_json_schema(),
         },
     }
+
+
+class CustomAILatencyModeDecision:
+    def __init__(
+        self,
+        mode,
+        reason,
+        p90_seconds=0.0,
+        sample_count=0,
+    ):
+        self.mode = mode
+        self.reason = reason
+        self.p90_seconds = p90_seconds
+        self.sample_count = sample_count
+
+
+class CustomAILatencyModeAdvisor:
+    """Conservatively resolve adaptive Custom AI latency mode."""
+
+    def __init__(
+        self,
+        max_samples=20,
+        min_samples=3,
+        stream_latency_threshold_seconds=1.5,
+        race_latency_threshold_seconds=3.5,
+        min_hold_seconds=10.0,
+        race_cooldown_seconds=30.0,
+        consecutive_error_threshold=2,
+        clock=None,
+    ):
+        self.max_samples = max(1, int(max_samples))
+        self.min_samples = max(1, int(min_samples))
+        self.stream_latency_threshold_seconds = max(
+            0.0,
+            float(stream_latency_threshold_seconds),
+        )
+        self.race_latency_threshold_seconds = max(
+            self.stream_latency_threshold_seconds,
+            float(race_latency_threshold_seconds),
+        )
+        self.min_hold_seconds = max(0.0, float(min_hold_seconds))
+        self.race_cooldown_seconds = max(0.0, float(race_cooldown_seconds))
+        self.consecutive_error_threshold = max(
+            1,
+            int(consecutive_error_threshold),
+        )
+        self._clock = clock or time.monotonic
+        self._durations = deque(maxlen=self.max_samples)
+        self._consecutive_errors = 0
+        self._last_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+        self._last_mode_changed_at = 0.0
+        self._last_race_at = None
+        self._lock = threading.RLock()
+
+    def observe_request(self, duration_seconds=None, success=True):
+        with self._lock:
+            try:
+                duration = float(duration_seconds)
+            except (TypeError, ValueError):
+                duration = None
+            if duration is not None and duration >= 0.0:
+                self._durations.append(duration)
+            if success:
+                self._consecutive_errors = 0
+            else:
+                self._consecutive_errors += 1
+
+    def resolve(
+        self,
+        configured_mode,
+        stream_supported=False,
+        healthy_race_profile_count=1,
+        primary_cooldown_seconds=0.0,
+        commit=False,
+    ):
+        configured_mode = normalize_custom_ai_latency_mode(configured_mode)
+        if configured_mode != CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+            return CustomAILatencyModeDecision(
+                configured_mode,
+                "configured",
+                0.0,
+                0,
+            )
+
+        with self._lock:
+            p90_seconds = self._p90_locked()
+            sample_count = len(self._durations)
+            mode, reason = self._choose_adaptive_locked(
+                p90_seconds,
+                sample_count,
+                bool(stream_supported),
+                max(0, int(healthy_race_profile_count or 0)),
+                max(0.0, float(primary_cooldown_seconds or 0.0)),
+            )
+            decision = CustomAILatencyModeDecision(
+                mode,
+                reason,
+                p90_seconds,
+                sample_count,
+            )
+            if commit:
+                self._commit_mode_locked(mode)
+            return decision
+
+    def commit_mode(self, mode):
+        mode = normalize_custom_ai_latency_mode(mode)
+        with self._lock:
+            self._commit_mode_locked(mode)
+
+    def _choose_adaptive_locked(
+        self,
+        p90_seconds,
+        sample_count,
+        stream_supported,
+        healthy_race_profile_count,
+        primary_cooldown_seconds,
+    ):
+        now = float(self._clock())
+        if (
+            primary_cooldown_seconds > 0.0
+            and healthy_race_profile_count <= 0
+        ):
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "cooldown"
+
+        if self._consecutive_errors >= self.consecutive_error_threshold:
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "error_rate"
+
+        if (
+            primary_cooldown_seconds > 0.0
+            and healthy_race_profile_count > 0
+        ):
+            if self._race_available_locked(now):
+                return CUSTOM_AI_LATENCY_MODE_RACE, "cooldown_alternative"
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "race_cooldown"
+
+        if sample_count < self.min_samples:
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "insufficient_samples"
+
+        if (
+            p90_seconds >= self.race_latency_threshold_seconds
+            and healthy_race_profile_count >= 2
+        ):
+            if self._race_available_locked(now):
+                return CUSTOM_AI_LATENCY_MODE_RACE, "p90_very_high"
+            if stream_supported:
+                return CUSTOM_AI_LATENCY_MODE_STREAM, "race_cooldown"
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "race_cooldown"
+
+        if (
+            p90_seconds >= self.stream_latency_threshold_seconds
+            and stream_supported
+        ):
+            return CUSTOM_AI_LATENCY_MODE_STREAM, "p90_high"
+
+        if (
+            self._last_mode == CUSTOM_AI_LATENCY_MODE_STREAM
+            and stream_supported
+            and now - self._last_mode_changed_at < self.min_hold_seconds
+            and p90_seconds >= self.stream_latency_threshold_seconds * 0.75
+        ):
+            return CUSTOM_AI_LATENCY_MODE_STREAM, "hold_stream"
+
+        return CUSTOM_AI_LATENCY_MODE_SAFE, "low_latency"
+
+    def _race_available_locked(self, now):
+        if self._last_race_at is None:
+            return True
+        return now - self._last_race_at >= self.race_cooldown_seconds
+
+    def _commit_mode_locked(self, mode):
+        now = float(self._clock())
+        if mode != self._last_mode:
+            self._last_mode = mode
+            self._last_mode_changed_at = now
+        if mode == CUSTOM_AI_LATENCY_MODE_RACE:
+            self._last_race_at = now
+
+    def _p90_locked(self):
+        if not self._durations:
+            return 0.0
+        ordered = sorted(self._durations)
+        rank = int(math.ceil(0.90 * len(ordered)))
+        return ordered[max(0, min(len(ordered) - 1, rank - 1))]
 
 
 class CustomAIProfileManager:
@@ -501,6 +688,16 @@ class CustomAIProvider:
                 log_debug(f"Custom AI HTTP session close failed: {e}")
         self.http_client = None
         self._owns_http_client = True
+
+    def profile_supports_streaming(self, profile):
+        if not isinstance(profile, dict):
+            return False
+        for key in ("stream", "streaming", "supports_streaming"):
+            if key in profile:
+                return bool(profile.get(key))
+        if bool(profile.get("disable_streaming", False)):
+            return False
+        return True
 
     def _base_url_cache_key(self, base_url):
         url = (base_url or "").strip().rstrip("/")

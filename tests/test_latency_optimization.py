@@ -1659,6 +1659,116 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_translation_inflight_keys, {("custom_ai", "Hello", "same-context")})
 
+    def test_start_async_translation_passes_resolved_latency_snapshot_to_worker(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class ModeVar:
+            value = "adaptive"
+
+            def get(self):
+                return self.value
+
+        class Handler:
+            def __init__(self):
+                self.snapshot_requests = []
+                self.committed_modes = []
+                self.cooldown_modes = []
+                self.translate_modes = []
+
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "configured-adaptive")
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+            ):
+                self.snapshot_requests.append((text, commit))
+                return {
+                    "inflight_key": ("custom_ai", text, "resolved-stream"),
+                    "latency_mode": "stream",
+                    "reason": "p90_high",
+                }
+
+            def commit_custom_ai_latency_mode_snapshot(self, snapshot):
+                self.committed_modes.append(snapshot["latency_mode"])
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, latency_mode=None):
+                self.cooldown_modes.append(latency_mode)
+                return 0.0
+
+            def translate_text_with_timeout(
+                self,
+                text,
+                timeout_seconds=10.0,
+                ocr_batch_number=None,
+                stream_callback=None,
+                translation_sequence=None,
+                latency_mode=None,
+            ):
+                self.translate_modes.append(latency_mode)
+                if stream_callback:
+                    stream_callback("translated")
+                return "translated"
+
+        pool = Pool()
+        mode_var = ModeVar()
+        handler = Handler()
+        scheduled = []
+        displayed = []
+        app = types.SimpleNamespace(
+            translation_sequence_counter=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            max_concurrent_translation_calls=6,
+            translation_thread_pool=pool,
+            translation_handler=handler,
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            custom_ai_latency_mode_var=mode_var,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=0.0,
+            pending_translation_request=None,
+            is_running=True,
+            latest_translation_sequence_started=1,
+            last_displayed_translation_sequence=0,
+            update_translation_text=lambda text: displayed.append(text),
+            last_successful_translation_time=0,
+        )
+
+        worker_threads.start_async_translation(app, "Hello", 1)
+        mode_var.value = "safe"
+
+        self.assertEqual(handler.snapshot_requests, [("Hello", False)])
+        self.assertEqual(handler.cooldown_modes, ["stream"])
+        self.assertEqual(handler.committed_modes, ["stream"])
+        self.assertEqual(len(pool.submissions), 1)
+
+        fn, args = pool.submissions[0]
+        fn(*args)
+
+        self.assertEqual(handler.translate_modes, ["stream"])
+        self.assertEqual(app.active_translation_inflight_keys, set())
+
     def test_start_async_translation_queues_latest_request_during_submit_cooldown(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []

@@ -216,7 +216,7 @@ def load_app_config():
         log_debug(f"Config: Invalid preprocessing mode '{current_mode}' changed to 'none'")
 
     current_latency_mode = config_settings.get('custom_ai_latency_mode', 'safe')
-    if current_latency_mode not in ['none', 'safe', 'stream', 'race']:
+    if current_latency_mode not in ['none', 'safe', 'stream', 'race', 'adaptive']:
         config_settings['custom_ai_latency_mode'] = 'safe'
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")

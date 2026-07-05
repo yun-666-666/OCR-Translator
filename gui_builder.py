@@ -1445,6 +1445,7 @@ def create_settings_tab(app):
         ("safe", app.ui_lang.get_label("custom_ai_latency_mode_safe", "Stable low latency")),
         ("stream", app.ui_lang.get_label("custom_ai_latency_mode_stream", "Streaming subtitles")),
         ("race", app.ui_lang.get_label("custom_ai_latency_mode_race", "Fastest endpoint")),
+        ("adaptive", app.ui_lang.get_label("custom_ai_latency_mode_adaptive", "Adaptive")),
     ]
     app.custom_ai_latency_mode_display_var = tk.StringVar()
     current_latency_mode = app.get_custom_ai_latency_mode() if hasattr(app, 'get_custom_ai_latency_mode') else app.custom_ai_latency_mode_var.get()
