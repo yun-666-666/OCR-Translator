@@ -6,6 +6,9 @@ from ui_elements import ResizableMovableFrame
 from modern_ui import style_selection_window
 
 
+DEFAULT_TARGET_OPACITY = 0.4
+
+
 def _get_pyside_api():
     from pyside_overlay import get_pyside_manager, is_pyside_available
     return get_pyside_manager, is_pyside_available
@@ -312,7 +315,7 @@ def create_target_overlay_om(app, skip_preservation=False):
         try:
             opacity = app.target_opacity_var.get()
         except (AttributeError, tk.TclError):
-            opacity = float(app.config['Settings'].get('target_opacity', '0.15'))
+            opacity = float(app.config['Settings'].get('target_opacity', str(DEFAULT_TARGET_OPACITY)))
         
         # Text opacity - prefer app variable over config  
         try:

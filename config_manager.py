@@ -48,6 +48,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'source_area_colour': '#FFFF99',
     'target_area_colour': '#162c43',
     'target_text_colour': '#ffffff',
+    'target_opacity': '0.4',
     'target_font_size': '18',
     'target_font_type': 'Arial',
     'num_beams': '2',

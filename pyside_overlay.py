@@ -88,6 +88,13 @@ def qt_rect_to_physical_rect(rect, scale):
 # PySide6-backed classes
 # -----------------------
 if PYSIDE6_AVAILABLE:
+    TOP_BAR_TRANSPARENT_STYLE = """
+                QWidget {
+                    background-color: transparent;
+                    border: none;
+                }
+            """
+
 
     class RTLTextDisplay(QTextEdit):
         """RTL-capable text display for translation overlay (QTextEdit wrapper)."""
@@ -402,6 +409,9 @@ if PYSIDE6_AVAILABLE:
             except Exception:
                 self._opacity = 0.85
             self._geometry_scale = 1.0
+            self._last_background_style = None
+            self._last_top_bar_style = None
+            self._last_text_bg_color = None
 
             # Native hit-test constants for Windows
             if sys.platform == "win32":
@@ -480,26 +490,12 @@ if PYSIDE6_AVAILABLE:
             layout.setSpacing(0)
 
             # The central widget holds the semi-transparent background and border
-            border_css = f"border: {self._border_px}px solid {self._adjust_color_brightness(bg_color, -20)};" if self._border_px > 0 else "border: none;"
-            semi_transparent_bg = self._hex_to_rgba(bg_color, self._opacity)
-
-            central_widget.setStyleSheet(f"""
-                QWidget {{
-                    background-color: {semi_transparent_bg};
-                    {border_css}
-                    border-radius: {self._corner_radius}px;
-                }}
-            """)
+            PySideTranslationOverlay._apply_background_style(self, bg_color, force=True)
 
             # Top bar (purely visual) using the requested height
             self.top_bar = VisualTopBar(self, height=self._top_bar_height)
             # Top bar is transparent to show the central widget's background
-            self.top_bar.setStyleSheet("""
-                QWidget {
-                    background-color: transparent;
-                    border: none;
-                }
-            """)
+            PySideTranslationOverlay._apply_top_bar_style(self, force=True)
             layout.addWidget(self.top_bar)
 
             # Text display
@@ -548,6 +544,41 @@ if PYSIDE6_AVAILABLE:
             except Exception:
                 return hex_color
 
+        def _background_style_sheet(self, bg_color):
+            border_css = (
+                f"border: {self._border_px}px solid {self._adjust_color_brightness(bg_color, -20)};"
+                if self._border_px > 0
+                else "border: none;"
+            )
+            semi_transparent_bg = self._hex_to_rgba(bg_color, self._opacity)
+            return f"""
+                QWidget {{
+                    background-color: {semi_transparent_bg};
+                    {border_css}
+                    border-radius: {self._corner_radius}px;
+                }}
+            """
+
+        def _apply_background_style(self, bg_color, force=False):
+            style = PySideTranslationOverlay._background_style_sheet(self, bg_color)
+            if not force and getattr(self, "_last_background_style", None) == style:
+                return False
+            central_widget = self.centralWidget()
+            if central_widget:
+                central_widget.setStyleSheet(style)
+                self._last_background_style = style
+                return True
+            return False
+
+        def _apply_top_bar_style(self, force=False):
+            if not force and getattr(self, "_last_top_bar_style", None) == TOP_BAR_TRANSPARENT_STYLE:
+                return False
+            if self.top_bar:
+                self.top_bar.setStyleSheet(TOP_BAR_TRANSPARENT_STYLE)
+                self._last_top_bar_style = TOP_BAR_TRANSPARENT_STYLE
+                return True
+            return False
+
         def show_translation(self, text: str, language_code: str = None, text_color: str = "#FFFFFF", font_size: int = None):
             """Set the translation text in the QTextEdit-compatible widget."""
             if not self.text_widget:
@@ -576,33 +607,17 @@ if PYSIDE6_AVAILABLE:
                 except (ValueError, TypeError):
                     log_debug(f"PySide overlay: Invalid opacity value {new_opacity}, keeping existing")
 
-            # Update the central widget, which holds the visual background
-            semi_transparent_bg = self._hex_to_rgba(new_color, self._opacity)
-            border_css = f"border: {self._border_px}px solid {self._adjust_color_brightness(new_color, -20)};" if self._border_px > 0 else "border: none;"
-
-            if self.centralWidget():
-                self.centralWidget().setStyleSheet(f"""
-                    QWidget {{
-                        background-color: {semi_transparent_bg};
-                        {border_css}
-                        border-radius: {self._corner_radius}px;
-                    }}
-                """)
+            PySideTranslationOverlay._apply_background_style(self, new_color)
 
             # Ensure top_bar remains transparent to show the central widget's background
-            if self.top_bar:
-                self.top_bar.setStyleSheet("""
-                    QWidget {
-                        background-color: transparent;
-                        border: none;
-                    }
-                """)
+            PySideTranslationOverlay._apply_top_bar_style(self)
                 
             # The text_widget's background must also remain transparent.
             # Its config method is modified to handle this correctly.
-            if self.text_widget:
+            if self.text_widget and getattr(self, "_last_text_bg_color", None) != new_color:
                 try:
                     self.text_widget.config(bg=new_color)
+                    self._last_text_bg_color = new_color
                     log_debug(f"PySide overlay: Stored new bg color '{new_color}' in text widget.")
                 except Exception as e:
                     log_debug(f"Error updating PySide text widget color: {e}")
@@ -644,8 +659,6 @@ if PYSIDE6_AVAILABLE:
             super().show()
             self.raise_()
             self.activateWindow()
-            # Re-apply color to ensure styling is correct after show
-            self.update_color(self.bg_color)
 
         def toggle_visibility(self):
             if self.isVisible():

@@ -193,7 +193,7 @@ class ResizableMovableFrame(tk.Toplevel):
         self.is_visible_during_ocr = True # Flag (though not actively used in capture logic now)
 
     def update_color(self, new_color):
-        """Updates the color of all components in the overlay with a workaround for transparency issues."""
+        """Update the color of all overlay components without changing window opacity."""
         if self.winfo_exists():
             try:
                 # Update all components
@@ -207,11 +207,7 @@ class ResizableMovableFrame(tk.Toplevel):
                                self.resize_nw, self.resize_ne, self.resize_sw, self.resize_se]:
                     widget.configure(bg=new_color)
 
-                # Force redraw by temporarily changing transparency
-                current_alpha = self.attributes("-alpha")
-                self.attributes("-alpha", max(0.01, current_alpha - 0.01))
-                self.update_idletasks()  # Force immediate UI update
-                self.after(50, lambda: self.attributes("-alpha", current_alpha))
+                self.update_idletasks()
             except tk.TclError:
                 pass  # Ignore errors if window is being destroyed
     def start_move(self, event):
