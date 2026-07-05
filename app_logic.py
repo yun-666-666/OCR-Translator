@@ -17,7 +17,13 @@ import concurrent.futures
 
 from logger import log_debug, set_debug_logging_enabled, is_debug_logging_enabled
 from resource_handler import get_resource_path
-from config_manager import load_app_config, save_app_config, load_ocr_preview_geometry, save_ocr_preview_geometry
+from config_manager import (
+    get_provider_api_key,
+    load_app_config,
+    save_app_config,
+    load_ocr_preview_geometry,
+    save_ocr_preview_geometry,
+)
 from gui_builder import create_main_tab, create_settings_tab, create_custom_prompt_tab, create_debug_tab
 from overlay_manager import (
     select_source_area_om, select_target_area_om,
@@ -246,9 +252,9 @@ class GameChangingTranslator:
             configured_ocr_model = 'tesseract'
         self.ocr_model_var = tk.StringVar(value=configured_ocr_model)
         
-        self.google_api_key_var = tk.StringVar(value=self.config['Settings'].get('google_translate_api_key', ''))
-        self.deepl_api_key_var = tk.StringVar(value=self.config['Settings'].get('deepl_api_key', ''))
-        self.gemini_api_key_var = tk.StringVar(value=self.config['Settings'].get('gemini_api_key', ''))
+        self.google_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'google_translate_api_key'))
+        self.deepl_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'deepl_api_key'))
+        self.gemini_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'gemini_api_key'))
         self.deepl_model_type_var = tk.StringVar(value=self.config['Settings'].get('deepl_model_type', 'latency_optimized'))
         translation_model_val = self.config['Settings'].get('translation_model', 'custom_ai')
         if translation_model_val != 'custom_ai':
@@ -282,7 +288,7 @@ class GameChangingTranslator:
         self.openai_file_cache_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'openai_file_cache', fallback=True))
         self.openai_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('openai_context_window', '2')))
         self.openai_api_log_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'openai_api_log_enabled', fallback=True))
-        self.openai_api_key_var = tk.StringVar(value=self.config['Settings'].get('openai_api_key', ''))
+        self.openai_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'openai_api_key'))
         self.custom_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('custom_context_window', '5')))
         self.custom_ai_latency_mode_var = tk.StringVar(
             value=normalize_custom_ai_latency_mode(

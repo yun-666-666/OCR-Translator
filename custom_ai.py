@@ -7,10 +7,12 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
+from credential_store import create_default_credential_store
 from logger import log_debug
 
 
 ACTIVE_PROFILE_KINDS = {"translation", "ocr"}
+CUSTOM_AI_CREDENTIAL_SERVICE = "OCR-Translator-CustomAI"
 CUSTOM_AI_LATENCY_MODE_NONE = "none"
 CUSTOM_AI_LATENCY_MODE_SAFE = "safe"
 CUSTOM_AI_LATENCY_MODE_STREAM = "stream"
@@ -79,8 +81,9 @@ def normalize_custom_ai_wire_api(wire_api):
 class CustomAIProfileManager:
     """Persist and manage user-defined OpenAI-compatible AI endpoint profiles."""
 
-    def __init__(self, path="custom_ai_profiles.json"):
+    def __init__(self, path="custom_ai_profiles.json", credential_store=None):
         self.path = Path(path)
+        self.credential_store = credential_store or create_default_credential_store(CUSTOM_AI_CREDENTIAL_SERVICE)
         self.data = {
             "profiles": [],
             "active_translation_profile_id": None,
@@ -100,7 +103,8 @@ class CustomAIProfileManager:
                     "active_translation_profile_id": loaded.get("active_translation_profile_id"),
                     "active_ocr_profile_id": loaded.get("active_ocr_profile_id"),
                 })
-                self._sanitize()
+                if self._sanitize():
+                    self.save()
         except Exception as e:
             log_debug(f"Custom AI profiles load failed: {e}")
 
@@ -109,15 +113,93 @@ class CustomAIProfileManager:
             if self.path.parent and str(self.path.parent) != ".":
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=2, ensure_ascii=False)
+                json.dump(self.serialize_for_disk(), f, indent=2, ensure_ascii=False)
             return True
         except Exception as e:
             log_debug(f"Custom AI profiles save failed: {e}")
             return False
 
+    def serialize_for_disk(self):
+        serialized_profiles = []
+        for profile in self.data.get("profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            serialized = {
+                "id": profile.get("id"),
+                "name": profile.get("name"),
+                "base_url": profile.get("base_url"),
+                "model": profile.get("model"),
+                "enabled": bool(profile.get("enabled", True)),
+                "wire_api": normalize_custom_ai_wire_api(profile.get("wire_api")),
+            }
+            credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
+            if credential_ref:
+                serialized["api_key_ref"] = credential_ref
+            api_key = str(profile.get("api_key") or "")
+            if api_key and (profile.get("_api_key_plaintext_fallback") or not credential_ref):
+                serialized["api_key"] = api_key
+            reasoning_effort = str(profile.get("reasoning_effort") or profile.get("model_reasoning_effort") or "").strip()
+            if reasoning_effort:
+                serialized["reasoning_effort"] = reasoning_effort
+            serialized_profiles.append(serialized)
+        return {
+            "profiles": serialized_profiles,
+            "active_translation_profile_id": self.data.get("active_translation_profile_id"),
+            "active_ocr_profile_id": self.data.get("active_ocr_profile_id"),
+        }
+
+    def _credential_ref(self, profile_id):
+        return f"custom-ai:{profile_id}:api_key"
+
+    def _log_credential_issue(self, action, credential_ref, error, fallback=False):
+        fallback_text = "; plaintext fallback retained" if fallback else ""
+        log_debug(
+            "Custom AI credential "
+            f"{action} failed for {credential_ref}: {type(error).__name__}{fallback_text}"
+        )
+
+    def _store_profile_api_key(self, profile, api_key, action):
+        credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
+        if not credential_ref:
+            credential_ref = self._credential_ref(profile["id"])
+        profile["api_key_ref"] = credential_ref
+        try:
+            self.credential_store.set_secret(credential_ref, str(api_key))
+            profile["api_key"] = str(api_key)
+            profile.pop("_api_key_plaintext_fallback", None)
+            return True
+        except Exception as e:
+            profile["api_key"] = str(api_key)
+            profile["_api_key_plaintext_fallback"] = True
+            self._log_credential_issue(action, credential_ref, e, fallback=True)
+            return False
+
+    def _resolve_profile_api_key(self, profile, credential_ref):
+        try:
+            api_key = self.credential_store.get_secret(credential_ref)
+        except Exception as e:
+            self._log_credential_issue("read", credential_ref, e)
+            return ""
+        if api_key is None:
+            log_debug(f"Custom AI credential read returned no key for {credential_ref}")
+            return ""
+        return str(api_key)
+
+    def _delete_profile_api_key(self, profile):
+        credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
+        if not credential_ref and profile.get("id"):
+            credential_ref = self._credential_ref(profile["id"])
+        if not credential_ref:
+            return
+        try:
+            self.credential_store.delete_secret(credential_ref)
+        except Exception as e:
+            self._log_credential_issue("delete", credential_ref, e)
+
     def _sanitize(self):
         profiles = []
         seen_ids = set()
+        should_save = False
         for profile in self.data.get("profiles", []):
             if not isinstance(profile, dict):
                 continue
@@ -129,17 +211,30 @@ class CustomAIProfileManager:
                 "id": profile_id,
                 "name": str(profile.get("name") or "Custom AI").strip() or "Custom AI",
                 "base_url": str(profile.get("base_url") or "").strip(),
-                "api_key": str(profile.get("api_key") or ""),
                 "model": str(profile.get("model") or "").strip(),
                 "enabled": bool(profile.get("enabled", True)),
                 "wire_api": normalize_custom_ai_wire_api(profile.get("wire_api")),
             }
+            plaintext_key = str(profile.get("api_key") or "")
+            credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
+            if plaintext_key:
+                if not credential_ref:
+                    credential_ref = self._credential_ref(profile_id)
+                sanitized["api_key_ref"] = credential_ref
+                if self._store_profile_api_key(sanitized, plaintext_key, "migration"):
+                    should_save = True
+            elif credential_ref:
+                sanitized["api_key_ref"] = credential_ref
+                sanitized["api_key"] = self._resolve_profile_api_key(sanitized, credential_ref)
+            else:
+                sanitized["api_key"] = ""
             reasoning_effort = str(profile.get("reasoning_effort") or profile.get("model_reasoning_effort") or "").strip()
             if reasoning_effort:
                 sanitized["reasoning_effort"] = reasoning_effort
             profiles.append(sanitized)
         self.data["profiles"] = profiles
         self._repair_active_ids()
+        return should_save
 
     def _first_available_profile_id(self):
         enabled = next((p for p in self.data.get("profiles", []) if p.get("enabled", True)), None)
@@ -204,6 +299,8 @@ class CustomAIProfileManager:
     ):
         if kind is not None:
             self._validate_kind(kind)
+        if not str(api_key or ""):
+            raise ValueError("API key is required")
         profile = {
             "id": str(uuid.uuid4()),
             "name": str(name).strip(),
@@ -213,6 +310,7 @@ class CustomAIProfileManager:
             "enabled": bool(enabled),
             "wire_api": normalize_custom_ai_wire_api(wire_api),
         }
+        self._store_profile_api_key(profile, str(api_key), "write")
         reasoning_effort = str(reasoning_effort or "").strip()
         if reasoning_effort:
             profile["reasoning_effort"] = reasoning_effort
@@ -228,6 +326,8 @@ class CustomAIProfileManager:
         profile = self.get_profile(profile_id)
         if not profile:
             raise ValueError(f"No profile with id {profile_id}")
+        if "api_key" in updates and not str(updates.get("api_key") or ""):
+            raise ValueError("API key is required")
         for key in ["name", "base_url", "api_key", "model", "enabled", "wire_api", "reasoning_effort", "model_reasoning_effort"]:
             if key in updates:
                 if key == "model_reasoning_effort":
@@ -236,7 +336,10 @@ class CustomAIProfileManager:
                     profile[key] = updates[key]
         profile["name"] = str(profile.get("name") or "").strip()
         profile["base_url"] = str(profile.get("base_url") or "").strip()
-        profile["api_key"] = str(profile.get("api_key") or "")
+        if "api_key" in updates:
+            self._store_profile_api_key(profile, str(updates.get("api_key") or ""), "write")
+        else:
+            profile["api_key"] = str(profile.get("api_key") or "")
         profile["model"] = str(profile.get("model") or "").strip()
         profile["enabled"] = bool(profile.get("enabled", True))
         profile["wire_api"] = normalize_custom_ai_wire_api(profile.get("wire_api"))
@@ -260,6 +363,7 @@ class CustomAIProfileManager:
         if not removed:
             return False
         self.data["profiles"] = remaining
+        self._delete_profile_api_key(removed)
         replacement_id = self._first_available_profile_id()
         for kind in ACTIVE_PROFILE_KINDS:
             active_key = self._active_key(kind)
@@ -273,7 +377,7 @@ class CustomAIProfileManager:
             raise ValueError("Profile name is required")
         if not profile.get("base_url"):
             raise ValueError("API URL is required")
-        if not profile.get("api_key"):
+        if not profile.get("api_key") and not profile.get("api_key_ref"):
             raise ValueError("API key is required")
         if not profile.get("model"):
             raise ValueError("Model name is required")

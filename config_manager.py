@@ -2,8 +2,17 @@
 import configparser
 import os
 import sys
+from credential_store import create_default_credential_store
 from logger import log_debug
 from resource_handler import get_resource_path
+
+PROVIDER_CREDENTIAL_SERVICE = "OCR-Translator-Providers"
+PROVIDER_API_KEY_SETTINGS = (
+    'google_translate_api_key',
+    'deepl_api_key',
+    'gemini_api_key',
+    'openai_api_key',
+)
 
 DEFAULT_CONFIG_SETTINGS = {
     'tesseract_path': r'C:\Program Files\Tesseract-OCR\tesseract.exe',
@@ -79,6 +88,72 @@ DEFAULT_CONFIG_SETTINGS = {
 }
 
 
+def _provider_api_key_ref(setting_key):
+    return f"provider:{setting_key}:api_key"
+
+
+def _provider_api_key_ref_setting(setting_key):
+    return f"{setting_key}_ref"
+
+
+def _settings_from_config(config_or_settings):
+    if hasattr(config_or_settings, "sections"):
+        if 'Settings' not in config_or_settings:
+            config_or_settings['Settings'] = {}
+        return config_or_settings['Settings']
+    return config_or_settings
+
+
+def _log_provider_credential_issue(action, setting_key, error, fallback=False):
+    fallback_text = "; plaintext fallback retained" if fallback else ""
+    log_debug(
+        "Provider credential "
+        f"{action} failed for {setting_key}: {type(error).__name__}{fallback_text}"
+    )
+
+
+def migrate_provider_api_keys_to_credentials(config_or_settings, credential_store=None):
+    settings = _settings_from_config(config_or_settings)
+    pending_keys = [
+        setting_key
+        for setting_key in PROVIDER_API_KEY_SETTINGS
+        if str(settings.get(setting_key, "") or "")
+    ]
+    if not pending_keys:
+        return False
+    store = credential_store or create_default_credential_store(PROVIDER_CREDENTIAL_SERVICE)
+    changed = False
+    for setting_key in pending_keys:
+        ref_setting = _provider_api_key_ref_setting(setting_key)
+        plaintext_key = str(settings.get(setting_key, "") or "")
+        credential_ref = str(settings.get(ref_setting, "") or "").strip() or _provider_api_key_ref(setting_key)
+        try:
+            store.set_secret(credential_ref, plaintext_key)
+            settings[ref_setting] = credential_ref
+            settings[setting_key] = ""
+            changed = True
+        except Exception as e:
+            _log_provider_credential_issue("write", setting_key, e, fallback=True)
+    return changed
+
+
+def get_provider_api_key(config_or_settings, setting_key, credential_store=None):
+    settings = _settings_from_config(config_or_settings)
+    plaintext_key = str(settings.get(setting_key, "") or "")
+    if plaintext_key:
+        return plaintext_key
+    credential_ref = str(settings.get(_provider_api_key_ref_setting(setting_key), "") or "").strip()
+    if not credential_ref:
+        return ""
+    store = credential_store or create_default_credential_store(PROVIDER_CREDENTIAL_SERVICE)
+    try:
+        resolved_key = store.get_secret(credential_ref)
+    except Exception as e:
+        _log_provider_credential_issue("read", setting_key, e)
+        return ""
+    return str(resolved_key or "")
+
+
 def load_app_config():
     """Loads configuration from INI file or creates default values."""
     config_path = 'ocr_translator_config.ini'
@@ -135,6 +210,9 @@ def load_app_config():
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")
 
+    if migrate_provider_api_keys_to_credentials(config_settings):
+        settings_changed = True
+
     if settings_changed or not os.path.exists(config_path):
          try:
             with open(config_path, 'w', encoding='utf-8') as f:
@@ -147,6 +225,7 @@ def load_app_config():
 def save_app_config(config_object):
     config_path = 'ocr_translator_config.ini'
     try:
+        migrate_provider_api_keys_to_credentials(config_object)
         with open(config_path, 'w', encoding='utf-8') as f:
             config_object.write(f)
         log_debug(f"Settings saved successfully to {config_path}")

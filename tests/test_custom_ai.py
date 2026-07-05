@@ -1,5 +1,7 @@
 import json
 import importlib.util
+import configparser
+import os
 import sys
 import threading
 import time
@@ -25,11 +27,236 @@ translation_handler_spec.loader.exec_module(translation_handler_module)
 TranslationHandler = translation_handler_module.TranslationHandler
 
 
+TEST_SECRET_KEY = "test-secret-key"
+UPDATED_TEST_SECRET_KEY = "test-secret-key-updated"
+
+
+class FakeCredentialStore:
+    def __init__(self, fail_writes=False, fail_reads=False, fail_deletes=False):
+        self.fail_writes = fail_writes
+        self.fail_reads = fail_reads
+        self.fail_deletes = fail_deletes
+        self.values = {}
+        self.deleted = []
+
+    def set_secret(self, credential_ref, secret):
+        if self.fail_writes:
+            raise RuntimeError("credential backend unavailable")
+        self.values[credential_ref] = secret
+
+    def get_secret(self, credential_ref):
+        if self.fail_reads:
+            raise RuntimeError("credential backend unavailable")
+        return self.values.get(credential_ref)
+
+    def delete_secret(self, credential_ref):
+        if self.fail_deletes:
+            raise RuntimeError("credential backend unavailable")
+        self.deleted.append(credential_ref)
+        self.values.pop(credential_ref, None)
+
+    def matches(self, credential_ref, secret):
+        return self.values.get(credential_ref) == secret
+
+
+def assert_secret_not_in_text(testcase, text, label):
+    testcase.assertFalse(TEST_SECRET_KEY in text, f"{label} contains a plaintext API key")
+    testcase.assertFalse(UPDATED_TEST_SECRET_KEY in text, f"{label} contains a plaintext API key")
+
+
 class CustomAIProfileManagerTests(unittest.TestCase):
+    def test_legacy_plaintext_profile_key_migrates_to_credential_ref(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            legacy = {
+                "profiles": [
+                    {
+                        "id": "legacy-profile",
+                        "name": "Legacy",
+                        "base_url": "https://proxy.example/v1",
+                        "api_key": TEST_SECRET_KEY,
+                        "model": "qwen",
+                        "enabled": True,
+                    }
+                ],
+                "active_translation_profile_id": "legacy-profile",
+                "active_ocr_profile_id": "legacy-profile",
+            }
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            store = FakeCredentialStore()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                runtime_profile = manager.get_profile("legacy-profile")
+                manager.save()
+
+            persisted_text = path.read_text(encoding="utf-8")
+            persisted_profile = json.loads(persisted_text)["profiles"][0]
+            credential_ref = persisted_profile.get("api_key_ref")
+
+            assert_secret_not_in_text(self, persisted_text, "custom_ai_profiles.json")
+            self.assertFalse("api_key" in persisted_profile, "profile persisted a plaintext API key field")
+            self.assertTrue(credential_ref, "profile did not persist a credential reference")
+            self.assertTrue(store.matches(credential_ref, TEST_SECRET_KEY), "credential store did not receive expected key")
+            self.assertTrue(runtime_profile.get("api_key") == TEST_SECRET_KEY, "runtime profile did not resolve API key")
+
+    def test_new_profile_key_is_stored_by_ref_but_runtime_profile_keeps_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                profile = manager.add_profile(
+                    name="Secure",
+                    base_url="https://proxy.example/v1",
+                    api_key=TEST_SECRET_KEY,
+                    model="qwen",
+                )
+
+            persisted_text = path.read_text(encoding="utf-8")
+            persisted_profile = json.loads(persisted_text)["profiles"][0]
+            credential_ref = persisted_profile.get("api_key_ref")
+
+            assert_secret_not_in_text(self, persisted_text, "custom_ai_profiles.json")
+            self.assertFalse("api_key" in persisted_profile, "profile persisted a plaintext API key field")
+            self.assertTrue(credential_ref, "profile did not persist a credential reference")
+            self.assertTrue(store.matches(credential_ref, TEST_SECRET_KEY), "credential store did not receive expected key")
+            self.assertTrue(profile.get("api_key") == TEST_SECRET_KEY, "runtime profile did not keep API key")
+
+    def test_profile_key_update_changes_credential_fingerprint_without_persisting_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            provider = CustomAIProvider()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                profile = manager.add_profile(
+                    name="Secure",
+                    base_url="https://proxy.example/v1",
+                    api_key=TEST_SECRET_KEY,
+                    model="qwen",
+                )
+                first_fingerprint = provider._credential_scope_key(manager.get_profile(profile["id"]))
+                updated = manager.update_profile(profile["id"], api_key=UPDATED_TEST_SECRET_KEY)
+                second_fingerprint = provider._credential_scope_key(manager.get_profile(profile["id"]))
+
+            persisted_text = path.read_text(encoding="utf-8")
+            persisted_profile = json.loads(persisted_text)["profiles"][0]
+            credential_ref = persisted_profile.get("api_key_ref")
+
+            assert_secret_not_in_text(self, persisted_text, "custom_ai_profiles.json")
+            self.assertNotEqual(first_fingerprint, second_fingerprint)
+            self.assertTrue(store.matches(credential_ref, UPDATED_TEST_SECRET_KEY), "credential store did not receive updated key")
+            self.assertTrue(updated.get("api_key") == UPDATED_TEST_SECRET_KEY, "runtime profile did not resolve updated API key")
+
+    def test_delete_profile_deletes_credential_ref_without_blocking(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                profile = manager.add_profile(
+                    name="Secure",
+                    base_url="https://proxy.example/v1",
+                    api_key=TEST_SECRET_KEY,
+                    model="qwen",
+                )
+                credential_ref = profile.get("api_key_ref")
+
+                deleted = manager.delete_profile(profile["id"])
+
+            self.assertTrue(deleted)
+            self.assertIn(credential_ref, store.deleted)
+
+    def test_unavailable_profile_credential_store_keeps_plaintext_and_logs_safely(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            path.write_text(
+                json.dumps({
+                    "profiles": [
+                        {
+                            "id": "legacy-profile",
+                            "name": "Legacy",
+                            "base_url": "https://proxy.example/v1",
+                            "api_key": TEST_SECRET_KEY,
+                            "model": "qwen",
+                            "enabled": True,
+                        }
+                    ]
+                }),
+                encoding="utf-8",
+            )
+            store = FakeCredentialStore(fail_writes=True)
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                with patch("custom_ai.log_debug") as log_debug:
+                    manager = CustomAIProfileManager(path)
+                    manager.save()
+
+            persisted_text = path.read_text(encoding="utf-8")
+            messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+
+            self.assertTrue(manager.get_profile("legacy-profile").get("api_key") == TEST_SECRET_KEY, "runtime fallback lost API key")
+            self.assertTrue(TEST_SECRET_KEY in persisted_text, "plaintext fallback should preserve the key when credentials are unavailable")
+            self.assertTrue(messages, "credential fallback did not log a diagnostic")
+            self.assertFalse(any(TEST_SECRET_KEY in message for message in messages), "diagnostic log leaked API key")
+
+    def test_provider_config_save_moves_api_keys_to_credential_refs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            config = configparser.ConfigParser()
+            config["Settings"] = {"google_translate_api_key": TEST_SECRET_KEY}
+            store = FakeCredentialStore()
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch("config_manager.create_default_credential_store", return_value=store, create=True):
+                    self.assertTrue(config_manager.save_app_config(config))
+
+                persisted_text = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+                persisted = configparser.ConfigParser()
+                persisted.read("ocr_translator_config.ini", encoding="utf-8")
+            finally:
+                os.chdir(original_cwd)
+
+            credential_ref = persisted["Settings"].get("google_translate_api_key_ref")
+            assert_secret_not_in_text(self, persisted_text, "ocr_translator_config.ini")
+            self.assertFalse(persisted["Settings"].get("google_translate_api_key", ""), "provider config plaintext key was not cleared")
+            self.assertTrue(credential_ref, "provider config did not persist a credential reference")
+            self.assertTrue(store.matches(credential_ref, TEST_SECRET_KEY), "credential store did not receive provider key")
+
+    def test_provider_config_load_resolves_migrated_key_without_rewriting_plaintext(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            Path(tmp_dir, "ocr_translator_config.ini").write_text(
+                "[Settings]\ngemini_api_key = test-secret-key\n",
+                encoding="utf-8",
+            )
+            store = FakeCredentialStore()
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch("config_manager.create_default_credential_store", return_value=store, create=True):
+                    loaded = config_manager.load_app_config()
+                    resolved_key = config_manager.get_provider_api_key(loaded, "gemini_api_key")
+
+                persisted_text = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+            finally:
+                os.chdir(original_cwd)
+
+            assert_secret_not_in_text(self, persisted_text, "ocr_translator_config.ini")
+            self.assertTrue(resolved_key == TEST_SECRET_KEY, "provider key did not resolve from credential store")
+
     def test_profile_manager_persists_unified_profiles_and_active_ids(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
-            manager = CustomAIProfileManager(path)
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
 
             profile = manager.add_profile(
                 name="Local Translate",
@@ -40,7 +267,7 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             manager.set_active_profile("translation", profile["id"])
             manager.set_active_profile("ocr", profile["id"])
 
-            reloaded = CustomAIProfileManager(path)
+            reloaded = CustomAIProfileManager(path, credential_store=store)
 
             self.assertEqual(reloaded.get_active_profile("translation")["name"], "Local Translate")
             self.assertEqual(reloaded.get_active_profile("ocr")["model"], "qwen")
@@ -77,7 +304,7 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             }
             path.write_text(json.dumps(legacy), encoding="utf-8")
 
-            manager = CustomAIProfileManager(path)
+            manager = CustomAIProfileManager(path, credential_store=FakeCredentialStore())
 
             self.assertEqual([p["name"] for p in manager.list_profiles()], ["Translate Proxy", "Vision Proxy"])
             self.assertEqual([p["name"] for p in manager.list_profiles("ocr")], ["Translate Proxy", "Vision Proxy"])
@@ -87,7 +314,7 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
     def test_delete_active_profile_falls_back_to_remaining_profile(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            manager = CustomAIProfileManager(Path(tmp_dir) / "profiles.json")
+            manager = CustomAIProfileManager(Path(tmp_dir) / "profiles.json", credential_store=FakeCredentialStore())
             first = manager.add_profile(
                 name="First",
                 base_url="https://proxy.example/v1",
@@ -111,7 +338,8 @@ class CustomAIProfileManagerTests(unittest.TestCase):
     def test_profile_manager_persists_responses_wire_api(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
-            manager = CustomAIProfileManager(path)
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
 
             profile = manager.add_profile(
                 name="Responses Relay",
@@ -121,13 +349,13 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                 wire_api="responses",
             )
 
-            reloaded = CustomAIProfileManager(path)
+            reloaded = CustomAIProfileManager(path, credential_store=store)
 
             self.assertEqual(reloaded.get_profile(profile["id"])["wire_api"], "responses")
 
     def test_profile_manager_defaults_to_chat_completions_wire_api(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            manager = CustomAIProfileManager(Path(tmp_dir) / "profiles.json")
+            manager = CustomAIProfileManager(Path(tmp_dir) / "profiles.json", credential_store=FakeCredentialStore())
 
             profile = manager.add_profile(
                 name="Chat Relay",
