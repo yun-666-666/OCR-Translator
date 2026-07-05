@@ -282,6 +282,7 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             capture_backend_var=types.SimpleNamespace(get=lambda: "auto"),
             capture_backend_selector=FakeSelector(),
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
             last_processed_subtitle=None,
             previous_text="",
@@ -311,6 +312,7 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
 
         self.assertEqual(capture_backends, ["mss", "mss"])
         self.assertEqual(app.capture_backend_selector.calls[0], ("auto", (10, 20, 8, 8)))
+        app.ocr_stability_gate.clear.assert_called()
         self.assertIs(app.ocr_queue.get_nowait(), screenshot)
 
 
@@ -430,6 +432,7 @@ class LatencyOcrCacheTests(unittest.TestCase):
         app.previous_text = "old text"
         app.ocr_frame_cache = cache
         app.last_processed_subtitle = "cached OCR"
+        app.ocr_stability_gate = types.SimpleNamespace(clear=Mock(return_value=True))
         app.status_label = types.SimpleNamespace(
             cget=lambda _name: "Status: Running",
             config=Mock(),
@@ -444,6 +447,7 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
         self.assertIsNone(cache.get(cache_key))
         self.assertIsNone(app.last_processed_subtitle)
+        app.ocr_stability_gate.clear.assert_called()
 
     def test_ocr_cache_key_includes_region_origin(self):
         ocr_utils = import_ocr_utils_for_tests()
@@ -2557,6 +2561,243 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         _delay, final_callback, final_args = scheduled[1]
         final_callback(*final_args)
         self.assertEqual(displayed, ["Hello"])
+
+
+class LatencyOcrStabilityGateTests(unittest.TestCase):
+    @staticmethod
+    def _make_root(scheduled):
+        return types.SimpleNamespace(
+            after=lambda delay, callback, *args: scheduled.append(
+                (delay, callback, args)
+            )
+        )
+
+    @staticmethod
+    def _make_app(scheduled, handler=None):
+        return types.SimpleNamespace(
+            root=LatencyOcrStabilityGateTests._make_root(scheduled),
+            translation_handler=handler,
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: True),
+            reset_clear_timeout=Mock(),
+            is_running=True,
+        )
+
+    def test_unstable_short_candidate_is_replaced_by_more_complete_text_before_translation(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+        app = self._make_app(scheduled)
+
+        def submit(_app, text, sequence, requested_at_monotonic=None):
+            submitted.append((text, sequence, requested_at_monotonic))
+
+        with patch.object(worker_threads, "start_async_translation", side_effect=submit):
+            first_result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treas",
+                now=100.0,
+            )
+            second_result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treasure door is open.",
+                now=100.1,
+            )
+
+            for _delay, callback, args in list(scheduled):
+                callback(*args)
+
+        self.assertEqual(first_result, "pending")
+        self.assertEqual(second_result, "submitted")
+        self.assertEqual(
+            submitted,
+            [("The treasure door is open.", 0, 100.1)],
+        )
+
+    def test_clear_stable_candidate_submits_without_ocr_gate_delay(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+        app = self._make_app(scheduled)
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda _app, text, sequence, requested_at_monotonic=None: submitted.append(text),
+        ):
+            result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treasure door is open.",
+                now=200.0,
+            )
+
+        self.assertEqual(result, "submitted")
+        self.assertEqual(submitted, ["The treasure door is open."])
+        self.assertEqual(scheduled, [])
+
+    def test_pending_candidate_flushes_after_max_wait(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+        app = self._make_app(scheduled)
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda _app, text, sequence, requested_at_monotonic=None: submitted.append(text),
+        ):
+            result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treas",
+                now=300.0,
+            )
+
+            self.assertEqual(result, "pending")
+            self.assertEqual(submitted, [])
+            self.assertEqual(len(scheduled), 1)
+            self.assertGreaterEqual(scheduled[0][0], 100)
+            self.assertLessEqual(scheduled[0][0], 250)
+
+            with patch.object(worker_threads.time, "monotonic", return_value=300.3):
+                scheduled[0][1](*scheduled[0][2])
+
+        self.assertEqual(submitted, ["The treas"])
+        self.assertIsNone(app.ocr_stability_gate.pending_text)
+
+    def test_ocr_stability_flush_drops_pending_when_app_is_stopped(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+        app = self._make_app(scheduled)
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda _app, text, sequence, requested_at_monotonic=None: submitted.append(text),
+        ):
+            worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treas",
+                now=400.0,
+            )
+            app.is_running = False
+            with patch.object(worker_threads.time, "monotonic", return_value=400.3):
+                scheduled[0][1](*scheduled[0][2])
+
+        self.assertEqual(submitted, [])
+        self.assertIsNone(app.ocr_stability_gate.pending_text)
+
+    def test_instant_cache_hit_clears_older_pending_gate(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                if text == "The treasure door is open.":
+                    return "Cached translation"
+                return None
+
+        app = self._make_app(scheduled, handler=Handler())
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda _app, text, sequence, requested_at_monotonic=None: submitted.append(text),
+        ):
+            worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treas",
+                now=500.0,
+            )
+            result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treasure door is open.",
+                now=500.05,
+            )
+
+            for _delay, callback, args in list(scheduled):
+                callback(*args)
+
+        self.assertEqual(result, "submitted")
+        self.assertEqual(submitted, ["The treasure door is open."])
+        self.assertIsNone(app.ocr_stability_gate.pending_text)
+
+    def test_near_duplicate_skip_still_happens_before_gate(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        app = self._make_app(scheduled)
+        app.last_local_ocr_submitted_text = "The treasure door is open."
+        app.last_local_ocr_submitted_norm = "the treasure door is open"
+
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treasure door is open!",
+                now=600.0,
+            )
+
+        self.assertEqual(result, "skipped")
+        start_translation.assert_not_called()
+        self.assertEqual(scheduled, [])
+
+    def test_active_inflight_dedup_remains_in_start_async_path(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "same-context")
+
+        pool = Pool()
+        app = self._make_app(scheduled, handler=Handler())
+        app.translation_sequence_counter = 0
+        app.active_translation_calls = set()
+        app.active_translation_inflight_keys = {
+            ("custom_ai", "The treasure door is open.", "same-context")
+        }
+        app.active_translation_started_monotonic = {}
+        app.max_concurrent_translation_calls = 6
+        app.translation_thread_pool = pool
+        app.initialize_async_translation_infrastructure = lambda: None
+
+        result = worker_threads._route_local_ocr_candidate_for_translation(
+            app,
+            "The treasure door is open.",
+            now=700.0,
+        )
+
+        self.assertEqual(result, "submitted")
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(
+            app.active_translation_inflight_keys,
+            {("custom_ai", "The treasure door is open.", "same-context")},
+        )
+
+    def test_ocr_model_change_clears_stability_gate(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.clear_tesseract_runtime_cache = Mock()
+        app.is_running = False
+        app.is_api_based_ocr_model = lambda: False
+        app.ocr_preview_window = None
+        app.ocr_model_var = types.SimpleNamespace(get=lambda: "custom_ai")
+        app.ocr_stability_gate = types.SimpleNamespace(clear=Mock(return_value=True))
+
+        app_logic.GameChangingTranslator.on_ocr_model_change(app)
+
+        app.ocr_stability_gate.clear.assert_called()
 
 
 class LatencyLegacyOcrRemovalTests(unittest.TestCase):

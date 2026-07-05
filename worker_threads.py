@@ -33,6 +33,10 @@ from PIL import Image # For hashing in capture_thread
 
 DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
 MAX_SUPERSEDED_TRANSLATION_CONCURRENCY = 2
+OCR_STABILITY_GATE_MIN_WAIT_SECONDS = 0.12
+OCR_STABILITY_GATE_MAX_WAIT_SECONDS = 0.25
+OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH = 12
+OCR_STABILITY_GATE_NOISE_RATIO = 0.35
 
 
 def _runtime_metrics(app):
@@ -171,6 +175,275 @@ def _normalize_local_ocr_submit_text(text_to_translate):
     return normalized
 
 
+def _ocr_candidate_has_terminal_punctuation(text):
+    return bool(re.search(r"[.!?]+[\"')\]]*$", str(text or "").strip()))
+
+
+def _ocr_candidate_tokens(normalized_text):
+    return re.findall(r"[^\W_]+", normalized_text, flags=re.UNICODE)
+
+
+def _ocr_candidate_noise_ratio(text):
+    chars = [char for char in str(text or "") if not char.isspace()]
+    if not chars:
+        return 1.0
+
+    allowed_punctuation = set(".,!?;:'\"-()[]{}<>/\\|")
+    noisy_count = 0
+    for char in chars:
+        if char.isalnum() or char in allowed_punctuation:
+            continue
+        noisy_count += 1
+    return noisy_count / len(chars)
+
+
+def _looks_like_low_quality_ocr_candidate(text):
+    normalized = _normalize_local_ocr_submit_text(text)
+    if not normalized:
+        return True
+    if not any(char.isalnum() for char in normalized):
+        return True
+    if _ocr_candidate_noise_ratio(text) > OCR_STABILITY_GATE_NOISE_RATIO:
+        return True
+
+    has_terminal_punctuation = _ocr_candidate_has_terminal_punctuation(text)
+    tokens = _ocr_candidate_tokens(normalized)
+    if len(normalized) <= 2 and not has_terminal_punctuation:
+        return True
+    if (
+        len(normalized) < OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH
+        and len(tokens) >= 2
+        and not has_terminal_punctuation
+    ):
+        return True
+    if (
+        len(tokens) >= 2
+        and len(tokens[-1]) <= 2
+        and not has_terminal_punctuation
+    ):
+        return True
+    return False
+
+
+def _ocr_candidate_quality_score(text):
+    normalized = _normalize_local_ocr_submit_text(text)
+    if not normalized:
+        return -100
+
+    score = min(len(normalized), 80)
+    if _ocr_candidate_has_terminal_punctuation(text):
+        score += 20
+    score -= int(_ocr_candidate_noise_ratio(text) * 50)
+    if _looks_like_low_quality_ocr_candidate(text):
+        score -= 20
+    return score
+
+
+def _looks_like_more_complete_ocr_candidate(new_text, old_text):
+    new_norm = _normalize_local_ocr_submit_text(new_text)
+    old_norm = _normalize_local_ocr_submit_text(old_text)
+    if not new_norm or not old_norm:
+        return False
+    if len(new_norm) <= len(old_norm) + 2:
+        return False
+    if new_norm.startswith(old_norm):
+        return True
+
+    similarity = SequenceMatcher(None, new_norm, old_norm).ratio()
+    if (
+        similarity >= 0.45
+        and len(new_norm) >= max(len(old_norm) + 4, int(len(old_norm) * 1.25))
+    ):
+        return True
+    return (
+        _ocr_candidate_has_terminal_punctuation(new_text)
+        and not _ocr_candidate_has_terminal_punctuation(old_text)
+        and similarity >= 0.40
+    )
+
+
+class OcrStabilityDecision:
+    def __init__(
+        self,
+        action,
+        text=None,
+        delay_seconds=0.0,
+        reason="",
+        requested_at_monotonic=None,
+    ):
+        self.action = action
+        self.text = text
+        self.delay_seconds = max(0.0, float(delay_seconds or 0.0))
+        self.reason = reason
+        self.requested_at_monotonic = requested_at_monotonic
+
+
+class OcrStabilityGate:
+    def __init__(
+        self,
+        min_wait_seconds=OCR_STABILITY_GATE_MIN_WAIT_SECONDS,
+        max_wait_seconds=OCR_STABILITY_GATE_MAX_WAIT_SECONDS,
+        monotonic_clock=time.monotonic,
+    ):
+        self.min_wait_seconds = max(0.0, float(min_wait_seconds))
+        self.max_wait_seconds = max(
+            self.min_wait_seconds,
+            float(max_wait_seconds),
+        )
+        self.monotonic_clock = monotonic_clock
+        self.pending_text = None
+        self.pending_norm = ""
+        self.pending_first_seen_monotonic = 0.0
+        self.pending_last_seen_monotonic = 0.0
+        self.flush_scheduled = False
+        self.flush_deadline_monotonic = 0.0
+        self.generation = 0
+
+    def has_pending(self):
+        return self.pending_text is not None
+
+    def clear(self):
+        had_pending = bool(self.pending_text or self.flush_scheduled)
+        self.pending_text = None
+        self.pending_norm = ""
+        self.pending_first_seen_monotonic = 0.0
+        self.pending_last_seen_monotonic = 0.0
+        self.flush_scheduled = False
+        self.flush_deadline_monotonic = 0.0
+        self.generation += 1
+        return had_pending
+
+    def _queue_pending(self, text, normalized, now, reason, keep_first_seen=False):
+        if not keep_first_seen or self.pending_text is None:
+            self.pending_first_seen_monotonic = float(now)
+        self.pending_text = text
+        self.pending_norm = normalized
+        self.pending_last_seen_monotonic = float(now)
+        return OcrStabilityDecision(
+            "wait",
+            text=text,
+            delay_seconds=self.remaining_wait_seconds(now),
+            reason=reason,
+            requested_at_monotonic=self.pending_first_seen_monotonic,
+        )
+
+    def remaining_wait_seconds(self, now=None):
+        if now is None:
+            now = self.monotonic_clock()
+        if self.pending_text is None:
+            return self.max_wait_seconds
+        age = max(0.0, float(now) - self.pending_first_seen_monotonic)
+        return max(0.0, self.max_wait_seconds - age)
+
+    def evaluate(self, text, now=None):
+        if now is None:
+            now = self.monotonic_clock()
+        now = float(now)
+        normalized = _normalize_local_ocr_submit_text(text)
+        if not normalized or not any(char.isalnum() for char in normalized):
+            return OcrStabilityDecision("drop", reason="invalid OCR candidate")
+
+        low_quality = _looks_like_low_quality_ocr_candidate(text)
+        if self.pending_text is None:
+            if low_quality:
+                return self._queue_pending(text, normalized, now, "low quality")
+            return OcrStabilityDecision(
+                "submit",
+                text=text,
+                reason="clear candidate",
+                requested_at_monotonic=now,
+            )
+
+        age = max(0.0, now - self.pending_first_seen_monotonic)
+        same_candidate = normalized == self.pending_norm
+        near_same_candidate = (
+            not same_candidate
+            and SequenceMatcher(None, normalized, self.pending_norm).ratio() >= 0.98
+        )
+        if same_candidate or near_same_candidate:
+            if _ocr_candidate_quality_score(text) > _ocr_candidate_quality_score(self.pending_text):
+                self.pending_text = text
+                self.pending_norm = normalized
+            self.pending_last_seen_monotonic = now
+            if age >= self.min_wait_seconds:
+                return OcrStabilityDecision(
+                    "submit",
+                    text=self.pending_text,
+                    reason="candidate repeated",
+                    requested_at_monotonic=self.pending_first_seen_monotonic,
+                )
+            return OcrStabilityDecision(
+                "wait",
+                text=self.pending_text,
+                delay_seconds=self.remaining_wait_seconds(now),
+                reason="candidate waiting for confirmation",
+                requested_at_monotonic=self.pending_first_seen_monotonic,
+            )
+
+        if _looks_like_more_complete_ocr_candidate(text, self.pending_text):
+            if not low_quality:
+                return OcrStabilityDecision(
+                    "submit",
+                    text=text,
+                    reason="more complete candidate",
+                    requested_at_monotonic=now,
+                )
+            return self._queue_pending(
+                text,
+                normalized,
+                now,
+                "more complete but still low quality",
+                keep_first_seen=True,
+            )
+
+        if not low_quality:
+            return OcrStabilityDecision(
+                "submit",
+                text=text,
+                reason="new clear candidate",
+                requested_at_monotonic=now,
+            )
+
+        if age >= self.max_wait_seconds:
+            best_text = self.pending_text
+            if _ocr_candidate_quality_score(text) > _ocr_candidate_quality_score(best_text):
+                best_text = text
+            return OcrStabilityDecision(
+                "submit",
+                text=best_text,
+                reason="max wait reached",
+                requested_at_monotonic=self.pending_first_seen_monotonic,
+            )
+
+        if _ocr_candidate_quality_score(text) > _ocr_candidate_quality_score(self.pending_text):
+            return self._queue_pending(
+                text,
+                normalized,
+                now,
+                "better low-quality candidate",
+                keep_first_seen=True,
+            )
+        return OcrStabilityDecision(
+            "wait",
+            text=self.pending_text,
+            delay_seconds=self.remaining_wait_seconds(now),
+            reason="waiting for stable OCR",
+            requested_at_monotonic=self.pending_first_seen_monotonic,
+        )
+
+    def consume_pending_for_flush(self):
+        if self.pending_text is None:
+            return None, None
+
+        text = self.pending_text
+        requested_at = self.pending_first_seen_monotonic
+        normalized = self.pending_norm
+        self.clear()
+        if not normalized or not any(char.isalnum() for char in normalized):
+            return None, None
+        return text, requested_at
+
+
 def _get_local_ocr_submit_scope(app, text_to_translate):
     handler = getattr(app, "translation_handler", None)
     getter = getattr(handler, "get_inflight_translation_key", None)
@@ -263,6 +536,206 @@ def _clear_local_ocr_submit_state(app):
     app.last_local_ocr_submitted_text = None
     app.last_local_ocr_submitted_norm = None
     app.last_local_ocr_submitted_scope = None
+
+
+def _get_ocr_stability_gate(app):
+    gate = getattr(app, "ocr_stability_gate", None)
+    if gate is None or not hasattr(gate, "evaluate"):
+        gate = OcrStabilityGate()
+        try:
+            app.ocr_stability_gate = gate
+        except Exception:
+            pass
+    return gate
+
+
+def _has_pending_ocr_stability_candidate(app):
+    gate = getattr(app, "ocr_stability_gate", None)
+    checker = getattr(gate, "has_pending", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:
+            return False
+    return bool(getattr(gate, "pending_text", None))
+
+
+def _clear_ocr_stability_gate(app, reason):
+    gate = getattr(app, "ocr_stability_gate", None)
+    clearer = getattr(gate, "clear", None)
+    if not callable(clearer):
+        return False
+    try:
+        had_pending = bool(clearer())
+    except Exception as clear_error:
+        log_debug(
+            "LATENCY: failed to clear OCR stability gate "
+            f"reason={reason}: {type(clear_error).__name__} - {clear_error}"
+        )
+        return False
+    if had_pending:
+        log_debug(f"LATENCY: cleared pending OCR stability candidate reason={reason}")
+    return had_pending
+
+
+def _local_ocr_candidate_has_instant_cache(app, text_to_translate):
+    enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
+    try:
+        instant_cache_enabled = (
+            enable_instant_var.get() if enable_instant_var is not None else True
+        )
+    except Exception:
+        instant_cache_enabled = True
+    if not instant_cache_enabled:
+        return False
+
+    handler = getattr(app, 'translation_handler', None)
+    getter = getattr(handler, 'get_cached_translation_for_display', None)
+    if not callable(getter):
+        return False
+    try:
+        return bool(getter(text_to_translate))
+    except Exception as cache_error:
+        log_debug(
+            "LATENCY: failed to check instant cache before OCR stability gate: "
+            f"{type(cache_error).__name__} - {cache_error}"
+        )
+        return False
+
+
+def _submit_final_local_ocr_text(
+    app,
+    text_to_translate,
+    ocr_sequence_number,
+    requested_at_monotonic=None,
+):
+    if _should_skip_local_ocr_resubmit(app, text_to_translate):
+        app.reset_clear_timeout()
+        log_debug(
+            "LATENCY: skipped local OCR resubmit for near-duplicate stable text: "
+            f"'{text_to_translate}'"
+        )
+        return "skipped"
+
+    start_async_translation(
+        app,
+        text_to_translate,
+        ocr_sequence_number,
+        requested_at_monotonic=requested_at_monotonic,
+    )
+    return "submitted"
+
+
+def _schedule_ocr_stability_flush(app, gate, delay_seconds):
+    desired_deadline = time.monotonic() + max(0.0, float(delay_seconds or 0.0))
+    current_deadline = float(getattr(gate, "flush_deadline_monotonic", 0.0) or 0.0)
+    if (
+        getattr(gate, "flush_scheduled", False)
+        and current_deadline > 0.0
+        and current_deadline <= desired_deadline
+    ):
+        return
+
+    gate.generation += 1
+    generation = gate.generation
+    gate.flush_scheduled = True
+    gate.flush_deadline_monotonic = desired_deadline
+    remaining_seconds = max(0.0, desired_deadline - time.monotonic())
+    delay_ms = max(1, int(remaining_seconds * 1000))
+    try:
+        app.root.after(delay_ms, _flush_ocr_stability_candidate, app, generation)
+    except Exception:
+        if int(getattr(gate, "generation", 0) or 0) == generation:
+            gate.flush_scheduled = False
+            gate.flush_deadline_monotonic = 0.0
+        raise
+
+
+def _flush_ocr_stability_candidate(app, generation=None):
+    gate = getattr(app, "ocr_stability_gate", None)
+    if gate is None:
+        return
+    if generation is not None and generation != getattr(gate, "generation", None):
+        log_debug(
+            "LATENCY: ignored stale OCR stability timer "
+            f"generation={generation} current={getattr(gate, 'generation', None)}"
+        )
+        return
+
+    gate.flush_scheduled = False
+    gate.flush_deadline_monotonic = 0.0
+    if hasattr(app, 'is_running') and not app.is_running:
+        _clear_ocr_stability_gate(app, "app stopped")
+        return
+
+    consumer = getattr(gate, "consume_pending_for_flush", None)
+    if not callable(consumer):
+        return
+    text_to_translate, requested_at = consumer()
+    if not text_to_translate:
+        log_debug("LATENCY: dropped invalid OCR stability candidate on flush")
+        return
+
+    _submit_final_local_ocr_text(
+        app,
+        text_to_translate,
+        0,
+        requested_at_monotonic=requested_at,
+    )
+
+
+def _route_local_ocr_candidate_for_translation(
+    app,
+    text_to_translate,
+    now=None,
+    ocr_sequence_number=0,
+):
+    if now is None:
+        now = time.monotonic()
+
+    if _should_skip_local_ocr_resubmit(app, text_to_translate):
+        _clear_ocr_stability_gate(app, "near-duplicate local OCR")
+        app.reset_clear_timeout()
+        log_debug(
+            "LATENCY: skipped local OCR resubmit for near-duplicate stable text: "
+            f"'{text_to_translate}'"
+        )
+        return "skipped"
+
+    if _local_ocr_candidate_has_instant_cache(app, text_to_translate):
+        _clear_ocr_stability_gate(app, "instant cache hit")
+        return _submit_final_local_ocr_text(
+            app,
+            text_to_translate,
+            ocr_sequence_number,
+            requested_at_monotonic=now,
+        )
+
+    gate = _get_ocr_stability_gate(app)
+    decision = gate.evaluate(text_to_translate, now=now)
+    if decision.action == "submit":
+        _clear_ocr_stability_gate(app, decision.reason or "OCR candidate submitted")
+        return _submit_final_local_ocr_text(
+            app,
+            decision.text,
+            ocr_sequence_number,
+            requested_at_monotonic=decision.requested_at_monotonic,
+        )
+    if decision.action == "drop":
+        _clear_ocr_stability_gate(app, decision.reason or "OCR candidate dropped")
+        log_debug(
+            "LATENCY: dropped OCR stability candidate "
+            f"reason={decision.reason}: '{text_to_translate}'"
+        )
+        return "dropped"
+
+    _schedule_ocr_stability_flush(app, gate, decision.delay_seconds)
+    log_debug(
+        "LATENCY: pending OCR stability candidate "
+        f"delay={decision.delay_seconds:.3f}s reason={decision.reason}: "
+        f"'{decision.text}'"
+    )
+    return "pending"
 
 
 def _get_api_ocr_cache_mode_key(app):
@@ -410,6 +883,7 @@ def run_capture_thread(app):
                 app.last_processed_subtitle = None
                 app.previous_text = ""
                 app.text_stability_counter = 0
+                _clear_ocr_stability_gate(app, "source context changed")
                 if hasattr(app, 'ocr_frame_cache'):
                     app.ocr_frame_cache.clear()
                 try:
@@ -667,6 +1141,7 @@ def run_ocr_thread(app):
                 if not list(re.finditer(pattern, ocr_cleaned_text)):
                     app.text_stability_counter = 0
                     app.previous_text = ""
+                    _clear_ocr_stability_gate(app, "OCR missing required punctuation")
                     continue 
                 ocr_cleaned_text = remove_text_after_last_punctuation_mark(ocr_cleaned_text)
             
@@ -676,7 +1151,22 @@ def run_ocr_thread(app):
             if not ocr_cleaned_text or app.is_placeholder_text(ocr_cleaned_text):
                 app.text_stability_counter = 0
                 app.previous_text = ""
+                _clear_ocr_stability_gate(app, "empty or placeholder OCR")
                 continue
+
+            if _has_pending_ocr_stability_candidate(app):
+                route_result = _route_local_ocr_candidate_for_translation(
+                    app,
+                    ocr_cleaned_text,
+                    now=now,
+                    ocr_sequence_number=0,
+                )
+                if route_result in ("submitted", "skipped", "dropped"):
+                    app.text_stability_counter = 0
+                    similar_texts_count = 0
+                    continue
+                if route_result == "pending":
+                    continue
 
             similarity = app.calculate_text_similarity(ocr_cleaned_text, prev_ocr_text)
             if similarity > 0.9:
@@ -709,17 +1199,12 @@ def run_ocr_thread(app):
                     continue
 
                 if elapsed_since_submit >= provider_gate_interval:
-                    if _should_skip_local_ocr_resubmit(app, ocr_cleaned_text):
-                        app.reset_clear_timeout()
-                        app.text_stability_counter = 0
-                        similar_texts_count = 0
-                        log_debug(
-                            "LATENCY: skipped local OCR resubmit for near-duplicate stable text: "
-                            f"'{ocr_cleaned_text}'"
-                        )
-                        continue
-
-                    start_async_translation(app, ocr_cleaned_text, 0)
+                    _route_local_ocr_candidate_for_translation(
+                        app,
+                        ocr_cleaned_text,
+                        now=now,
+                        ocr_sequence_number=0,
+                    )
                     app.text_stability_counter = 0
                     if ocr_cleaned_text != app.previous_text:
                         app.previous_text = ocr_cleaned_text
@@ -739,6 +1224,7 @@ def run_ocr_thread(app):
             app.text_stability_counter=0
             app.previous_text=""
             time.sleep(0.2)
+    _clear_ocr_stability_gate(app, "OCR thread stopped")
     log_debug("WT: OCR thread finished.")
 
 def run_translation_thread(app):

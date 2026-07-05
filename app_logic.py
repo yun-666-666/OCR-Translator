@@ -194,6 +194,7 @@ class GameChangingTranslator:
         self.runtime_metrics = RuntimeMetrics(max_events=240, max_age_seconds=60.0)
         self.runtime_metrics_refresh_after_id = None
         self.capture_backend_selector = CaptureBackendSelector()
+        self.ocr_stability_gate = None
         
         # Initialize thread pools for optimized performance (especially for compiled version)
         self.ocr_thread_pool = concurrent.futures.ThreadPoolExecutor(
@@ -706,6 +707,16 @@ class GameChangingTranslator:
         except Exception as e:
             log_debug(f"Tesseract OCR runtime cache clear failed ({reason}): {e}")
 
+    def clear_ocr_stability_gate(self, reason="OCR state changed"):
+        """Clear pending OCR text that has not yet been submitted for translation."""
+        try:
+            gate = getattr(self, 'ocr_stability_gate', None)
+            clearer = getattr(gate, 'clear', None)
+            if callable(clearer) and clearer():
+                log_debug(f"OCR stability gate cleared ({reason})")
+        except Exception as e:
+            log_debug(f"OCR stability gate clear failed ({reason}): {e}")
+
     def on_ocr_frame_cache_size_change(self, *args):
         """Resize the live OCR frame cache when the setting changes."""
         try:
@@ -743,6 +754,7 @@ class GameChangingTranslator:
         """Called when OCR model selection changes to update UI visibility."""
         try:
             self.clear_tesseract_runtime_cache("OCR model changed")
+            self.clear_ocr_stability_gate("OCR model changed")
 
             # End OCR session if switching away from API OCR while translation is running
             if (hasattr(self, 'translation_handler') and self.is_running and 
@@ -1806,6 +1818,7 @@ class GameChangingTranslator:
             self.last_local_ocr_submitted_text = None
             self.last_local_ocr_submitted_norm = None
             self.last_local_ocr_submitted_scope = None
+            self.clear_ocr_stability_gate("cache cleared")
             if hasattr(self, 'active_translation_inflight_keys'):
                 self.active_translation_inflight_keys.clear()
             self.translation_cache.clear()
@@ -1848,6 +1861,7 @@ class GameChangingTranslator:
         self.last_local_ocr_submitted_text = None
         self.last_local_ocr_submitted_norm = None
         self.last_local_ocr_submitted_scope = None
+        self.clear_ocr_stability_gate("OCR batch state reset")
         self.clear_timeout_timer_start = None
         log_debug("Gemini OCR batch state reset")
 
@@ -1897,6 +1911,7 @@ class GameChangingTranslator:
         self._clear_queue(self.ocr_queue)
         self._clear_queue(self.translation_queue)
         self.clear_tesseract_runtime_cache("translation stopped")
+        self.clear_ocr_stability_gate("translation stopped")
 
         if self.translation_text and self.translation_text.winfo_exists():
             try:
@@ -2044,6 +2059,7 @@ class GameChangingTranslator:
                 self.last_local_ocr_submitted_text = None
                 self.last_local_ocr_submitted_norm = None
                 self.last_local_ocr_submitted_scope = None
+                self.clear_ocr_stability_gate("translation starting")
                 self.clear_tesseract_runtime_cache("translation starting")
 
                 self.cache_manager.load_file_caches()
