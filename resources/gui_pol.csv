@@ -69,6 +69,27 @@ custom_ai_latency_mode_none,Nic nie rób
 custom_ai_latency_mode_safe,Stabilny niski lag
 custom_ai_latency_mode_stream,Napisy strumieniowe
 custom_ai_latency_mode_race,Najszybszy punkt
+custom_ai_latency_mode_adaptive,Adaptacyjny
+custom_ai_submit_interval_label,Minimalny interwał tłumaczenia AI (ms):
+ai_profile_structured_output_label,Wyjście strukturalne
+ai_profile_reasoning_effort_label,Intensywność rozumowania
+custom_ai_reasoning_effort_low,Niska
+custom_ai_reasoning_effort_medium,Średnia
+custom_ai_reasoning_effort_high,Wysoka
+custom_ai_reasoning_effort_ultra,Bardzo wysoka
+custom_ai_ocr_image_format_label,Format obrazu OCR:
+custom_ai_ocr_image_format_webp,WebP
+custom_ai_ocr_image_format_png,PNG
+custom_ai_ocr_image_format_jpeg,JPEG
+custom_ai_ocr_image_mode_label,Tryb obrazu OCR:
+custom_ai_ocr_image_mode_lossless,Bezstratny WebP
+custom_ai_ocr_image_mode_balanced,Zrównoważony WebP
+custom_ai_ocr_image_mode_grayscale,Mały WebP w skali szarości
+custom_ai_ocr_image_quality_label,Jakość obrazu OCR:
+custom_ai_ocr_image_detail_label,Szczegółowość obrazu OCR:
+custom_ai_ocr_image_detail_auto,Auto
+custom_ai_ocr_image_detail_low,Niska
+custom_ai_ocr_image_detail_high,Wysoka
 models_file_label,Lista modeli MarianMT:
 beam_size_label,Rozmiar wiązki tłumaczenia (MarianMT):
 tesseract_path_label,Ścieżka do Tesseract:

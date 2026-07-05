@@ -44,11 +44,14 @@ from ocr_utils import (
     CaptureBackendSelector,
     OCRFrameCache,
     API_OCR_IMAGE_DETAIL_DEFAULT,
+    API_OCR_IMAGE_FORMAT_DEFAULT,
     API_OCR_IMAGE_MODE_DEFAULT,
     API_OCR_IMAGE_QUALITY_DEFAULT,
     encode_image_for_api_ocr,
+    encode_image_for_api_ocr_payload,
     get_tesseract_ocr_config,
     normalize_api_ocr_image_detail,
+    normalize_api_ocr_image_format,
     normalize_api_ocr_image_mode,
     normalize_api_ocr_image_quality,
     resolve_tessdata_dir_from_tesseract_path,
@@ -312,6 +315,11 @@ class GameChangingTranslator:
         self.custom_ai_submit_interval_ms_var = tk.IntVar(
             value=max(0, min(5000, custom_ai_submit_interval_ms))
         )
+        self.custom_ai_ocr_image_format_var = tk.StringVar(
+            value=normalize_api_ocr_image_format(
+                self.config['Settings'].get('custom_ai_ocr_image_format', API_OCR_IMAGE_FORMAT_DEFAULT)
+            )
+        )
         self.custom_ai_ocr_image_mode_var = tk.StringVar(
             value=normalize_api_ocr_image_mode(
                 self.config['Settings'].get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
@@ -492,6 +500,7 @@ class GameChangingTranslator:
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
         self.custom_ai_latency_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
+        self.custom_ai_ocr_image_format_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_quality_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_detail_var.trace_add("write", self.settings_changed_callback)
@@ -884,11 +893,17 @@ class GameChangingTranslator:
             log_debug(f"Error checking widget existence: {e}")
             return False
 
-    def convert_to_webp_for_api(self, pil_image):
-        """Convert a PIL image to configured WebP bytes for API OCR calls."""
+    def convert_to_api_ocr_image(self, pil_image):
+        """Convert a PIL image to configured API OCR bytes plus MIME metadata."""
+        format_getter = getattr(self, 'get_custom_ai_ocr_image_format', None)
         mode_getter = getattr(self, 'get_custom_ai_ocr_image_mode', None)
         quality_getter = getattr(self, 'get_custom_ai_ocr_image_quality', None)
         detail_getter = getattr(self, 'get_custom_ai_ocr_image_detail', None)
+        if callable(format_getter):
+            image_format = format_getter()
+        else:
+            format_var = getattr(self, 'custom_ai_ocr_image_format_var', None)
+            image_format = normalize_api_ocr_image_format(format_var.get() if format_var is not None else API_OCR_IMAGE_FORMAT_DEFAULT)
         if callable(mode_getter):
             mode = mode_getter()
         else:
@@ -907,28 +922,31 @@ class GameChangingTranslator:
         start = time.monotonic()
 
         try:
-            webp_bytes = encode_image_for_api_ocr(
+            encoded_image = encode_image_for_api_ocr_payload(
                 pil_image,
                 mode=mode,
                 quality=quality,
+                image_format=image_format,
             )
         except Exception as e:
             log_debug(
                 "API OCR image encoding failed "
-                f"mode={mode} quality={quality} detail={detail}: {type(e).__name__} - {e}; "
-                "retrying mode=lossless_webp"
+                f"format={image_format} mode={mode} quality={quality} detail={detail}: "
+                f"{type(e).__name__} - {e}; retrying format=webp mode=lossless_webp"
             )
             try:
+                image_format = 'webp'
                 mode = 'lossless_webp'
-                webp_bytes = encode_image_for_api_ocr(
+                encoded_image = encode_image_for_api_ocr_payload(
                     pil_image,
                     mode=mode,
                     quality=quality,
+                    image_format=image_format,
                 )
             except Exception as fallback_error:
                 log_debug(
                     "API OCR image encoding failed "
-                    f"mode=lossless_webp quality={quality} detail={detail}: "
+                    f"format=webp mode=lossless_webp quality={quality} detail={detail}: "
                     f"{type(fallback_error).__name__} - {fallback_error}"
                 )
                 return None
@@ -936,9 +954,15 @@ class GameChangingTranslator:
         duration = time.monotonic() - start
         log_debug(
             "API OCR image encoded "
-            f"mode={mode} bytes={len(webp_bytes)} detail={detail} duration={duration:.3f}s"
+            f"format={encoded_image.image_format} mime={encoded_image.mime_type} "
+            f"mode={mode} bytes={len(encoded_image.data)} detail={detail} duration={duration:.3f}s"
         )
-        return webp_bytes
+        return encoded_image
+
+    def convert_to_webp_for_api(self, pil_image):
+        """Convert a PIL image for API OCR calls and return bytes for legacy callers."""
+        encoded_image = GameChangingTranslator.convert_to_api_ocr_image(self, pil_image)
+        return encoded_image.data if encoded_image is not None else None
 
     def _pre_initialize_gemini_model(self):
         """Pre-configure Gemini API at startup to avoid thread initialization delays."""
@@ -1908,22 +1932,78 @@ class GameChangingTranslator:
         self.clear_timeout_timer_start = None
         log_debug("Gemini OCR batch state reset")
 
+    def _root_window_alive(self):
+        try:
+            if not self.root:
+                return False
+            if not hasattr(self.root, 'winfo_exists'):
+                return True
+            return bool(self.root.winfo_exists())
+        except Exception:
+            return False
+
+    def _stop_translation_for_app_exit(self):
+        """Stop worker activity for application exit without scheduling UI callbacks."""
+        if not self.is_running:
+            log_debug("Process was not running at close time.")
+            return
+
+        log_debug("Stopping running OCR/translation process for app exit...")
+        self.is_running = False
+        self.toggle_in_progress = False
+
+        active_threads_copy = list(getattr(self, 'threads', []) or [])
+        try:
+            self.threads.clear()
+        except Exception:
+            self.threads = []
+
+        for thread_obj in active_threads_copy:
+            try:
+                if thread_obj.is_alive():
+                    thread_obj.join(timeout=0.5)
+            except Exception as join_error:
+                log_debug(f"Error joining thread during app exit: {join_error}")
+
+        if hasattr(self, 'active_ocr_calls'):
+            self.active_ocr_calls.clear()
+        if hasattr(self, 'active_translation_calls'):
+            self.active_translation_calls.clear()
+
+        handler = getattr(self, 'translation_handler', None)
+        if handler is not None:
+            for method_name in ('request_end_ocr_session', 'request_end_translation_session'):
+                method = getattr(handler, method_name, None)
+                if callable(method):
+                    try:
+                        method()
+                    except Exception as session_error:
+                        log_debug(f"Error ending session during app exit: {session_error}")
+
     def _graceful_shutdown_poll(self):
         """
         Non-blocking poll to check if all async API calls have finished.
         This allows the tkinter event loop to process callbacks that decrement pending call counters.
         """
+        if getattr(self, '_app_is_closing', False) or getattr(self, '_shutdown_finalized', False):
+            log_debug("Graceful shutdown poll ignored because application shutdown is already finalizing.")
+            return
+        if not self._root_window_alive():
+            log_debug("Graceful shutdown poll ignored because root window no longer exists.")
+            return
+
         # Calculate pending calls from all providers
         pending_ocr = 0
-        if hasattr(self.translation_handler, 'ocr_providers'):
-            for provider in self.translation_handler.ocr_providers.values():
+        translation_handler = getattr(self, 'translation_handler', None)
+        if hasattr(translation_handler, 'ocr_providers'):
+            for provider in translation_handler.ocr_providers.values():
                 pending_ocr += provider._pending_ocr_calls
         if hasattr(self, 'active_ocr_calls'):
             pending_ocr += len(self.active_ocr_calls)
         
         pending_translation = 0
-        if hasattr(self.translation_handler, 'providers'):
-            for provider in self.translation_handler.providers.values():
+        if hasattr(translation_handler, 'providers'):
+            for provider in translation_handler.providers.values():
                 pending_translation += provider._pending_translation_calls
         if hasattr(self, 'active_translation_calls'):
             pending_translation += len(self.active_translation_calls)
@@ -1942,10 +2022,16 @@ class GameChangingTranslator:
 
         # If not done, poll again shortly
         log_debug(f"Waiting for pending API calls to complete... OCR: {pending_ocr}, Translation: {pending_translation}")
-        self.root.after(100, self._graceful_shutdown_poll)
+        if self._root_window_alive() and not getattr(self, '_app_is_closing', False):
+            self.root.after(100, self._graceful_shutdown_poll)
 
     def _finalize_shutdown(self):
         """Contains the final steps of the shutdown process after graceful polling."""
+        if getattr(self, '_shutdown_finalized', False):
+            log_debug("Finalize shutdown ignored because it already ran.")
+            return
+        self._shutdown_finalized = True
+
         # End the sessions HERE, after all pending calls are confirmed to be finished.
         if hasattr(self, 'translation_handler'):
             self.translation_handler.request_end_ocr_session()
@@ -1990,6 +2076,7 @@ class GameChangingTranslator:
         if self.is_running:
             log_debug("Stopping translation process requested by user.")
             self.is_running = False
+            self._shutdown_finalized = False
             
             # DO NOT request session ends here. This will be done in _finalize_shutdown.
             # Context clearing is now handled automatically after session end logging in llm_provider_base.py
@@ -2107,6 +2194,8 @@ class GameChangingTranslator:
 
                 self.cache_manager.load_file_caches()
 
+                self._app_is_closing = False
+                self._shutdown_finalized = False
                 self.is_running = True 
                 
                 if hasattr(self, 'translation_handler'):
@@ -2181,6 +2270,14 @@ class GameChangingTranslator:
             return normalize_custom_ai_latency_mode(var.get() if var is not None else CUSTOM_AI_LATENCY_MODE_SAFE)
         except Exception:
             return CUSTOM_AI_LATENCY_MODE_SAFE
+
+    def get_custom_ai_ocr_image_format(self):
+        """Return the selected Custom AI OCR image file format."""
+        var = getattr(self, 'custom_ai_ocr_image_format_var', None)
+        try:
+            return normalize_api_ocr_image_format(var.get() if var is not None else API_OCR_IMAGE_FORMAT_DEFAULT)
+        except Exception:
+            return API_OCR_IMAGE_FORMAT_DEFAULT
 
     def get_custom_ai_ocr_image_mode(self):
         """Return the selected Custom AI OCR image encoding mode."""
@@ -2386,6 +2483,7 @@ class GameChangingTranslator:
 
     def on_closing(self):
         log_debug("Main window close requested. Initiating shutdown...")
+        self._app_is_closing = True
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)
@@ -2401,11 +2499,7 @@ class GameChangingTranslator:
             except Exception as e:
                 log_debug(f"Error closing OCR Preview window: {e}")
         
-        if self.is_running:
-            log_debug("Stopping running OCR/translation process before closing...")
-            self.toggle_translation()
-        else:
-             log_debug("Process was not running at close time.")
+        self._stop_translation_for_app_exit()
 
         # # Force end any remaining sessions when application closes
         # if hasattr(self, 'translation_handler'):

@@ -172,7 +172,7 @@
           <li><a href="#step-3-run-the-application">Step 3: Run the Application</a></li>
         </ul>
       </li>
-      <li><a href="#translation-service-configuration-both-installation-methods">Translation Service Configuration (Both Installation Methods)</a></li>
+      <li><a href="#translation-service-configuration-both-installation-methods">Custom AI and Legacy Service Configuration (Both Installation Methods)</a></li>
       <li><a href="#version-comparison">Version Comparison</a></li>
       <li><a href="#troubleshooting">Troubleshooting</a></li>
       <li><a href="#which-version-should-i-choose">Which Version Should I Choose?</a></li>
@@ -184,8 +184,8 @@
       <li>4GB RAM minimum (8GB recommended)</li>
       <li><strong>For compiled version</strong>: 1-4GB free disk space (depending on version chosen)</li>
       <li><strong>For Python version</strong>: 500MB free disk space</li>
-      <li>Additional space for MarianMT models if using offline translation (~500MB per language pair)</li>
-      <li>Internet connection (for API-based translation services and initial MarianMT model downloads)</li>
+      <li>Additional space for legacy MarianMT models if using offline translation (~500MB per language pair)</li>
+      <li>Internet connection (for Custom AI/OpenAI-compatible translation services and initial legacy MarianMT model downloads)</li>
     </ul>
 
     <h2 id="installation-method-1-compiled-version-recommended-for-most-users">Installation Method 1: Compiled Version (Recommended for Most Users)</h2>
@@ -196,10 +196,10 @@
 
     <h4 id="version-370-cpu-only-260mb-latest"><strong>Version 3.9.5 - CPU-Only</strong> (~260MB) <em>[Latest Version]</em></h4>
     <ul>
-      <li><strong>Best for</strong>: All users seeking the latest features with superior Gemini Translation + Gemini OCR workflow</li>
+      <li><strong>Best for</strong>: All users seeking the latest features with the Custom AI translation + Custom AI OCR workflow</li>
       <li><strong>Requirements</strong>: Any modern CPU</li>
       <li><strong>Download size</strong>: ~260MB compressed (1 file)</li>
-      <li><strong>Note</strong>: MarianMT offline translation remains available as a reliable fallback option, though the advanced Gemini workflow provides superior results for most use cases</li>
+      <li><strong>Note</strong>: Legacy MarianMT offline translation remains in the package for compatibility, but the current online workflow is centered on Custom AI profiles</li>
     </ul>
 
     <h4 id="version-2-legacy-versions">Version 2 - Legacy Versions</h4>
@@ -302,7 +302,7 @@
 
     <h3 id="prerequisites">Prerequisites</h3>
     <ul>
-      <li>Python 3.7 or newer</li>
+      <li>Python 3.9-3.12</li>
       <li>Git (optional, for cloning the repository)</li>
     </ul>
 
@@ -348,8 +348,8 @@ cd OCR-Translator</code></pre>
         <p>This will install:</p>
         <ul>
           <li>Core dependencies (numpy, opencv, tesserocr, Pillow, pyautogui)</li>
-          <li>Translation API clients (Google Cloud Translate, DeepL)</li>
-          <li>Optional MarianMT offline translation libraries (transformers, torch, sentencepiece)</li>
+          <li>Custom AI/OpenAI-compatible endpoint support through the Requests HTTP client</li>
+          <li>PySide6 RTL overlay support and keyboard hotkey support</li>
           <li>Keyboard hotkey support</li>
         </ul>
       </li>
@@ -376,9 +376,10 @@ cd OCR-Translator</code></pre>
 
     <hr>
 
-    <h2 id="translation-service-configuration-both-installation-methods">Translation Service Configuration (Both Installation Methods)</h2>
+    <h2 id="translation-service-configuration-both-installation-methods">Custom AI and Legacy Service Configuration (Both Installation Methods)</h2>
+    <p>The current runtime path uses Custom AI profiles with OpenAI-compatible endpoints for online OCR and translation. Configure the base URL, API key, and model in the application's Custom AI profile settings. The Google, DeepL, and MarianMT notes below are legacy references for users who explicitly re-enable those paths in a fork.</p>
 
-    <h3 id="google-cloud-translation-api-optional">Google Cloud Translation API (Optional):</h3>
+    <h3 id="google-cloud-translation-api-optional">Legacy Google Cloud Translation API (Optional):</h3>
     <ol>
       <li>Create a Google Cloud account and project.</li>
       <li>Enable the Cloud Translation API.</li>
@@ -388,19 +389,19 @@ cd OCR-Translator</code></pre>
           <li>Click "Create credentials" → "API key".</li>
         </ul>
       </li>
-      <li>Copy your API key for use in the Game-Changing Translator settings.</li>
+      <li>Copy your API key only if you are using a legacy Google Translate path.</li>
     </ol>
 
-    <h3 id="deepl-api-optional">DeepL API (Optional):</h3>
+    <h3 id="deepl-api-optional">Legacy DeepL API (Optional):</h3>
     <ol>
       <li>Create a DeepL account at <a href="https://www.deepl.com/pro-api">deepl.com/pro-api</a>.</li>
       <li>Subscribe to a plan (including the free plan).</li>
       <li>Get your API key from the account dashboard.</li>
-      <li>Copy your API key for use in the Game-Changing Translator settings.</li>
+      <li>Copy your API key only if you are using a legacy DeepL path.</li>
     </ol>
 
-    <h3 id="marianmt-offline-translation">MarianMT (Offline Translation):</h3>
-    <p>This option requires no configuration as the models are downloaded automatically when first used. However, note that:</p>
+    <h3 id="marianmt-offline-translation">Legacy MarianMT (Offline Translation):</h3>
+    <p>This legacy option requires no configuration as the models are downloaded automatically when first used. However, note that:</p>
     <ul>
       <li>Models are ~500MB each.</li>
       <li>First-time translation with a new language pair will take time to download the model.</li>
@@ -451,11 +452,11 @@ cd OCR-Translator</code></pre>
           <td>Manual install</td>
         </tr>
         <tr>
-          <td><strong>Gemini API Integration</strong></td>
-          <td>Advanced (latest)</td>
+          <td><strong>Custom AI Integration</strong></td>
+          <td>Current path</td>
           <td>Basic</td>
           <td>Basic</td>
-          <td>Advanced (if updated)</td>
+          <td>Available with dependencies</td>
         </tr>
         <tr>
           <td><strong>MarianMT Performance</strong></td>
@@ -503,14 +504,14 @@ cd OCR-Translator</code></pre>
 
     <h3 id="for-python-source-version">For Python Source Version:</h3>
     <ul>
-      <li><strong>Python dependency errors</strong>: Make sure you're using Python 3.7+ and try reinstalling dependencies.</li>
+      <li><strong>Python dependency errors</strong>: Make sure you're using Python 3.9-3.12 and try reinstalling dependencies.</li>
       <li><strong>Import errors</strong>: Verify all packages installed correctly with <code>pip list</code>.</li>
     </ul>
 
     <h3 id="common-issues-all-versions">Common Issues (All Versions):</h3>
     <ul>
-      <li><strong>Translation API errors</strong>: Check your API keys and internet connection.</li>
-      <li><strong>MarianMT errors</strong>: Ensure you have sufficient disk space and a stable internet connection for model download.</li>
+      <li><strong>Translation API errors</strong>: Check your Custom AI base URL, API key, model, and internet connection.</li>
+      <li><strong>Legacy MarianMT errors</strong>: Ensure you have sufficient disk space and a stable internet connection for model download.</li>
       <li><strong>OCR not working</strong>: Verify Tesseract installation and path configuration.</li>
     </ul>
 
@@ -523,11 +524,11 @@ cd OCR-Translator</code></pre>
     <h3 id="choose-version-35-if">Choose <strong>Version 3.9.5 - CPU-Only</strong> if:</h3>
     <ul>
       <li>You want the latest features and improvements.</li>
-      <li>You prefer advanced Gemini API integration with superior translation quality.</li>
+      <li>You prefer Custom AI/OpenAI-compatible endpoints for online translation.</li>
       <li>You need comprehensive API cost tracking and monitoring.</li>
       <li>You want the smallest download size for a modern feature set.</li>
-      <li>You primarily use online translation services (Gemini, DeepL, Google Translate).</li>
-      <li>You don't mind using MarianMT as a reliable fallback rather than primary translation method.</li>
+      <li>You primarily use Custom AI profiles for online OCR and translation.</li>
+      <li>You don't mind leaving legacy MarianMT as a fallback/reference path rather than the primary translation method.</li>
     </ul>
 
     <h3 id="choose-version-2-gpu-if">Choose <strong>Version 2 - GPU-Supported</strong> if:</h3>
@@ -554,7 +555,7 @@ cd OCR-Translator</code></pre>
       <li>You're comfortable with Python development environments.</li>
     </ul>
 
-    <p>For most users, <strong>Version 3.9.5 - CPU-Only</strong> provides the best balance of modern features, translation quality, ease-of-use, and download size. Users who heavily rely on MarianMT offline translation and have compatible NVIDIA hardware may prefer Version 2 - GPU-Supported for maximum offline performance.</p>
+    <p>For most users, <strong>Version 3.9.5 - CPU-Only</strong> provides the best balance of modern Custom AI features, translation quality, ease-of-use, and download size. Users who heavily rely on legacy MarianMT offline translation and have compatible NVIDIA hardware may prefer Version 2 - GPU-Supported for maximum offline performance.</p>
 
   </body>
 </html>

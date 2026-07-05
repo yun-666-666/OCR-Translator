@@ -4,6 +4,8 @@ This guide provides information for developers who want to understand or modify 
 
 > **IMPORTANT NOTE**: This project is considered complete. I won't be accepting pull requests, feature enhancements, or implementing new features that someone else has coded. You are welcome to fork the repository and develop it further as your own project. The code is shared under the GPL licence for others to use, update, and modify as they wish, but I consider my work on it complete and won't be actively engaged in future development.
 
+> **Current runtime note**: This fork currently routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local Tesseract or Custom AI OCR. Legacy provider modules and CSV files for Gemini, OpenAI, DeepL, Google Translate, and MarianMT remain in the tree, but they should not be treated as the active UI/runtime translation path unless that code is explicitly re-enabled.
+
 ## Architecture Overview
 
 Game-Changing Translator follows a modular design with the following key components:
@@ -19,22 +21,24 @@ Game-Changing Translator follows a modular design with the following key compone
    - `CacheManager` - Manages translation file caching and persistence (Level 2)
    - `ConfigurationHandler` - Manages loading and saving of application settings
    - `DisplayManager` - Handles UI updates for overlays and debug information
-   - `GeminiModelsManager` - Manages Gemini model configurations from CSV file
-   - `OpenAIModelsManager` - Manages OpenAI model configurations from CSV file
+   - `GeminiModelsManager` - Legacy Gemini model configuration support retained for compatibility
+   - `OpenAIModelsManager` - Legacy OpenAI model configuration support retained for compatibility
    - `HotkeyHandler` - Manages keyboard shortcuts
    - `StatisticsHandler` - API usage statistics parsing, cost monitoring, and export functionality
    - `TranslationHandler` - Coordinates translation, OCR, and all provider systems
    - `UIInteractionHandler` - Manages UI interactions and settings
 
-3. **LLM Translation Provider Architecture (in `handlers/` directory)**
+3. **Legacy LLM Translation Provider Architecture (in `handlers/` directory)**
    - `LLMProviderBase` - Abstract base class for all LLM-based translation providers
    - `GeminiProvider` - Gemini-specific translation implementation
    - `OpenAIProvider` - OpenAI-specific translation implementation
+   - Current translation requests are routed through `custom_ai.py` and `TranslationHandler._custom_ai_translate()`.
 
-4. **OCR Provider Architecture (in `handlers/` directory)** *[New Architecture]*
+4. **Legacy OCR Provider Architecture (in `handlers/` directory)** *[New Architecture]*
    - `OCRProviderBase` - Abstract base class for all API-based OCR providers
    - `GeminiOCRProvider` - Gemini-specific OCR implementation with Gemini-powered text recognition
    - `OpenAIOCRProvider` - OpenAI-specific OCR implementation using GPT-enabled text recognition
+   - Current API OCR requests are routed through Custom AI OCR profiles.
 
 5. **Worker Threads (`worker_threads.py`)**
    - `run_capture_thread` - Captures screenshots from selected screen areas
@@ -306,9 +310,9 @@ This refactoring makes it straightforward to add new OCR providers while maintai
 The application features a sophisticated two-tier caching system that was redesigned to eliminate memory waste and fix cache clearing bugs:
 
 #### Level 1: Unified In-Memory Cache (`unified_translation_cache.py`)
-- **Single LRU cache** for all translation providers (Google, DeepL, MarianMT)
+- **Single LRU cache** for Custom AI translation requests and retained legacy providers
 - **Thread-safe design** with proper RLock() mechanisms for concurrent access
-- **Smart cache key generation** using MD5 hashes and provider-specific parameters
+- **Smart cache key generation** using MD5 hashes and provider-specific parameters, including Custom AI endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, prompt, line-break mode, and context
 - **Configurable cache size** (default: 1000 entries) with automatic LRU eviction
 - **Provider-specific clearing** allows selective cache management
 
@@ -318,12 +322,9 @@ The application features a sophisticated two-tier caching system that was redesi
 - ✅ **Consistent behavior** across all translation providers
 - ✅ **Better performance** with reduced cache management overhead
 
-#### Level 2: Persistent File Cache (Existing)
-- **`deepl_cache.txt`** - DeepL API translations persisted to disk
-- **`googletrans_cache.txt`** - Google Translate API translations persisted to disk  
-- **`gemini_cache.txt`** - Gemini API translations persisted to disk
-- **`openai_cache.txt`** - OpenAI API translations persisted to disk
-- **MarianMT has no file cache** (offline model, no API costs to optimize)
+#### Level 2: Persistent Cache
+- **Configured unified cache persistence** - Current Custom AI cache persistence when enabled
+- **Legacy text cache files** - Old DeepL, Google Translate, Gemini, and OpenAI cache files may remain on disk for compatibility or migration history, but they are not the current main translation cache path
 - **Preserved compatibility** - existing user cache files remain intact
 
 #### Cache Flow:
@@ -332,11 +333,11 @@ Translation Request
     ↓
 🚀 Level 1: Check Unified In-Memory Cache (fast)
     ↓ (cache miss)
-💾 Level 2: Check File Cache (for Google/DeepL/Gemini/OpenAI only)
+💾 Level 2: Check persistent Custom AI cache when configured
     ↓ (cache miss)
 🌐 Level 3: Call Translation API/Model
     ↓
-📝 Store in BOTH Level 1 (unified) AND Level 2 (file cache)
+📝 Store in unified memory cache and configured persistence
 ```
 
 #### Previous Problems Solved:
@@ -345,9 +346,15 @@ Translation Request
 - **Memory waste**: Multiple caches storing the same translations
 - **Thread safety issues**: Inconsistent locking mechanisms across different cache implementations
 
-### LLM Provider Architecture
+### Custom AI Provider Runtime
 
-The application features a modular LLM provider architecture that was introduced to separate concerns and improve maintainability for language model-based translation services (Gemini, OpenAI). This refactoring extracted LLM-specific functionality from the monolithic `TranslationHandler` into specialized provider classes.
+The current runtime translation provider is `custom_ai.py`. `TranslationHandler` resolves the active Custom AI profile, builds cache and in-flight keys from profile ID, canonical endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, custom prompt, line-break mode, and context, then sends requests through `CustomAIProvider`.
+
+`CustomAIProvider` supports OpenAI-compatible Chat Completions and Responses APIs, optional streaming latency mode, race/adaptive latency behavior, structured-output fallback, reasoning-effort fallback, request-level timeout overrides, and Custom AI OCR payloads with WebP, PNG, or JPEG MIME metadata.
+
+### Legacy LLM Provider Architecture
+
+The application still contains a modular LLM provider architecture that was introduced to separate concerns and improve maintainability for language model-based translation services (Gemini, OpenAI). These files are retained for compatibility and reference, but they are not the active translation path in this fork unless re-enabled.
 
 #### Architecture Overview
 
@@ -487,7 +494,7 @@ The system maintains multiple log levels for different use cases:
 - **Clipboard Copy**: Quick sharing with proper formatting for each language
 - **Automatic Currency Formatting**: Proper decimal separators and currency symbols for different locales
 
-### Gemini API Integration and Logging
+### Legacy Gemini API Integration and Logging
 
 The application features sophisticated Gemini API integration with comprehensive logging and cost tracking capabilities designed for the Gemini 3 Flash, Gemini 2.5 Flash-Lite, and other Gemini models.
 

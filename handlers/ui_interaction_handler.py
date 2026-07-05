@@ -140,6 +140,10 @@ class UIInteractionHandler:
             manage_grid(self.app.custom_ai_submit_interval_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_submit_interval_spinbox'):
             manage_grid(self.app.custom_ai_submit_interval_spinbox, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_format_label'):
+            manage_grid(self.app.custom_ai_ocr_image_format_label, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_format_combobox'):
+            manage_grid(self.app.custom_ai_ocr_image_format_combobox, show=is_custom)
         if hasattr(self.app, 'custom_ai_ocr_image_mode_label'):
             manage_grid(self.app.custom_ai_ocr_image_mode_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_ocr_image_mode_combobox'):
@@ -1308,6 +1312,11 @@ class UIInteractionHandler:
             cfg['custom_ai_latency_mode'] = self.app.get_custom_ai_latency_mode() if hasattr(self.app, 'get_custom_ai_latency_mode') else self.app.custom_ai_latency_mode_var.get()
             cfg['custom_ai_submit_interval_ms'] = str(
                 max(0, min(5000, int(self.app.custom_ai_submit_interval_ms_var.get())))
+            )
+            cfg['custom_ai_ocr_image_format'] = (
+                self.app.get_custom_ai_ocr_image_format()
+                if hasattr(self.app, 'get_custom_ai_ocr_image_format')
+                else self.app.custom_ai_ocr_image_format_var.get()
             )
             cfg['custom_ai_ocr_image_mode'] = (
                 self.app.get_custom_ai_ocr_image_mode()

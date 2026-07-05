@@ -9,7 +9,7 @@ This guide addresses common issues you might encounter when using Game-Changing 
 **Symptoms:** Error message or application immediately closes after startup.
 
 **Possible solutions:**
-- Verify you have Python 3.7 or newer installed
+- Verify you have Python 3.9 through 3.12 installed
 - Make sure all dependencies are installed: `pip install -r requirements.txt`
 - Check your Python environment if using a virtual environment
 - Try running the application from command line to see error messages: `python main.py`
@@ -53,26 +53,26 @@ This guide addresses common issues you might encounter when using Game-Changing 
 
 **Solutions:**
 - Make sure you've selected the correct source language for OCR
-- Verify the language pair is supported by your selected translation service
+- Verify the language pair is supported by your selected Custom AI profile or OpenAI-compatible endpoint
 - For non-Latin languages, ensure you've installed the appropriate Tesseract language data
 - Check that the CSV language files are properly installed in the application directory
-- If using MarianMT, ensure the model exists for your language pair
+- If you have explicitly re-enabled a legacy MarianMT path, ensure the model exists for your language pair
 
 ### API key errors
 
 **Symptoms:** "API key missing" or "Authentication error" messages.
 
 **Solutions:**
-- Verify you've entered the correct API key in the Settings tab
+- Verify you've entered the correct Custom AI API key and base URL in the Settings tab
 - Check if your API key has expired or reached its limit
-- If using Google Translate API, verify the API is enabled in your Google Cloud Console
-- If using DeepL API, check your subscription status
+- If you have explicitly re-enabled a legacy Google Translate API or DeepL API path, verify that provider's account and service status
 
-### MarianMT translation errors
+### Legacy MarianMT translation errors
 
 **Symptoms:** "MarianMT error" or "Translation error" messages.
 
 **Solutions:**
+- This applies only if you are using a legacy MarianMT path rather than the current Custom AI translation path
 - First-time use requires downloading models, which may take time
 - Ensure you have sufficient disk space for the model (~500MB per language pair)
 - Check your internet connection for initial model download
@@ -89,7 +89,8 @@ This guide addresses common issues you might encounter when using Game-Changing 
 - Decrease stability threshold if text is stable
 - Increase clear translation timeout to keep translations visible longer
 - Enable file caching to improve performance for repeated text
-- If using MarianMT, lower the beam search value for faster performance
+- If using a legacy MarianMT path, lower the beam search value for faster performance
+- If using Custom AI translation, check endpoint latency, model choice, and request timeout settings
 - For better performance, use a computer with more RAM or CPU cores
 
 ## Interface Issues
@@ -123,7 +124,7 @@ This guide addresses common issues you might encounter when using Game-Changing 
 **Solutions:**
 - Increase scan interval in Settings to reduce CPU usage
 - Use a smaller source capture area
-- If using MarianMT, lower the beam search value
+- If using a legacy MarianMT path, lower the beam search value
 - Close unnecessary applications to free up system resources
 - For MarianMT, offloading to GPU can improve performance (requires compatible GPU and proper setup)
 
@@ -135,7 +136,7 @@ This guide addresses common issues you might encounter when using Game-Changing 
 - Check translator_debug.log for error details
 - Update all dependencies to the latest versions
 - Restart your computer to free up resources
-- If using large MarianMT models, ensure you have sufficient RAM
+- If using large legacy MarianMT models, ensure you have sufficient RAM
 
 ## File-related Issues
 

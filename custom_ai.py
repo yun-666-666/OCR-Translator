@@ -49,6 +49,25 @@ CUSTOM_AI_STRUCTURED_OUTPUT_MODES = {
 }
 CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_TEXT = "text"
 CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_JSON_SCHEMA = "json_schema"
+CUSTOM_AI_REASONING_EFFORT_LOW = "low"
+CUSTOM_AI_REASONING_EFFORT_MEDIUM = "medium"
+CUSTOM_AI_REASONING_EFFORT_HIGH = "high"
+CUSTOM_AI_REASONING_EFFORT_ULTRA = "ultra"
+CUSTOM_AI_REASONING_EFFORT_NONE = "none"
+CUSTOM_AI_REASONING_EFFORTS = {
+    CUSTOM_AI_REASONING_EFFORT_LOW,
+    CUSTOM_AI_REASONING_EFFORT_MEDIUM,
+    CUSTOM_AI_REASONING_EFFORT_HIGH,
+    CUSTOM_AI_REASONING_EFFORT_ULTRA,
+}
+CUSTOM_AI_REASONING_EFFORT_CONTRACTS = {
+    *CUSTOM_AI_REASONING_EFFORTS,
+    CUSTOM_AI_REASONING_EFFORT_NONE,
+}
+CUSTOM_AI_REASONING_REQUEST_KINDS = {
+    "translation",
+    "ocr",
+}
 DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 15.0
 TRANSLATION_MIN_OUTPUT_TOKENS = 64
 TRANSLATION_MAX_OUTPUT_TOKENS = 2048
@@ -98,6 +117,20 @@ def normalize_custom_ai_structured_output_mode(mode):
     if mode in CUSTOM_AI_STRUCTURED_OUTPUT_MODES:
         return mode
     return CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
+
+
+def normalize_custom_ai_reasoning_effort(value):
+    effort = str(value or "").strip().lower().replace("-", "_")
+    if effort in CUSTOM_AI_REASONING_EFFORTS:
+        return effort
+    return CUSTOM_AI_REASONING_EFFORT_LOW
+
+
+def normalize_custom_ai_reasoning_request_kind(request_kind):
+    kind = str(request_kind or "").strip().lower()
+    if kind in CUSTOM_AI_REASONING_REQUEST_KINDS:
+        return kind
+    return ""
 
 
 def build_translation_json_schema():
@@ -368,9 +401,10 @@ class CustomAIProfileManager:
             api_key = str(profile.get("api_key") or "")
             if api_key and (profile.get("_api_key_plaintext_fallback") or not credential_ref):
                 serialized["api_key"] = api_key
-            reasoning_effort = str(profile.get("reasoning_effort") or profile.get("model_reasoning_effort") or "").strip()
-            if reasoning_effort:
-                serialized["reasoning_effort"] = reasoning_effort
+            serialized["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
+                profile.get("reasoning_effort")
+                or profile.get("model_reasoning_effort")
+            )
             serialized_profiles.append(serialized)
         return {
             "profiles": serialized_profiles,
@@ -461,9 +495,15 @@ class CustomAIProfileManager:
                 sanitized["api_key"] = self._resolve_profile_api_key(sanitized, credential_ref)
             else:
                 sanitized["api_key"] = ""
-            reasoning_effort = str(profile.get("reasoning_effort") or profile.get("model_reasoning_effort") or "").strip()
-            if reasoning_effort:
-                sanitized["reasoning_effort"] = reasoning_effort
+            reasoning_source = profile.get("reasoning_effort") or profile.get(
+                "model_reasoning_effort"
+            )
+            reasoning_effort = normalize_custom_ai_reasoning_effort(
+                reasoning_source
+            )
+            sanitized["reasoning_effort"] = reasoning_effort
+            if reasoning_source != reasoning_effort:
+                should_save = True
             profiles.append(sanitized)
         self.data["profiles"] = profiles
         self._repair_active_ids()
@@ -528,7 +568,7 @@ class CustomAIProfileManager:
         enabled=True,
         kind=None,
         wire_api=CUSTOM_AI_WIRE_API_CHAT_COMPLETIONS,
-        reasoning_effort="",
+        reasoning_effort=CUSTOM_AI_REASONING_EFFORT_LOW,
         structured_output_mode=CUSTOM_AI_STRUCTURED_OUTPUT_AUTO,
     ):
         if kind is not None:
@@ -548,9 +588,9 @@ class CustomAIProfileManager:
             ),
         }
         self._store_profile_api_key(profile, str(api_key), "write")
-        reasoning_effort = str(reasoning_effort or "").strip()
-        if reasoning_effort:
-            profile["reasoning_effort"] = reasoning_effort
+        profile["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
+            reasoning_effort
+        )
         self._validate_profile(profile)
         self.data["profiles"].append(profile)
         for active_kind in ACTIVE_PROFILE_KINDS:
@@ -593,11 +633,9 @@ class CustomAIProfileManager:
         profile["structured_output_mode"] = normalize_custom_ai_structured_output_mode(
             profile.get("structured_output_mode")
         )
-        reasoning_effort = str(profile.get("reasoning_effort") or "").strip()
-        if reasoning_effort:
-            profile["reasoning_effort"] = reasoning_effort
-        else:
-            profile.pop("reasoning_effort", None)
+        profile["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
+            profile.get("reasoning_effort")
+        )
         self._validate_profile(profile)
         self.save()
         return profile
@@ -652,6 +690,7 @@ class CustomAIProvider:
         self._rate_limit_backoff_counts = {}
         self._unsupported_output_limit_keys = set()
         self._unsupported_structured_output_keys = set()
+        self._unsupported_reasoning_effort_keys = set()
 
     def _get_http_client(self, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
@@ -842,6 +881,81 @@ class CustomAIProvider:
             str(profile.get("model") or "").strip(),
         )
 
+    def _reasoning_effort_mode(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
+        return normalize_custom_ai_reasoning_effort(
+            profile.get("reasoning_effort")
+            or profile.get("model_reasoning_effort")
+        )
+
+    def _reasoning_effort_payload_field(self, profile):
+        if self._uses_responses_api(profile if isinstance(profile, dict) else {}):
+            return "reasoning.effort"
+        return "reasoning_effort"
+
+    def _reasoning_effort_capability_key(
+        self,
+        profile,
+        request_kind,
+        effort,
+    ):
+        profile = profile if isinstance(profile, dict) else {}
+        return (
+            normalize_custom_ai_reasoning_request_kind(request_kind),
+            normalize_custom_ai_wire_api(profile.get("wire_api")),
+            self._canonical_wire_endpoint_cache_key(profile),
+            str(profile.get("model") or "").strip(),
+            self._reasoning_effort_payload_field(profile),
+            normalize_custom_ai_reasoning_effort(effort),
+        )
+
+    def _reasoning_effort_is_known_unsupported(
+        self,
+        profile,
+        request_kind,
+        effort,
+    ):
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        if not request_kind:
+            return False
+        capability_key = self._reasoning_effort_capability_key(
+            profile,
+            request_kind,
+            effort,
+        )
+        with self._capability_lock:
+            return capability_key in self._unsupported_reasoning_effort_keys
+
+    def _remember_unsupported_reasoning_effort(
+        self,
+        profile,
+        request_kind,
+        effort,
+    ):
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        if not request_kind:
+            return
+        capability_key = self._reasoning_effort_capability_key(
+            profile,
+            request_kind,
+            effort,
+        )
+        with self._capability_lock:
+            self._unsupported_reasoning_effort_keys.add(capability_key)
+
+    def reasoning_effort_request_contract(self, profile, request_kind):
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        if not request_kind:
+            return CUSTOM_AI_REASONING_EFFORT_NONE
+        effort = self._reasoning_effort_mode(profile)
+        if self._reasoning_effort_is_known_unsupported(
+            profile,
+            request_kind,
+            effort,
+        ):
+            return CUSTOM_AI_REASONING_EFFORT_NONE
+        return effort
+
     def _structured_output_is_known_unsupported(self, profile):
         capability_key = self._structured_output_capability_key(profile)
         with self._capability_lock:
@@ -890,6 +1004,65 @@ class CustomAIProvider:
             if isinstance(text_format, dict):
                 return text_format.get("type") == "json_schema"
         return False
+
+    def _payload_has_reasoning_effort(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        if "reasoning_effort" in payload:
+            return True
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict) and "effort" in reasoning:
+            return True
+        if "thinking" in payload:
+            return True
+        return False
+
+    def _payload_reasoning_effort(self, payload, profile):
+        if isinstance(payload, dict):
+            if "reasoning_effort" in payload:
+                return normalize_custom_ai_reasoning_effort(
+                    payload.get("reasoning_effort")
+                )
+            reasoning = payload.get("reasoning")
+            if isinstance(reasoning, dict) and "effort" in reasoning:
+                return normalize_custom_ai_reasoning_effort(
+                    reasoning.get("effort")
+                )
+        return self._reasoning_effort_mode(profile)
+
+    def _without_reasoning_effort(self, payload):
+        if not isinstance(payload, dict):
+            return payload
+        request_payload = dict(payload)
+        request_payload.pop("reasoning_effort", None)
+        request_payload.pop("thinking", None)
+        reasoning = request_payload.get("reasoning")
+        if isinstance(reasoning, dict) and "effort" in reasoning:
+            reasoning_copy = dict(reasoning)
+            reasoning_copy.pop("effort", None)
+            if reasoning_copy:
+                request_payload["reasoning"] = reasoning_copy
+            else:
+                request_payload.pop("reasoning", None)
+        return request_payload
+
+    def _apply_reasoning_effort_to_payload(
+        self,
+        profile,
+        payload,
+        request_kind,
+    ):
+        if not isinstance(payload, dict):
+            return payload
+        effort = self.reasoning_effort_request_contract(
+            profile,
+            request_kind,
+        )
+        if effort == CUSTOM_AI_REASONING_EFFORT_NONE:
+            return self._without_reasoning_effort(payload)
+        request_payload = dict(payload)
+        request_payload["reasoning_effort"] = effort
+        return request_payload
 
     def _without_structured_output(self, payload):
         if not isinstance(payload, dict):
@@ -1007,6 +1180,49 @@ class CustomAIProvider:
             )
         )
 
+    def _response_rejects_reasoning_effort(
+        self,
+        response,
+        profile,
+        url,
+        api_key,
+    ):
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code not in {400, 422}:
+            return False
+        error_message = self._response_error_message(
+            response,
+            url,
+            api_key,
+        ).lower()
+        if not any(
+            marker in error_message
+            for marker in (
+                "reasoning",
+                "reasoning_effort",
+                "thinking",
+                "effort",
+            )
+        ):
+            return False
+        return any(
+            marker in error_message
+            for marker in (
+                "unsupported parameter",
+                "unknown parameter",
+                "unknown field",
+                "invalid field",
+                "invalid parameter",
+                "unsupported",
+                "not supported",
+                "unrecognized",
+                "not permitted",
+                "not allowed",
+                "extra input",
+                "extra field",
+            )
+        )
+
     def _structured_output_error_message(self, profile):
         provider_name = (
             profile.get("name", "Custom AI")
@@ -1103,8 +1319,21 @@ class CustomAIProvider:
         profile,
         api_key,
         stream=False,
+        request_kind=None,
+        timeout_seconds=None,
     ):
         request_payload = payload
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        reasoning_effort = self._reasoning_effort_mode(profile)
+        if (
+            request_kind
+            and self._reasoning_effort_is_known_unsupported(
+                profile,
+                request_kind,
+                reasoning_effort,
+            )
+        ):
+            request_payload = self._without_reasoning_effort(request_payload)
         if (
             self._structured_output_mode(profile)
             == CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
@@ -1122,7 +1351,7 @@ class CustomAIProvider:
             kwargs = {
                 "headers": headers,
                 "json": current_payload,
-                "timeout": self.timeout,
+                "timeout": self._request_timeout(timeout_seconds),
             }
             if stream:
                 kwargs["stream"] = True
@@ -1130,7 +1359,32 @@ class CustomAIProvider:
 
         response = send(request_payload)
         output_limit_field = self._output_limit_field(profile)
+        pending_reasoning_memory = None
         for _attempt in range(3):
+            if (
+                request_kind
+                and self._payload_has_reasoning_effort(request_payload)
+                and self._response_rejects_reasoning_effort(
+                    response,
+                    profile,
+                    url,
+                    api_key,
+                )
+            ):
+                pending_reasoning_memory = (
+                    request_kind,
+                    self._payload_reasoning_effort(request_payload, profile),
+                )
+                request_payload = self._without_reasoning_effort(
+                    request_payload,
+                )
+                log_debug(
+                    "COMPAT: retrying Custom AI request without unsupported "
+                    "reasoning effort"
+                )
+                response = send(request_payload)
+                continue
+
             if (
                 self._payload_has_structured_output(request_payload)
                 and self._response_rejects_structured_output(
@@ -1178,6 +1432,15 @@ class CustomAIProvider:
                 response = send(request_payload)
                 continue
             break
+        if (
+            pending_reasoning_memory
+            and int(getattr(response, "status_code", 200) or 200) < 400
+        ):
+            self._remember_unsupported_reasoning_effort(
+                profile,
+                pending_reasoning_memory[0],
+                pending_reasoning_memory[1],
+            )
         return response
 
     def _response_has_retry_after(self, response):
@@ -1223,6 +1486,8 @@ class CustomAIProvider:
         profile,
         api_key,
         latency_mode,
+        request_kind=None,
+        timeout_seconds=None,
     ):
         current_client = http_client
         for attempt in range(2):
@@ -1234,6 +1499,8 @@ class CustomAIProvider:
                     payload,
                     profile,
                     api_key,
+                    request_kind=request_kind,
+                    timeout_seconds=timeout_seconds,
                 )
             except Exception as error:
                 if (
@@ -1392,6 +1659,17 @@ class CustomAIProvider:
     def _uses_responses_api(self, profile):
         return normalize_custom_ai_wire_api(profile.get("wire_api")) == CUSTOM_AI_WIRE_API_RESPONSES
 
+    def _request_timeout(self, timeout_seconds=None):
+        if timeout_seconds is None:
+            return self.timeout
+        try:
+            normalized = float(timeout_seconds)
+        except (TypeError, ValueError):
+            return self.timeout
+        if normalized <= 0:
+            return self.timeout
+        return normalized
+
     def _prepare_payload_for_profile(self, profile, payload, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE, stream=False):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         if not isinstance(payload, dict):
@@ -1482,17 +1760,14 @@ class CustomAIProvider:
                 deduped.append(candidate)
         return deduped
 
-    def _translation_max_tokens(self, text, profile=None):
+    def _translation_max_tokens(
+        self,
+        text,
+        profile=None,
+        reasoning_contract=None,
+    ):
         normalized = str(text or "").replace("<br>", "\n").strip()
         estimated = len(normalized) * TRANSLATION_OUTPUT_TOKENS_PER_CHAR
-        profile = profile if isinstance(profile, dict) else {}
-        reasoning_effort = str(
-            profile.get("reasoning_effort")
-            or profile.get("model_reasoning_effort")
-            or ""
-        ).strip()
-        if reasoning_effort:
-            return None
         return max(
             TRANSLATION_MIN_OUTPUT_TOKENS,
             min(TRANSLATION_MAX_OUTPUT_TOKENS, estimated),
@@ -1777,6 +2052,11 @@ class CustomAIProvider:
             ],
             "temperature": 0,
         }
+        payload = self._apply_reasoning_effort_to_payload(
+            profile,
+            payload,
+            "translation",
+        )
         messages = payload["messages"]
         if custom_prompt:
             messages.insert(
@@ -1786,7 +2066,14 @@ class CustomAIProvider:
                     "content": f"User custom instruction:\n{custom_prompt}",
                 },
             )
-        max_tokens = self._translation_max_tokens(text, profile)
+        max_tokens = self._translation_max_tokens(
+            text,
+            profile,
+            reasoning_contract=payload.get(
+                "reasoning_effort",
+                CUSTOM_AI_REASONING_EFFORT_NONE,
+            ),
+        )
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if structured_contract == CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_JSON_SCHEMA:
@@ -1859,12 +2146,30 @@ class CustomAIProvider:
                     text_format["strict"] = bool(json_schema.get("strict"))
                 response_payload["text"] = {"format": text_format}
 
-        reasoning_effort = str(profile.get("reasoning_effort") or profile.get("model_reasoning_effort") or "").strip()
+        reasoning_effort = normalize_custom_ai_reasoning_effort(
+            payload.get("reasoning_effort")
+        ) if "reasoning_effort" in payload else ""
         if reasoning_effort:
             response_payload["reasoning"] = {"effort": reasoning_effort}
         return response_payload
 
-    def build_ocr_payload(self, profile, image_data, source_lang, keep_linebreaks=False, image_detail="auto"):
+    def _normalize_image_mime_type(self, image_mime_type):
+        normalized = str(image_mime_type or "image/webp").strip().lower()
+        if normalized == "image/jpg":
+            normalized = "image/jpeg"
+        if normalized in {"image/webp", "image/png", "image/jpeg"}:
+            return normalized
+        return "image/webp"
+
+    def build_ocr_payload(
+        self,
+        profile,
+        image_data,
+        source_lang,
+        keep_linebreaks=False,
+        image_detail="auto",
+        image_mime_type="image/webp",
+    ):
         source_lang_hint = ""
         normalized_source_lang = str(source_lang or "").strip()
         if normalized_source_lang and normalized_source_lang.lower() != "auto":
@@ -1878,12 +2183,13 @@ class CustomAIProvider:
             prompt += "Keep line breaks. "
         prompt += "If there is no text in the image, return only: <EMPTY>."
 
-        data_url = "data:image/webp;base64," + base64.b64encode(image_data).decode("ascii")
+        mime_type = self._normalize_image_mime_type(image_mime_type)
+        data_url = f"data:{mime_type};base64," + base64.b64encode(image_data).decode("ascii")
         image_url = {"url": data_url}
         normalized_detail = normalize_api_ocr_image_detail(image_detail)
         if normalized_detail != "auto":
             image_url["detail"] = normalized_detail
-        return {
+        payload = {
             "model": profile["model"],
             "messages": [
                 {
@@ -1896,6 +2202,11 @@ class CustomAIProvider:
             ],
             "temperature": 0,
         }
+        return self._apply_reasoning_effort_to_payload(
+            profile,
+            payload,
+            "ocr",
+        )
 
     def _api_error_message(self, response_json):
         if not isinstance(response_json, dict):
@@ -2044,6 +2355,7 @@ class CustomAIProvider:
         keep_linebreaks=False,
         latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
         stream_callback=None,
+        timeout_seconds=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         payload = self.build_translation_payload(
@@ -2071,16 +2383,23 @@ class CustomAIProvider:
 
         def request(current_payload):
             if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM:
+                stream_kwargs = {
+                    "stream_callback": effective_stream_callback,
+                    "latency_mode": latency_mode,
+                }
+                if timeout_seconds is not None:
+                    stream_kwargs["timeout_seconds"] = timeout_seconds
                 return self._stream_post(
                     profile,
                     current_payload,
-                    stream_callback=effective_stream_callback,
-                    latency_mode=latency_mode,
+                    **stream_kwargs,
                 )
             return self._post(
                 profile,
                 current_payload,
                 latency_mode=latency_mode,
+                request_kind="translation",
+                timeout_seconds=timeout_seconds,
             )
 
         response_json, duration = request(payload)
@@ -2114,15 +2433,32 @@ class CustomAIProvider:
         )
         return result, self._extract_usage(response_json), duration
 
-    def recognize(self, profile, image_data, source_lang, keep_linebreaks=False, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE, image_detail="auto"):
+    def recognize(
+        self,
+        profile,
+        image_data,
+        source_lang,
+        keep_linebreaks=False,
+        latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
+        image_detail="auto",
+        image_mime_type="image/webp",
+        timeout_seconds=None,
+    ):
         payload = self.build_ocr_payload(
             profile,
             image_data,
             source_lang,
             keep_linebreaks=keep_linebreaks,
             image_detail=image_detail,
+            image_mime_type=image_mime_type,
         )
-        response_json, duration = self._post(profile, payload, latency_mode=latency_mode)
+        response_json, duration = self._post(
+            profile,
+            payload,
+            latency_mode=latency_mode,
+            request_kind="ocr",
+            timeout_seconds=timeout_seconds,
+        )
         result = self._parse_response_text(profile, response_json)
         if keep_linebreaks:
             result = result.replace("\n", "<br>")
@@ -2238,7 +2574,14 @@ class CustomAIProvider:
                     log_debug(f"LATENCY: custom_ai models GET retry for transient error at {url}: {type(e).__name__}")
         raise last_error
 
-    def _post(self, profile, payload, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
+    def _post(
+        self,
+        profile,
+        payload,
+        latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
+        request_kind="translation",
+        timeout_seconds=None,
+    ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
@@ -2247,7 +2590,15 @@ class CustomAIProvider:
             "Content-Type": "application/json",
         }
         if self._uses_responses_api(profile):
-            return self._responses_post(profile, payload, http_client, headers, latency_mode)
+            return self._responses_post(
+                profile,
+                payload,
+                http_client,
+                headers,
+                latency_mode,
+                request_kind=request_kind,
+                timeout_seconds=timeout_seconds,
+            )
         errors = []
         api_key = profile.get("api_key", "")
         request_payload, openrouter_latency_routing = self._prepare_payload_for_profile(profile, payload, latency_mode)
@@ -2268,6 +2619,8 @@ class CustomAIProvider:
                     profile,
                     api_key,
                     latency_mode,
+                    request_kind=request_kind,
+                    timeout_seconds=timeout_seconds,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -2317,7 +2670,16 @@ class CustomAIProvider:
             raise ValueError(errors[0])
         raise ValueError("Unable to call chat completions. Tried: " + "; ".join(errors))
 
-    def _responses_post(self, profile, payload, http_client, headers, latency_mode):
+    def _responses_post(
+        self,
+        profile,
+        payload,
+        http_client,
+        headers,
+        latency_mode,
+        request_kind=None,
+        timeout_seconds=None,
+    ):
         api_key = profile.get("api_key", "")
         self._raise_if_rate_limited(profile)
         request_payload = self.build_responses_payload_from_chat_payload(profile, payload, stream=False)
@@ -2339,6 +2701,8 @@ class CustomAIProvider:
                     profile,
                     api_key,
                     latency_mode,
+                    request_kind=request_kind,
+                    timeout_seconds=timeout_seconds,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -2384,7 +2748,15 @@ class CustomAIProvider:
             raise ValueError(errors[0])
         raise ValueError("Unable to call responses API. Tried: " + "; ".join(errors))
 
-    def _stream_post(self, profile, payload, stream_callback=None, latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM):
+    def _stream_post(
+        self,
+        profile,
+        payload,
+        stream_callback=None,
+        latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM,
+        request_kind=None,
+        timeout_seconds=None,
+    ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
@@ -2393,7 +2765,16 @@ class CustomAIProvider:
             "Content-Type": "application/json",
         }
         if self._uses_responses_api(profile):
-            return self._stream_responses_post(profile, payload, stream_callback=stream_callback, http_client=http_client, headers=headers, latency_mode=latency_mode)
+            return self._stream_responses_post(
+                profile,
+                payload,
+                stream_callback=stream_callback,
+                http_client=http_client,
+                headers=headers,
+                latency_mode=latency_mode,
+                request_kind=request_kind,
+                timeout_seconds=timeout_seconds,
+            )
         api_key = profile.get("api_key", "")
         request_payload, openrouter_latency_routing = self._prepare_payload_for_profile(
             profile,
@@ -2420,6 +2801,8 @@ class CustomAIProvider:
                     profile,
                     api_key,
                     stream=True,
+                    request_kind=request_kind,
+                    timeout_seconds=timeout_seconds,
                 )
                 status_code = int(getattr(response, "status_code", 200) or 200)
                 log_debug(
@@ -2464,7 +2847,17 @@ class CustomAIProvider:
             raise ValueError(errors[0])
         raise ValueError("Unable to call streaming chat completions. Tried: " + "; ".join(errors))
 
-    def _stream_responses_post(self, profile, payload, stream_callback=None, http_client=None, headers=None, latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM):
+    def _stream_responses_post(
+        self,
+        profile,
+        payload,
+        stream_callback=None,
+        http_client=None,
+        headers=None,
+        latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM,
+        request_kind=None,
+        timeout_seconds=None,
+    ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = http_client or self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
@@ -2492,6 +2885,8 @@ class CustomAIProvider:
                     profile,
                     api_key,
                     stream=True,
+                    request_kind=request_kind,
+                    timeout_seconds=timeout_seconds,
                 )
                 status_code = int(getattr(response, "status_code", 200) or 200)
                 log_debug(

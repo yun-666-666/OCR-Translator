@@ -6,9 +6,11 @@ from credential_store import create_default_credential_store
 from logger import log_debug
 from ocr_utils import (
     API_OCR_IMAGE_DETAIL_DEFAULT,
+    API_OCR_IMAGE_FORMAT_DEFAULT,
     API_OCR_IMAGE_MODE_DEFAULT,
     API_OCR_IMAGE_QUALITY_DEFAULT,
     normalize_api_ocr_image_detail,
+    normalize_api_ocr_image_format,
     normalize_api_ocr_image_mode,
     normalize_api_ocr_image_quality,
 )
@@ -76,6 +78,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_target_lang': 'en',
     'custom_ai_latency_mode': 'safe',
     'custom_ai_submit_interval_ms': '300',
+    'custom_ai_ocr_image_format': API_OCR_IMAGE_FORMAT_DEFAULT,
     'custom_ai_ocr_image_mode': API_OCR_IMAGE_MODE_DEFAULT,
     'custom_ai_ocr_image_quality': str(API_OCR_IMAGE_QUALITY_DEFAULT),
     'custom_ai_ocr_image_detail': API_OCR_IMAGE_DETAIL_DEFAULT,
@@ -220,6 +223,13 @@ def load_app_config():
         config_settings['custom_ai_latency_mode'] = 'safe'
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")
+
+    current_image_format = config_settings.get('custom_ai_ocr_image_format', API_OCR_IMAGE_FORMAT_DEFAULT)
+    normalized_image_format = normalize_api_ocr_image_format(current_image_format)
+    if normalized_image_format != current_image_format:
+        config_settings['custom_ai_ocr_image_format'] = normalized_image_format
+        settings_changed = True
+        log_debug(f"Config: Invalid Custom AI OCR image format '{current_image_format}' changed to '{normalized_image_format}'")
 
     current_image_mode = config_settings.get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
     normalized_image_mode = normalize_api_ocr_image_mode(current_image_mode)

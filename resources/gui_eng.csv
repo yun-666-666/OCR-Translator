@@ -67,7 +67,27 @@ custom_ai_latency_mode_none,None
 custom_ai_latency_mode_safe,Stable low latency
 custom_ai_latency_mode_stream,Streaming subtitles
 custom_ai_latency_mode_race,Fastest endpoint
+custom_ai_latency_mode_adaptive,Adaptive
 custom_ai_submit_interval_label,AI translation minimum interval (ms):
+ai_profile_structured_output_label,Structured output
+ai_profile_reasoning_effort_label,Reasoning effort
+custom_ai_reasoning_effort_low,Low
+custom_ai_reasoning_effort_medium,Medium
+custom_ai_reasoning_effort_high,High
+custom_ai_reasoning_effort_ultra,Ultra
+custom_ai_ocr_image_format_label,OCR image format:
+custom_ai_ocr_image_format_webp,WebP
+custom_ai_ocr_image_format_png,PNG
+custom_ai_ocr_image_format_jpeg,JPEG
+custom_ai_ocr_image_mode_label,OCR image mode:
+custom_ai_ocr_image_mode_lossless,Lossless WebP
+custom_ai_ocr_image_mode_balanced,Balanced WebP
+custom_ai_ocr_image_mode_grayscale,Small grayscale WebP
+custom_ai_ocr_image_quality_label,OCR image quality:
+custom_ai_ocr_image_detail_label,OCR image detail:
+custom_ai_ocr_image_detail_auto,Auto
+custom_ai_ocr_image_detail_low,Low
+custom_ai_ocr_image_detail_high,High
 models_file_label,MarianMT Model List:
 beam_size_label,Translation Beam Size (MarianMT):
 tesseract_path_label,Tesseract Path:

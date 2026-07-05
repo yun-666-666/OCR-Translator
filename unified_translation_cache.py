@@ -88,6 +88,9 @@ class UnifiedTranslationCache:
                     "reasoning_effort": str(
                         kwargs.get("reasoning_effort") or ""
                     ).strip().lower(),
+                    "structured_output_contract": str(
+                        kwargs.get("structured_output_contract") or "text"
+                    ).strip().lower(),
                     "custom_prompt": kwargs.get("custom_prompt", ""),
                     "keep_linebreaks": bool(kwargs.get("keep_linebreaks", False)),
                     "context": list(kwargs.get("context", ()) or ()),

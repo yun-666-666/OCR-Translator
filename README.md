@@ -10,7 +10,7 @@ This fork was modified with assistance from GPT-5.5.
 
 Game-Changing Translator is a desktop OCR translation application that captures text from a selected screen area, runs OCR, and translates the result in real time. It can display translations in a floating overlay, which makes it useful for games, videos, PDFs, and other applications where text cannot be copied directly.
 
-The application supports Tesseract OCR, AI-assisted OCR providers, offline MarianMT translation, and API-backed translation providers such as DeepL, Google Translate, Gemini, OpenAI, and custom OpenAI-compatible endpoints.
+The current runtime path supports local Tesseract OCR or Custom AI OCR, then translates through Custom AI profiles that point at OpenAI-compatible endpoints. Older provider modules and resource files remain in the repository for compatibility/history, but the active UI/runtime path is centered on Custom AI profiles rather than the legacy built-in DeepL, Google, Gemini, OpenAI, or MarianMT translation routes.
 
 ## Core Features
 
@@ -18,8 +18,8 @@ The application supports Tesseract OCR, AI-assisted OCR providers, offline Maria
 - Real-time OCR and translation loop
 - Floating translation overlay
 - Tesseract OCR support
-- AI OCR and AI translation provider support
-- Offline MarianMT translation support
+- Custom AI OCR with WebP, PNG, and JPEG image payload options
+- Custom AI/OpenAI-compatible endpoint translation
 - Translation caching to reduce repeated API calls
 - Custom prompt and custom provider profile support
 - Configurable appearance, font, colour, and transparency
@@ -31,7 +31,7 @@ The application supports Tesseract OCR, AI-assisted OCR providers, offline Maria
 
 - Windows
 - [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
-- Python 3.7 or newer
+- Python 3.9-3.12
 
 ### Setup
 
@@ -67,6 +67,8 @@ The application supports Tesseract OCR, AI-assisted OCR providers, offline Maria
 Do not commit real API keys or personal provider profiles. The runtime config file `ocr_translator_config.ini`, API logs, debug logs, cache files, and local backup folders are intentionally ignored by Git.
 
 Use `ocr_translator_config.example.ini` as a clean starting point for a publishable configuration template.
+
+Custom AI profile settings are the main way to configure online OCR and translation providers. The legacy provider files are kept in the tree, but new runtime work should treat `custom_ai` plus `unified_translation_cache.py` as the primary implementation path.
 
 ## Licence
 

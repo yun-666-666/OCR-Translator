@@ -9,6 +9,7 @@ import time
 from functools import lru_cache
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from logger import log_debug
 
 
@@ -467,6 +468,27 @@ API_OCR_IMAGE_MODES = (
 API_OCR_IMAGE_QUALITY_DEFAULT = 85
 API_OCR_IMAGE_DETAILS = ('auto', 'low', 'high')
 API_OCR_IMAGE_DETAIL_DEFAULT = 'auto'
+API_OCR_IMAGE_FORMAT_WEBP = 'webp'
+API_OCR_IMAGE_FORMAT_PNG = 'png'
+API_OCR_IMAGE_FORMAT_JPEG = 'jpeg'
+API_OCR_IMAGE_FORMAT_DEFAULT = API_OCR_IMAGE_FORMAT_WEBP
+API_OCR_IMAGE_FORMATS = (
+    API_OCR_IMAGE_FORMAT_WEBP,
+    API_OCR_IMAGE_FORMAT_PNG,
+    API_OCR_IMAGE_FORMAT_JPEG,
+)
+API_OCR_IMAGE_MIME_TYPES = {
+    API_OCR_IMAGE_FORMAT_WEBP: 'image/webp',
+    API_OCR_IMAGE_FORMAT_PNG: 'image/png',
+    API_OCR_IMAGE_FORMAT_JPEG: 'image/jpeg',
+}
+
+
+@dataclass(frozen=True)
+class EncodedApiOcrImage:
+    data: bytes
+    mime_type: str
+    image_format: str
 
 
 def _normalize_capture_backend(backend):
@@ -793,6 +815,15 @@ def normalize_api_ocr_image_detail(detail):
     return API_OCR_IMAGE_DETAIL_DEFAULT
 
 
+def normalize_api_ocr_image_format(image_format):
+    normalized = str(image_format or API_OCR_IMAGE_FORMAT_DEFAULT).strip().lower()
+    if normalized == 'jpg':
+        normalized = API_OCR_IMAGE_FORMAT_JPEG
+    if normalized in API_OCR_IMAGE_FORMATS:
+        return normalized
+    return API_OCR_IMAGE_FORMAT_DEFAULT
+
+
 def _flatten_transparency_for_api_ocr(pil_image):
     Image = _pil_image()
     if pil_image.mode in ('RGBA', 'LA'):
@@ -818,17 +849,23 @@ def _prepare_image_for_api_ocr(pil_image, mode):
     return image
 
 
-def encode_image_for_api_ocr(pil_image, mode=API_OCR_IMAGE_MODE_DEFAULT, quality=API_OCR_IMAGE_QUALITY_DEFAULT):
-    """Encode a PIL image for Custom AI OCR API upload."""
+def encode_image_for_api_ocr_payload(
+    pil_image,
+    mode=API_OCR_IMAGE_MODE_DEFAULT,
+    quality=API_OCR_IMAGE_QUALITY_DEFAULT,
+    image_format=API_OCR_IMAGE_FORMAT_DEFAULT,
+):
+    """Encode a PIL image for Custom AI OCR API upload with MIME metadata."""
     if pil_image is None:
         raise ValueError("Cannot encode an empty OCR image")
 
     normalized_mode = normalize_api_ocr_image_mode(mode)
     normalized_quality = normalize_api_ocr_image_quality(quality)
+    normalized_format = normalize_api_ocr_image_format(image_format)
     image = _prepare_image_for_api_ocr(pil_image, normalized_mode)
     buffer = io.BytesIO()
 
-    if normalized_mode == API_OCR_IMAGE_MODE_LOSSLESS_WEBP:
+    if normalized_format == API_OCR_IMAGE_FORMAT_WEBP and normalized_mode == API_OCR_IMAGE_MODE_LOSSLESS_WEBP:
         image.save(
             buffer,
             format='WebP',
@@ -836,18 +873,49 @@ def encode_image_for_api_ocr(pil_image, mode=API_OCR_IMAGE_MODE_DEFAULT, quality
             method=0,
             exact=True,
         )
-    else:
+    elif normalized_format == API_OCR_IMAGE_FORMAT_WEBP:
         image.save(
             buffer,
             format='WebP',
             quality=normalized_quality,
             method=3,
         )
+    elif normalized_format == API_OCR_IMAGE_FORMAT_PNG:
+        image.save(
+            buffer,
+            format='PNG',
+            optimize=True,
+        )
+    else:
+        image.save(
+            buffer,
+            format='JPEG',
+            quality=normalized_quality,
+            optimize=True,
+        )
 
-    webp_bytes = buffer.getvalue()
-    if not webp_bytes:
+    image_bytes = buffer.getvalue()
+    if not image_bytes:
         raise ValueError("Encoded OCR image payload is empty")
-    return webp_bytes
+    return EncodedApiOcrImage(
+        data=image_bytes,
+        mime_type=API_OCR_IMAGE_MIME_TYPES[normalized_format],
+        image_format=normalized_format,
+    )
+
+
+def encode_image_for_api_ocr(
+    pil_image,
+    mode=API_OCR_IMAGE_MODE_DEFAULT,
+    quality=API_OCR_IMAGE_QUALITY_DEFAULT,
+):
+    """Encode a PIL image for Custom AI OCR API upload as bytes."""
+    return encode_image_for_api_ocr_payload(
+        pil_image,
+        mode=mode,
+        quality=quality,
+        image_format=API_OCR_IMAGE_FORMAT_WEBP,
+    ).data
 
 
 def build_capture_signature(image_hash, region, backend):

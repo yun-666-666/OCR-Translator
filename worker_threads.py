@@ -23,9 +23,10 @@ from ocr_utils import (
     build_capture_signature, build_ocr_frame_cache_key,
     get_tesseract_ocr_config, resolve_tessdata_dir_from_tesseract_path,
     TesseractOcrUnavailableError, CaptureBackendSelector,
-    API_OCR_IMAGE_DETAIL_DEFAULT, API_OCR_IMAGE_MODE_DEFAULT,
+    API_OCR_IMAGE_DETAIL_DEFAULT, API_OCR_IMAGE_FORMAT_DEFAULT, API_OCR_IMAGE_MODE_DEFAULT,
     API_OCR_IMAGE_QUALITY_DEFAULT, normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_mode, normalize_api_ocr_image_quality,
+    normalize_api_ocr_image_format, normalize_api_ocr_image_mode,
+    normalize_api_ocr_image_quality,
 )
 from translation_utils import (
     is_translation_error_result,
@@ -156,6 +157,43 @@ def _get_api_ocr_cache_model_key(app, provider_name):
     base_url = str(profile.get("base_url") or "").strip().rstrip("/")
     model = str(profile.get("model") or "").strip()
     return f"{provider_key}|ocr_profile={profile_id}|{base_url}|{model}"
+
+
+def _normalize_custom_ai_ocr_reasoning_contract(value):
+    normalized = str(value or 'low').strip().lower().replace('-', '_')
+    if normalized in {'low', 'medium', 'high', 'ultra', 'none'}:
+        return normalized
+    return 'low'
+
+
+def _get_custom_ai_ocr_reasoning_contract(app):
+    profiles = getattr(app, 'custom_ai_profiles', None)
+    if profiles is None:
+        return None
+    try:
+        profile = profiles.get_active_profile("ocr")
+    except Exception as e:
+        log_debug(f"Could not resolve active OCR profile for API OCR reasoning cache key: {type(e).__name__} - {e}")
+        return 'none'
+    if not profile:
+        return 'none'
+
+    provider = getattr(
+        getattr(app, 'translation_handler', None),
+        'custom_ai_provider',
+        None,
+    )
+    if provider is not None and hasattr(provider, 'reasoning_effort_request_contract'):
+        try:
+            return _normalize_custom_ai_ocr_reasoning_contract(
+                provider.reasoning_effort_request_contract(profile, "ocr")
+            )
+        except Exception as e:
+            log_debug(f"Could not resolve Custom AI OCR reasoning contract: {type(e).__name__} - {e}")
+
+    return _normalize_custom_ai_ocr_reasoning_contract(
+        profile.get("reasoning_effort") or profile.get("model_reasoning_effort")
+    )
 
 
 def _normalize_local_ocr_submit_text(text_to_translate):
@@ -741,7 +779,7 @@ def _route_local_ocr_candidate_for_translation(
     return "pending"
 
 
-def _get_api_ocr_cache_mode_key(app):
+def _get_api_ocr_cache_mode_key(app, provider_name=None):
     keep_linebreaks_var = getattr(app, 'keep_linebreaks_var', None)
     parts = ['api']
     if keep_linebreaks_var is None:
@@ -757,14 +795,25 @@ def _get_api_ocr_cache_mode_key(app):
         hasattr(app, attr)
         for attr in (
             'custom_ai_ocr_image_mode_var',
+            'custom_ai_ocr_image_format_var',
             'custom_ai_ocr_image_quality_var',
             'custom_ai_ocr_image_detail_var',
             'get_custom_ai_ocr_image_mode',
+            'get_custom_ai_ocr_image_format',
             'get_custom_ai_ocr_image_quality',
             'get_custom_ai_ocr_image_detail',
         )
     )
     if has_image_payload_settings:
+        try:
+            image_format = app.get_custom_ai_ocr_image_format()
+        except Exception:
+            image_format_var = getattr(app, 'custom_ai_ocr_image_format_var', None)
+            try:
+                image_format = image_format_var.get() if image_format_var is not None else API_OCR_IMAGE_FORMAT_DEFAULT
+            except Exception:
+                image_format = API_OCR_IMAGE_FORMAT_DEFAULT
+
         try:
             image_mode = app.get_custom_ai_ocr_image_mode()
         except Exception:
@@ -793,10 +842,17 @@ def _get_api_ocr_cache_mode_key(app):
                 image_detail = API_OCR_IMAGE_DETAIL_DEFAULT
 
         parts.extend([
+            f"image_format={normalize_api_ocr_image_format(image_format)}",
             f"image_mode={normalize_api_ocr_image_mode(image_mode)}",
             f"image_quality={normalize_api_ocr_image_quality(image_quality)}",
             f"image_detail={normalize_api_ocr_image_detail(image_detail)}",
         ])
+
+    provider_key = str(provider_name or '').strip().lower()
+    if provider_key == 'custom_ai' or (provider_name is None and hasattr(app, 'custom_ai_profiles')):
+        reasoning_contract = _get_custom_ai_ocr_reasoning_contract(app)
+        if reasoning_contract is not None:
+            parts.append(f"reasoning_effort={reasoning_contract}")
 
     return "|".join(parts)
 
@@ -1352,7 +1408,7 @@ def run_api_ocr(app, screenshot_pil):
                 frame_hash,
                 cache_model_key,
                 source_lang,
-                _get_api_ocr_cache_mode_key(app),
+                _get_api_ocr_cache_mode_key(app, provider_name),
                 screenshot_pil.size,
                 region_origin=region_origin,
             )
@@ -1371,10 +1427,28 @@ def run_api_ocr(app, screenshot_pil):
             log_debug(f"Max concurrent OCR calls ({app.max_concurrent_ocr_calls}) reached, skipping {provider_name} OCR before image conversion")
             return
         
-        webp_image_data = app.convert_to_webp_for_api(screenshot_pil)
-        if not webp_image_data:
-            log_debug(f"Failed to convert image to WebP for {provider_name} OCR")
+        encoded_image = None
+        metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
+        if callable(metadata_encoder):
+            encoded_image = metadata_encoder(screenshot_pil)
+        else:
+            legacy_bytes = app.convert_to_webp_for_api(screenshot_pil)
+            if legacy_bytes:
+                encoded_image = type(
+                    "EncodedApiOcrImageCompat",
+                    (),
+                    {
+                        "data": legacy_bytes,
+                        "mime_type": "image/webp",
+                        "image_format": "webp",
+                    },
+                )()
+
+        if not encoded_image or not getattr(encoded_image, 'data', None):
+            log_debug(f"Failed to convert image for {provider_name} OCR")
             return
+        image_data = encoded_image.data
+        image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
 
         app.batch_sequence_counter += 1
         sequence_number = app.batch_sequence_counter
@@ -1384,7 +1458,7 @@ def run_api_ocr(app, screenshot_pil):
         try:
             app.ocr_thread_pool.submit(
                 process_api_ocr_async,
-                app, webp_image_data, source_lang, sequence_number, provider_name, ocr_cache_key
+                app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key, image_mime_type
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
@@ -1394,7 +1468,7 @@ def run_api_ocr(app, screenshot_pil):
     except Exception as e:
         log_debug(f"Error starting API OCR batch: {type(e).__name__} - {e}")
 
-def process_api_ocr_async(app, webp_image_data, source_lang, sequence_number, provider_name, ocr_cache_key=None):
+def process_api_ocr_async(app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key=None, image_mime_type="image/webp"):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
@@ -1408,7 +1482,11 @@ def process_api_ocr_async(app, webp_image_data, source_lang, sequence_number, pr
         log_debug(f"Processing {provider_name} OCR batch {sequence_number}")
         
         ocr_start_time = time.monotonic()
-        ocr_result = app.translation_handler.perform_ocr(webp_image_data, source_lang)
+        ocr_result = app.translation_handler.perform_ocr(
+            image_data,
+            source_lang,
+            image_mime_type=image_mime_type,
+        )
         _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
         
         log_debug(f"{provider_name} OCR batch {sequence_number} completed: '{ocr_result}', scheduling response")

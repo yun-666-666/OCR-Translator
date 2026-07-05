@@ -128,7 +128,7 @@ class TranslationHandler:
                 pass
         return error_text
 
-    def perform_ocr(self, image_data, source_lang):
+    def perform_ocr(self, image_data, source_lang, image_mime_type="image/webp"):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
         profile = self.app.custom_ai_profiles.get_active_profile("ocr")
         if not profile:
@@ -149,6 +149,7 @@ class TranslationHandler:
                     if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
                     else "auto"
                 ),
+                image_mime_type=image_mime_type,
             )
             self._log_custom_short_call("ocr", profile, result, usage, duration)
             return result
@@ -405,12 +406,13 @@ Call Duration: {call_duration:.3f} seconds
                 stream_callback=stream_callback,
                 translation_sequence=translation_sequence,
                 latency_mode=latency_mode,
+                timeout_seconds=timeout_seconds,
             )
         except Exception as e:
             log_debug(f"Translation exception: {e}")
             return f"Translation error: {str(e)}"
 
-    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None):
+    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None, timeout_seconds=None):
         cleaned_text_main = text_content_main.strip() if text_content_main else ""
         if not cleaned_text_main or self.is_placeholder_text(cleaned_text_main):
             return None
@@ -429,6 +431,7 @@ Call Duration: {call_duration:.3f} seconds
             stream_callback=stream_callback,
             translation_sequence=translation_sequence,
             latency_mode=latency_mode,
+            timeout_seconds=timeout_seconds,
         )
 
     def get_cached_translation_for_display(self, text_content):
@@ -819,6 +822,7 @@ Call Duration: {call_duration:.3f} seconds
         stream_callback=None,
         translation_sequence=None,
         latency_mode=None,
+        timeout_seconds=None,
     ):
         with self._custom_context_lock:
             context_generation = self._custom_context_generation
@@ -879,6 +883,7 @@ Call Duration: {call_duration:.3f} seconds
                     context,
                     keep_linebreaks,
                     custom_prompt=custom_prompt,
+                    timeout_seconds=timeout_seconds,
                 )
             else:
                 translated_api_text, usage, duration = self.custom_ai_provider.translate(
@@ -891,6 +896,7 @@ Call Duration: {call_duration:.3f} seconds
                     keep_linebreaks=keep_linebreaks,
                     latency_mode=latency_mode,
                     stream_callback=stream_callback if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM else None,
+                    timeout_seconds=timeout_seconds,
                 )
                 winning_profile = profile
                 cache_params = self._cache_params_for_profile(
@@ -965,6 +971,7 @@ Call Duration: {call_duration:.3f} seconds
         context,
         keep_linebreaks,
         custom_prompt=None,
+        timeout_seconds=None,
     ):
         if custom_prompt is None:
             custom_prompt = getattr(self.app, 'custom_prompt_text', '')
@@ -982,6 +989,7 @@ Call Duration: {call_duration:.3f} seconds
                         context=context,
                         keep_linebreaks=keep_linebreaks,
                         latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                        timeout_seconds=timeout_seconds,
                     )
                 )
             except Exception as error:
@@ -1031,6 +1039,7 @@ Call Duration: {call_duration:.3f} seconds
                         context=context,
                         keep_linebreaks=keep_linebreaks,
                         latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                        timeout_seconds=timeout_seconds,
                     )
                 except Exception:
                     self._release_custom_ai_race_profile(identity)
@@ -1150,10 +1159,11 @@ Call Duration: {call_duration:.3f} seconds
             str(profile.get("model") or "").strip(),
             normalize_custom_ai_wire_api(profile.get("wire_api")),
             str(
-                profile.get("reasoning_effort")
-                or profile.get("model_reasoning_effort")
-                or ""
-            ).strip().lower(),
+                self.custom_ai_provider.reasoning_effort_request_contract(
+                    profile,
+                    "translation",
+                )
+            ),
             normalize_custom_ai_structured_output_mode(
                 profile.get("structured_output_mode")
             ),
@@ -1246,11 +1256,12 @@ Call Duration: {call_duration:.3f} seconds
             "wire_api": str(
                 profile.get("wire_api") or "chat_completions"
             ).strip().lower(),
-            "reasoning_effort": str(
-                profile.get("reasoning_effort")
-                or profile.get("model_reasoning_effort")
-                or ""
-            ).strip().lower(),
+            "reasoning_effort": (
+                self.custom_ai_provider.reasoning_effort_request_contract(
+                    profile,
+                    "translation",
+                )
+            ),
             "structured_output_contract": structured_output_contract,
             "custom_prompt": custom_prompt,
             "keep_linebreaks": keep_linebreaks,

@@ -7,6 +7,21 @@ from logger import log_debug
 from ui_elements import create_scrollable_tab
 from modern_ui import style_tk_text_widget
 import tkinter.font as tkFont
+from custom_ai import (
+    CUSTOM_AI_REASONING_EFFORT_HIGH,
+    CUSTOM_AI_REASONING_EFFORT_LOW,
+    CUSTOM_AI_REASONING_EFFORT_MEDIUM,
+    CUSTOM_AI_REASONING_EFFORT_ULTRA,
+    normalize_custom_ai_reasoning_effort,
+)
+
+
+CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
+    (CUSTOM_AI_REASONING_EFFORT_LOW, "custom_ai_reasoning_effort_low", "Low"),
+    (CUSTOM_AI_REASONING_EFFORT_MEDIUM, "custom_ai_reasoning_effort_medium", "Medium"),
+    (CUSTOM_AI_REASONING_EFFORT_HIGH, "custom_ai_reasoning_effort_high", "High"),
+    (CUSTOM_AI_REASONING_EFFORT_ULTRA, "custom_ai_reasoning_effort_ultra", "Ultra"),
+)
 
 def filter_model_values(models, query):
     """Return model names containing the query, preserving the original order."""
@@ -54,6 +69,41 @@ def _find_selected_custom_ai_profile(app):
     return next((profile for profile in profile_list if profile.get("name") == current_name), None)
 
 
+def _reasoning_effort_display_value(app, effort):
+    normalized = normalize_custom_ai_reasoning_effort(effort)
+    ui_lang = getattr(app, "ui_lang", None)
+    for value, label_key, fallback in CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS:
+        if value == normalized:
+            if ui_lang is not None:
+                return ui_lang.get_label(label_key, fallback)
+            return fallback
+    return "Low"
+
+
+def _reasoning_effort_display_values(app):
+    return [
+        _reasoning_effort_display_value(app, effort)
+        for effort, _label_key, _fallback in CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS
+    ]
+
+
+def _reasoning_effort_value_from_display(app, display_value):
+    raw_value = str(display_value or "").strip()
+    normalized_raw = raw_value.lower().replace("-", "_")
+    if normalized_raw in {
+        CUSTOM_AI_REASONING_EFFORT_LOW,
+        CUSTOM_AI_REASONING_EFFORT_MEDIUM,
+        CUSTOM_AI_REASONING_EFFORT_HIGH,
+        CUSTOM_AI_REASONING_EFFORT_ULTRA,
+    }:
+        return normalize_custom_ai_reasoning_effort(raw_value)
+
+    for effort, _label_key, _fallback in CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS:
+        if raw_value == _reasoning_effort_display_value(app, effort):
+            return effort
+    return normalize_custom_ai_reasoning_effort(raw_value)
+
+
 def build_custom_ai_profile_values_from_form(app):
     values = {
         "name": _read_var(app, "ai_profile_name_var", strip=True),
@@ -67,12 +117,19 @@ def build_custom_ai_profile_values_from_form(app):
         wire_api = str(selected_profile.get("wire_api") or "").strip()
         if wire_api:
             values["wire_api"] = wire_api
-        reasoning_effort = str(selected_profile.get("reasoning_effort") or selected_profile.get("model_reasoning_effort") or "").strip()
-        if reasoning_effort:
-            values["reasoning_effort"] = reasoning_effort
+        values["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
+            selected_profile.get("reasoning_effort")
+            or selected_profile.get("model_reasoning_effort")
+        )
         structured_output_mode = str(selected_profile.get("structured_output_mode") or "").strip()
         if structured_output_mode:
             values["structured_output_mode"] = structured_output_mode
+    reasoning_var = getattr(app, "ai_profile_reasoning_effort_var", None)
+    if reasoning_var is not None:
+        values["reasoning_effort"] = _reasoning_effort_value_from_display(
+            app,
+            reasoning_var.get(),
+        )
     structured_var = getattr(app, "ai_profile_structured_output_mode_var", None)
     if structured_var is not None:
         values["structured_output_mode"] = _read_var(
@@ -1162,6 +1219,9 @@ def create_settings_tab(app):
     app.ai_profile_key_var = tk.StringVar()
     app.ai_profile_model_var = tk.StringVar()
     app.ai_profile_structured_output_mode_var = tk.StringVar(value="auto")
+    app.ai_profile_reasoning_effort_var = tk.StringVar(
+        value=_reasoning_effort_display_value(app, CUSTOM_AI_REASONING_EFFORT_LOW)
+    )
     app.ai_profile_model_values = []
 
     def get_profile_by_name(name):
@@ -1211,6 +1271,12 @@ def create_settings_tab(app):
             app.ai_profile_key_var.set("")
             app.ai_profile_model_var.set("")
             app.ai_profile_structured_output_mode_var.set("auto")
+            app.ai_profile_reasoning_effort_var.set(
+                _reasoning_effort_display_value(
+                    app,
+                    CUSTOM_AI_REASONING_EFFORT_LOW,
+                )
+            )
             return
         app.ai_profile_selected_id = profile["id"]
         app.ai_profile_name_var.set(profile.get("name", ""))
@@ -1224,6 +1290,13 @@ def create_settings_tab(app):
             structured_output_mode = "auto"
         app.ai_profile_structured_output_mode_var.set(
             structured_output_mode
+        )
+        app.ai_profile_reasoning_effort_var.set(
+            _reasoning_effort_display_value(
+                app,
+                profile.get("reasoning_effort")
+                or profile.get("model_reasoning_effort"),
+            )
         )
 
     def on_profile_name_selected(event=None):
@@ -1373,8 +1446,30 @@ def create_settings_tab(app):
         sticky="w",
     )
 
+    ttk.Label(
+        app.ai_profiles_frame,
+        text=app.ui_lang.get_label(
+            "ai_profile_reasoning_effort_label",
+            "Reasoning effort",
+        ),
+    ).grid(row=5, column=0, padx=5, pady=3, sticky="w")
+    app.ai_profile_reasoning_effort_combobox = ttk.Combobox(
+        app.ai_profiles_frame,
+        textvariable=app.ai_profile_reasoning_effort_var,
+        values=_reasoning_effort_display_values(app),
+        state="readonly",
+        width=12,
+    )
+    app.ai_profile_reasoning_effort_combobox.grid(
+        row=5,
+        column=1,
+        padx=5,
+        pady=3,
+        sticky="w",
+    )
+
     profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
-    profile_buttons.grid(row=0, column=2, rowspan=5, padx=(10, 8), pady=6, sticky="nsew")
+    profile_buttons.grid(row=0, column=2, rowspan=6, padx=(10, 8), pady=6, sticky="nsew")
     ttk.Button(
         profile_buttons,
         text=app.ui_lang.get_label("add_btn", "Add"),
@@ -1514,11 +1609,49 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
+    app.custom_ai_ocr_image_format_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("custom_ai_ocr_image_format_label", "OCR image format:"),
+    )
+    app.custom_ai_ocr_image_format_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
+    custom_ai_ocr_image_format_options = [
+        ("webp", app.ui_lang.get_label("custom_ai_ocr_image_format_webp", "WebP")),
+        ("png", app.ui_lang.get_label("custom_ai_ocr_image_format_png", "PNG")),
+        ("jpeg", app.ui_lang.get_label("custom_ai_ocr_image_format_jpeg", "JPEG")),
+    ]
+    format_display_by_value = {value: display for value, display in custom_ai_ocr_image_format_options}
+    format_value_by_display = {display: value for value, display in custom_ai_ocr_image_format_options}
+    app.custom_ai_ocr_image_format_display_var = tk.StringVar(
+        value=format_display_by_value.get(
+            app.custom_ai_ocr_image_format_var.get(),
+            format_display_by_value["webp"],
+        )
+    )
+    app.custom_ai_ocr_image_format_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.custom_ai_ocr_image_format_display_var,
+        values=[display for _, display in custom_ai_ocr_image_format_options],
+        width=25,
+        state='readonly',
+    )
+    app.custom_ai_ocr_image_format_combobox.grid(row=20, column=1, padx=5, pady=5, sticky="ew")
+
+    def on_custom_ai_ocr_image_format_changed(event):
+        selected_display = app.custom_ai_ocr_image_format_display_var.get()
+        app.custom_ai_ocr_image_format_var.set(format_value_by_display.get(selected_display, "webp"))
+        if app._fully_initialized:
+            app.save_settings()
+
+    app.custom_ai_ocr_image_format_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_custom_ai_ocr_image_format_changed),
+    )
+
     app.custom_ai_ocr_image_mode_label = ttk.Label(
         frame,
         text=app.ui_lang.get_label("custom_ai_ocr_image_mode_label", "OCR image mode:"),
     )
-    app.custom_ai_ocr_image_mode_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_mode_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
     custom_ai_ocr_image_mode_options = [
         ("lossless_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_lossless", "Lossless WebP")),
         ("balanced_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_balanced", "Balanced WebP")),
@@ -1539,7 +1672,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_ocr_image_mode_combobox.grid(row=20, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_ocr_image_mode_combobox.grid(row=21, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_ocr_image_mode_changed(event):
         selected_display = app.custom_ai_ocr_image_mode_display_var.get()
@@ -1556,7 +1689,7 @@ def create_settings_tab(app):
         frame,
         text=app.ui_lang.get_label("custom_ai_ocr_image_quality_label", "OCR image quality:"),
     )
-    app.custom_ai_ocr_image_quality_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_quality_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
     app.custom_ai_ocr_image_quality_spinbox = ttk.Spinbox(
         frame,
         from_=1,
@@ -1567,7 +1700,7 @@ def create_settings_tab(app):
         validate="key",
         validatecommand=(validate_custom_ai_ocr_image_quality, '%P'),
     )
-    app.custom_ai_ocr_image_quality_spinbox.grid(row=21, column=1, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_quality_spinbox.grid(row=22, column=1, padx=5, pady=5, sticky="w")
 
     def on_custom_ai_ocr_image_quality_focus_out(event):
         try:
@@ -1586,7 +1719,7 @@ def create_settings_tab(app):
         frame,
         text=app.ui_lang.get_label("custom_ai_ocr_image_detail_label", "OCR image detail:"),
     )
-    app.custom_ai_ocr_image_detail_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_detail_label.grid(row=23, column=0, padx=5, pady=5, sticky="w")
     custom_ai_ocr_image_detail_options = [
         ("auto", app.ui_lang.get_label("custom_ai_ocr_image_detail_auto", "Auto")),
         ("low", app.ui_lang.get_label("custom_ai_ocr_image_detail_low", "Low")),
@@ -1607,7 +1740,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_ocr_image_detail_combobox.grid(row=22, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_ocr_image_detail_combobox.grid(row=23, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_ocr_image_detail_changed(event):
         selected_display = app.custom_ai_ocr_image_detail_display_var.get()
@@ -1620,7 +1753,7 @@ def create_settings_tab(app):
         create_combobox_handler_wrapper(on_custom_ai_ocr_image_detail_changed),
     )
 
-    row_offset = 23
+    row_offset = 24
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),

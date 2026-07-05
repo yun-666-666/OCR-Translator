@@ -172,7 +172,7 @@
           <li><a href="#step-3-run-the-application">Krok 3: Uruchamianie aplikacji</a></li>
         </ul>
       </li>
-      <li><a href="#translation-service-configuration-both-installation-methods">Konfiguracja usług tłumaczenia (obie metody instalacji)</a></li>
+      <li><a href="#translation-service-configuration-both-installation-methods">Konfiguracja Custom AI i starszych usług (obie metody instalacji)</a></li>
       <li><a href="#version-comparison">Porównanie wersji</a></li>
       <li><a href="#troubleshooting">Rozwiązywanie problemów</a></li>
       <li><a href="#which-version-should-i-choose">Którą wersję wybrać?</a></li>
@@ -184,8 +184,8 @@
       <li>Minimum 4 GB RAM (zalecane 8 GB)</li>
       <li><strong>Wersja skompilowana</strong>: 1–4 GB wolnego miejsca na dysku (w zależności od wybranej wersji)</li>
       <li><strong>Wersja Python</strong>: 500 MB wolnego miejsca na dysku</li>
-      <li>Dodatkowe miejsce na modele MarianMT w przypadku korzystania z tłumaczenia offline (ok. 500 MB na parę językową)</li>
-      <li>Dostęp do Internetu (do usług tłumaczenia opartych na API oraz początkowego pobierania modeli MarianMT)</li>
+      <li>Dodatkowe miejsce na starsze modele MarianMT w przypadku korzystania z tłumaczenia offline (ok. 500 MB na parę językową)</li>
+      <li>Dostęp do Internetu (do usług Custom AI / endpointów zgodnych z OpenAI oraz początkowego pobierania starszych modeli MarianMT)</li>
     </ul>
 
     <h2 id="installation-method-1-compiled-version-recommended-for-most-users">Metoda instalacji 1: wersja skompilowana (zalecana dla większości użytkowników)</h2>
@@ -196,10 +196,10 @@
 
     <h4 id="version-370-cpu-only-260mb-latest"><strong>Wersja 3.9.5 - wyłącznie CPU</strong> (ok. 260 MB) <em>[Najnowsza wersja]</em></h4>
     <ul>
-      <li><strong>Najlepsza dla</strong>: wszystkich użytkowników poszukujących najnowszych funkcji z zaawansowanym systemem Gemini Translation + Gemini OCR</li>
+      <li><strong>Najlepsza dla</strong>: wszystkich użytkowników poszukujących najnowszych funkcji ze ścieżką Custom AI translation + Custom AI OCR</li>
       <li><strong>Wymagania</strong>: dowolny nowoczesny procesor</li>
       <li><strong>Rozmiar pliku do pobrania</strong>: ok. 260 MB (1 plik)</li>
-      <li><strong>Uwaga</strong>: Tłumaczenia offline MarianMT pozostają dostępne jako niezawodna opcja zapasowa, choć zaawansowany system Gemini zapewnia lepsze rezultaty w większości zastosowań</li>
+      <li><strong>Uwaga</strong>: starsze tłumaczenia offline MarianMT pozostają w pakiecie dla kompatybilności, ale bieżąca ścieżka online koncentruje się na profilach Custom AI</li>
     </ul>
 
     <h4 id="version-2-legacy-versions">Wersja 2 - wersje starsze</h4>
@@ -302,7 +302,7 @@
 
     <h3 id="prerequisites">Wymagania wstępne</h3>
     <ul>
-      <li>Python 3.7 lub nowszy</li>
+      <li>Python 3.9-3.12</li>
       <li>Git (opcjonalnie, do klonowania repozytorium)</li>
     </ul>
 
@@ -348,8 +348,8 @@ cd OCR-Translator</code></pre>
         <p>Zainstalowane zostaną:</p>
         <ul>
           <li>podstawowe zależności (numpy, opencv, tesserocr, Pillow, pyautogui);</li>
-          <li>klienty API tłumaczeń (Google Cloud Translate, DeepL);</li>
-          <li>opcjonalne biblioteki tłumaczenia offline MarianMT (transformers, torch, sentencepiece);</li>
+          <li>obsługę profili Custom AI / endpointów zgodnych z OpenAI przez klienta HTTP Requests;</li>
+          <li>obsługę nakładki RTL PySide6 i skrótów klawiaturowych;</li>
           <li>obsługa skrótów klawiszowych.</li>
         </ul>
       </li>
@@ -376,9 +376,10 @@ cd OCR-Translator</code></pre>
 
     <hr>
 
-    <h2 id="translation-service-configuration-both-installation-methods">Konfiguracja usług tłumaczenia (obie metody instalacji)</h2>
+    <h2 id="translation-service-configuration-both-installation-methods">Konfiguracja Custom AI i starszych usług (obie metody instalacji)</h2>
+    <p>Bieżąca ścieżka działania używa profili Custom AI z endpointami zgodnymi z OpenAI do OCR i tłumaczenia online. Bazowy URL, klucz API i model skonfiguruj w ustawieniach profili Custom AI aplikacji. Poniższe informacje o Google, DeepL i MarianMT są starszym odniesieniem dla użytkowników, którzy jawnie ponownie włączają te ścieżki w forku.</p>
 
-    <h3 id="google-cloud-translation-api-optional">Google Cloud Translation API (opcjonalnie):</h3>
+    <h3 id="google-cloud-translation-api-optional">Starszy Google Cloud Translation API (opcjonalnie):</h3>
     <ol>
       <li>Utwórz konto Google Cloud i projekt.</li>
       <li>Włącz Cloud Translation API.</li>
@@ -388,19 +389,19 @@ cd OCR-Translator</code></pre>
           <li>Kliknij <strong>Create credentials</strong> → <strong>API key</strong>.</li>
         </ul>
       </li>
-      <li>Skopiuj klucz API do użycia w ustawieniach <strong>Game-Changing Translator</strong>.</li>
+      <li>Skopiuj klucz API tylko wtedy, gdy używasz starszej ścieżki Google Translate.</li>
     </ol>
 
-    <h3 id="deepl-api-optional">DeepL API (opcjonalnie):</h3>
+    <h3 id="deepl-api-optional">Starszy DeepL API (opcjonalnie):</h3>
     <ol>
       <li>Utwórz konto DeepL na <a href="https://www.deepl.com/pro-api">deepl.com/pro-api</a>.</li>
       <li>Wybierz plan (włącznie z planem darmowym).</li>
       <li>Pobierz klucz API z panelu konta.</li>
-      <li>Skopiuj klucz API do użycia w ustawieniach <strong>Game-Changing Translator</strong>.</li>
+      <li>Skopiuj klucz API tylko wtedy, gdy używasz starszej ścieżki DeepL.</li>
     </ol>
 
-    <h3 id="marianmt-offline-translation">MarianMT (tłumaczenie offline):</h3>
-    <p>Ta opcja nie wymaga konfiguracji, ponieważ modele pobierane są automatycznie przy pierwszym użyciu. Należy jednak pamiętać o następujących kwestiach:</p>
+    <h3 id="marianmt-offline-translation">Starszy MarianMT (tłumaczenie offline):</h3>
+    <p>Ta starsza opcja nie wymaga konfiguracji, ponieważ modele pobierane są automatycznie przy pierwszym użyciu. Należy jednak pamiętać o następujących kwestiach:</p>
     <ul>
       <li>Każdy model ma około 500 MB.</li>
       <li>Pierwsze tłumaczenie w nowej parze językowej potrwa trochę dłużej z uwagi na pobieranie modelu.</li>
@@ -451,11 +452,11 @@ cd OCR-Translator</code></pre>
           <td>Instalacja ręczna</td>
         </tr>
         <tr>
-          <td><strong>Integracja Gemini API</strong></td>
-          <td>Zaawansowana (najnowsza)</td>
+          <td><strong>Integracja Custom AI</strong></td>
+          <td>Bieżąca ścieżka</td>
           <td>Podstawowa</td>
           <td>Podstawowa</td>
-          <td>Zaawansowana (po aktualizacji)</td>
+          <td>Dostępna z zależnościami</td>
         </tr>
         <tr>
           <td><strong>Działanie MarianMT</strong></td>
@@ -503,14 +504,14 @@ cd OCR-Translator</code></pre>
 
     <h3 id="for-python-source-version">Wersja źródłowa Python:</h3>
     <ul>
-      <li><strong>Błędy zależności Python</strong>: upewnij się, że używasz Pythona 3.7+ i spróbuj ponownie zainstalować zależności.</li>
+      <li><strong>Błędy zależności Python</strong>: upewnij się, że używasz Pythona 3.9-3.12 i spróbuj ponownie zainstalować zależności.</li>
       <li><strong>Błędy importu</strong>: sprawdź, czy wszystkie pakiety zostały poprawnie zainstalowane poleceniem <code>pip list</code>.</li>
     </ul>
 
     <h3 id="common-issues-all-versions">Typowe problemy (wszystkie wersje):</h3>
     <ul>
-      <li><strong>Błędy API tłumaczenia</strong>: sprawdź klucze API i połączenie internetowe.</li>
-      <li><strong>Błędy MarianMT</strong>: sprawdź, czy masz wystarczająco miejsca na dysku i stabilne połączenie internetowe do pobierania modeli.</li>
+      <li><strong>Błędy API tłumaczenia</strong>: sprawdź bazowy URL Custom AI, klucz API, model i połączenie internetowe.</li>
+      <li><strong>Błędy starszego MarianMT</strong>: sprawdź, czy masz wystarczająco miejsca na dysku i stabilne połączenie internetowe do pobierania modeli.</li>
       <li><strong>OCR nie działa</strong>: sprawdź instalację Tesseract i konfigurację ścieżki.</li>
     </ul>
 
@@ -523,11 +524,11 @@ cd OCR-Translator</code></pre>
     <h3 id="choose-version-35-if">Wybierz <strong>wersję 3.9.5 – tylko CPU</strong>, jeśli:</h3>
     <ul>
       <li>chcesz mieć najnowsze funkcje i usprawnienia,</li>
-      <li>preferujesz zaawansowaną integrację z Gemini API zapewniającą wyższą jakość tłumaczeń,</li>
+      <li>preferujesz profile Custom AI / endpointy zgodne z OpenAI do tłumaczenia online,</li>
       <li>potrzebujesz kompleksowego śledzenia i monitorowania kosztów API,</li>
       <li>zależy ci na najmniejszym rozmiarze pliku do pobrania i nowoczesnym zestawie funkcji,</li>
-      <li>głównie korzystasz z internetowych usług tłumaczenia (Gemini, DeepL, Google Translate),</li>
-      <li>nie przeszkadza ci używanie MarianMT jako niezawodnej opcji zapasowej zamiast głównej metody tłumaczenia.</li>
+      <li>głównie korzystasz z profili Custom AI do OCR i tłumaczenia online,</li>
+      <li>nie przeszkadza ci pozostawienie starszego MarianMT jako ścieżki zapasowej/referencyjnej zamiast głównej metody tłumaczenia.</li>
     </ul>
 
     <h3 id="choose-version-2-gpu-if">Wybierz <strong>wersję 2 – z obsługą GPU</strong>, jeśli:</h3>
@@ -554,7 +555,7 @@ cd OCR-Translator</code></pre>
       <li>czujesz się swobodnie w środowiskach programistycznych Python.</li>
     </ul>
 
-    <p>Większości użytkowników <strong>Wersja 3.9.5 - wyłącznie CPU</strong> zapewnia najlepszy kompromis między nowoczesnymi funkcjami, jakością tłumaczeń, prostotą obsługi i rozmiarem pliku do pobrania. Użytkownicy, którzy intensywnie korzystają z tłumaczeń offline MarianMT i posiadają kompatybilny sprzęt NVIDIA, mogą preferować Wersję 2 - z obsługą GPU dla maksymalnej wydajności offline.</p>
+    <p>Większości użytkowników <strong>Wersja 3.9.5 - wyłącznie CPU</strong> zapewnia najlepszy kompromis między nowoczesnymi funkcjami Custom AI, jakością tłumaczeń, prostotą obsługi i rozmiarem pliku do pobrania. Użytkownicy, którzy intensywnie korzystają ze starszego tłumaczenia offline MarianMT i posiadają kompatybilny sprzęt NVIDIA, mogą preferować Wersję 2 - z obsługą GPU dla maksymalnej wydajności offline.</p>
 
   </body>
 </html>

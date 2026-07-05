@@ -295,12 +295,12 @@
       <a href="#settings-configuration">Settings Configuration</a>
     </li>
     <li>
-      <a href="#ai-translation-and-ocr">AI-Powered Translation and OCR</a>
+      <a href="#ai-translation-and-ocr">Custom AI and Legacy AI Reference</a>
       <ul>
-        <li><a href="#gemini-ocr-premium-text-recognition">Gemini OCR - Premium Text Recognition</a></li>
-        <li><a href="#gemini-api-cost-effective-and-context-aware-translation">Gemini API - Cost-Effective and
+        <li><a href="#gemini-ocr-premium-text-recognition">Legacy Gemini OCR - Premium Text Recognition</a></li>
+        <li><a href="#gemini-api-cost-effective-and-context-aware-translation">Legacy Gemini API - Cost-Effective and
             Context-Aware Translation</a></li>
-        <li><a href="#openai-api-a-flexible-alternative">OpenAI API - A Flexible Alternative for Translation and OCR</a>
+        <li><a href="#openai-api-a-flexible-alternative">Legacy OpenAI API - A Flexible Alternative for Translation and OCR</a>
         </li>
       </ul>
     </li>
@@ -308,11 +308,11 @@
       <a href="#api-usage-monitoring">API Usage Monitoring</a>
     </li>
     <li>
-      <a href="#other-translation-methods">Other Translation Methods</a>
+      <a href="#other-translation-methods">Legacy Translation Methods</a>
       <ul>
-        <li><a href="#marianmt-offline-and-free">MarianMT (offline and free)</a></li>
-        <li><a href="#deepl-api">DeepL API</a></li>
-        <li><a href="#google-translate-api">Google Translate API</a></li>
+        <li><a href="#marianmt-offline-and-free">Legacy MarianMT (offline and free)</a></li>
+        <li><a href="#deepl-api">Legacy DeepL API</a></li>
+        <li><a href="#google-translate-api">Legacy Google Translate API</a></li>
       </ul>
     </li>
     <li>
@@ -330,6 +330,9 @@
     of your screen, performs optical character recognition (OCR), and translates the text in real-time. With its
     floating overlay windows, you can position the translation anywhere on your screen, making it perfect for
     translating games, videos, PDFs, or any application with text that you can't easily copy and paste.</p>
+  <p>The current runtime path uses local Tesseract OCR or Custom AI OCR, then translates through Custom AI profiles that
+    point at OpenAI-compatible endpoints. Older Gemini, OpenAI, DeepL, Google Translate, and MarianMT sections are kept
+    as legacy reference material for forks or explicitly re-enabled code paths.</p>
   <h2 id="getting-started">Getting Started</h2>
   <h3 id="requirements">Requirements</h3>
   <p>Before using <strong>Game-Changing Translator</strong> , ensure you have:</p>
@@ -403,32 +406,29 @@
   <p>Here you can configure:</p>
   <ol>
     <li>
-      <strong>Translation Model</strong> – Select between different translation providers (Gemini, OpenAI, MarianMT,
-      DeepL, etc.).
+      <strong>Translation Model</strong> – use Custom AI profiles for OpenAI-compatible translation endpoints.
     </li>
     <li>
-      <strong>OCR Model</strong> – Choose between <strong>Tesseract (offline)</strong>, <strong>Gemini API
-        (online)</strong>, or <strong>OpenAI API (online)</strong>.
+      <strong>OCR Model</strong> – choose between <strong>Tesseract (offline)</strong> or <strong>Custom AI OCR
+        (online)</strong>.
     </li>
     <li>
-      <strong>Source Language</strong> – The language to detect with OCR and translate from (DeepL and Google Translate
-      only).
+      <strong>Source Language</strong> – the OCR/translation source language for Tesseract or Custom AI.
     </li>
     <li>
-      <strong>Target Language</strong> – The language to translate into (DeepL and Google Translate only).
+      <strong>Target Language</strong> – the Custom AI translation target language.
     </li>
     <li>
-      <strong>API Key</strong> – For DeepL, Google Translate, Gemini, or OpenAI.
+      <strong>API Key</strong> – configured on Custom AI model profiles.
     </li>
     <li>
-      <strong>Quality</strong> – Choose between <strong>Classic</strong> (faster) or <strong>Next-gen</strong>
-      (potentially better quality) models (DeepL only).
+      <strong>Quality</strong> – legacy provider setting retained in the interface but not part of the current Custom AI path.
     </li>
     <li>
-      <strong>MarianMT Options</strong> – For offline neural translation (MarianMT-specific).
+      <strong>MarianMT Options</strong> – legacy settings retained for compatibility.
     </li>
     <li>
-      <strong>Gemini/OpenAI Options</strong> – For cost-effective AI translation with context awareness.
+      <strong>Custom AI Options</strong> – profile, latency, reasoning, OCR image format, and OpenAI-compatible endpoint settings.
     </li>
     <li>
       <strong>Tesseract Path</strong> – Path to the Tesseract OCR executable (Tesseract only).
@@ -487,7 +487,7 @@
     <img src="screenshots/Prompt_en.png" alt="Custom Prompt Tab" />
   </p>
   <p>This tab allows you to define a <strong>custom instruction</strong> that will be added to every translation
-    request sent to <strong>Gemini</strong>, <strong>OpenAI</strong>, and <strong>DeepL</strong> models. It is particularly useful for:</p>
+    request sent through <strong>Custom AI</strong> profiles. Legacy Gemini, OpenAI, and DeepL prompt paths may remain in older code or forks. It is particularly useful for:</p>
   <ol>
     <li>
       <strong>Defining Style</strong> – Instructing the AI to use a specific tone (e.g., "Use very informal language"
@@ -530,14 +530,14 @@
   <p>
     <img src="screenshots/API_Stats_en.png" alt="API Usage Tab" />
   </p>
-  <p>This tab provides comprehensive monitoring and analysis of your API usage for services like Gemini and OpenAI,
-    including:</p>
+  <p>This tab provides comprehensive monitoring and analysis of Custom AI usage, with legacy Gemini/OpenAI labels retained
+    where older logs or forks still use them, including:</p>
   <ol>
     <li>
-      <strong>Gemini/OpenAI OCR Statistics</strong> – Cost tracking and performance metrics for OCR operations.
+      <strong>Custom AI / legacy OCR statistics</strong> – Cost tracking and performance metrics for OCR operations.
     </li>
     <li>
-      <strong>Gemini/OpenAI Translation Statistics</strong> – Word counts, costs, and efficiency metrics for
+      <strong>Custom AI / legacy translation statistics</strong> – Word counts, costs, and efficiency metrics for
       translations.
     </li>
     <li>
@@ -621,25 +621,26 @@
       <p>
         <strong>Translation Model</strong>:
       </p>
-      <p>A variety of AI and traditional translation services are available:</p>
+      <p>The current runtime path uses Custom AI profiles for OpenAI-compatible translation endpoints. Legacy provider
+        settings may still appear in older configuration sections, but they are not the main active path in this fork.</p>
       <ul>
         <li>
-          <strong>Gemini models (various)</strong> – Multiple Gemini AI models. Requires API key, cost-effective AI
-          translation with context awareness.
+          <strong>Custom AI profiles</strong> – OpenAI-compatible translation endpoints with profile-specific model,
+          prompt, latency, reasoning, and structured-output settings.
         </li>
         <li>
-          <strong>OpenAI models (various)</strong> – Multiple OpenAI models (GPT-5, GPT-4.1). Provides a flexible
-          alternative for AI-powered translation.
+          <strong>Custom AI OCR</strong> – Online OCR through the selected Custom AI profile, with WebP, PNG, and JPEG
+          image payload options.
         </li>
         <li>
-          <strong>MarianMT (offline and free)</strong> – No API key needed, downloads models on first use, works
-          offline.
+          <strong>Legacy MarianMT</strong> – Retained in documentation and older code paths, but not the current main
+          translation route.
         </li>
         <li>
-          <strong>DeepL API</strong> – Requires API key, high-quality translations.
+          <strong>Legacy DeepL API</strong> – Retained for historical reference.
         </li>
         <li>
-          <strong>Google Translate API</strong> – Requires API key, supports many languages.
+          <strong>Legacy Google Translate API</strong> – Retained for historical reference.
         </li>
       </ul>
     </li>
@@ -669,21 +670,21 @@
       <p>
         <strong>OCR Model</strong>:
       </p>
-      <p>Choose between online AI-powered models and a traditional offline engine:</p>
+      <p>Choose between Custom AI OCR, local Tesseract, and retained legacy OCR providers:</p>
       <ul>
         <li>
-          <strong>Gemini models (various)</strong> – Premium AI-powered OCR with superior accuracy for challenging
-          subtitles. Requires API key and internet connection.
+          <strong>Custom AI OCR profiles</strong> – OpenAI-compatible online OCR with WebP, PNG, and JPEG image payload
+          options.
         </li>
         <li>
-          <strong>OpenAI models (various)</strong> - An alternative AI-powered OCR provider using models like GPT-4o,
-          offering very good quality.
+          <strong>Legacy Gemini/OpenAI OCR models</strong> – Retained for historical reference or explicitly re-enabled
+          forks.
         </li>
         <li>
           <strong>Tesseract (offline)</strong> – Traditional OCR engine, free and works offline. Recommended for clear
           subtitles with good contrast.
         </li>
-        <li>When using Gemini or OpenAI OCR, you can select different models for OCR and translation operations.</li>
+        <li>When using Custom AI OCR, select the OCR profile and image format in the Custom AI settings.</li>
       </ul>
     </li>
     <li>
@@ -824,8 +825,7 @@
         <strong>File Caching Options (API Translation Services Only)</strong>:
       </p>
       <ul>
-        <li>Enables saving translations to disk files to reduce API calls for Gemini, OpenAI, Google Translate, and
-          DeepL.</li>
+        <li>Enables configured persistent caching for Custom AI translations and retained legacy provider caches.</li>
         <li>The <strong>Clear File Caches</strong> button removes all cached translations stored in files.</li>
       </ul>
     </li>
@@ -859,16 +859,17 @@
     </li>
   </ol>
 
-  <h2 id="ai-translation-and-ocr">AI-Powered Translation and OCR</h2>
+  <h2 id="ai-translation-and-ocr">Custom AI and Legacy AI Reference</h2>
 
-  <p>Game-Changing Translator integrates state-of-the-art Large Language Models (LLMs) from Google (Gemini) and OpenAI
-    (GPT) to provide advanced capabilities for both OCR and translation. This gives you the choice between the highly
-    recommended, cost-effective Gemini models and the flexible, powerful alternatives from OpenAI.</p>
+  <p>The current runtime path uses Custom AI profiles backed by OpenAI-compatible endpoints for online OCR and
+    translation. The Gemini and OpenAI sections below are retained as legacy reference material for historical behavior
+    or forks that explicitly re-enable those provider paths.</p>
 
   <div class="disclaimer-note">
     <div class="disclaimer-note-icon">⚠️</div>
     <div class="disclaimer-note-content">
-      <strong>Model Deprecation Notice:</strong> Gemini 2.0 models are considered legacy as of March 2026. The
+      <strong>Legacy model note:</strong> The following Gemini recommendations apply only to the legacy Gemini path.
+      Gemini 2.0 models are considered legacy as of March 2026. The
       currently recommended combination for the best quality-to-cost ratio is <strong>Gemini 3.1 Flash-Lite (Low) for OCR</strong> and <strong>Gemini 3 Flash for translation</strong> (for premium quality) or <strong>Gemini 3.1 Flash-Lite for translation</strong> (for high efficiency).<br><br>
       <strong>Current pricing as of March 2026 (per 1 million tokens):</strong><br>
       • <strong>Gemini 3.1 Flash-Lite:</strong> $0.25 input / $1.50 output<br>
@@ -876,7 +877,7 @@
     </div>
   </div>
 
-  <h3 id="gemini-ocr-premium-text-recognition">Gemini OCR - Premium Text Recognition</h2>
+  <h3 id="gemini-ocr-premium-text-recognition">Legacy Gemini OCR - Premium Text Recognition</h2>
 
     <p>Gemini OCR represents a revolutionary advancement in text recognition technology, providing superior accuracy for
       challenging subtitle scenarios where traditional OCR engines like Tesseract struggle. This premium feature
@@ -995,7 +996,7 @@
         identical text displayed over several seconds.</li>
     </ul>
 
-    <h2 id="gemini-api-cost-effective-and-context-aware-translation">Gemini API - Cost-Effective and Context-Aware
+    <h2 id="gemini-api-cost-effective-and-context-aware-translation">Legacy Gemini API - Cost-Effective and Context-Aware
       Translation</h2>
 
     <p>Google's advanced Gemini models represent a breakthrough in AI translation technology, offering premium-quality
@@ -1331,7 +1332,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         identification.</li>
     </ul>
 
-    <h3 id="openai-api-a-flexible-alternative">OpenAI API - A Flexible Alternative for Translation and OCR</h3>
+    <h3 id="openai-api-a-flexible-alternative">Legacy OpenAI API - A Flexible Alternative for Translation and OCR</h3>
     <div class="openai-note">
       <div class="openai-note-icon">💡</div>
       <div class="openai-note-content">
@@ -1387,13 +1388,13 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       translation.
     </p>
 
-    <p>Overall, OpenAI models should be considered a strong fallback or alternative if for any reason Gemini models
-      cannot be used. All OpenAI API usage can be tracked in the <strong>API Usage</strong> tab.</p>
+    <p>In the current runtime, configure OpenAI-compatible providers through Custom AI profiles. Legacy OpenAI API usage
+      can still be tracked in the <strong>API Usage</strong> tab when those paths are re-enabled.</p>
 
 
     <h2 id="api-usage-monitoring">API Usage Monitoring</h2>
-    <p>The <strong>API Usage</strong> tab provides comprehensive monitoring and cost analysis for both Gemini and OpenAI
-      API usage, helping you track expenses and optimise your API consumption for both OCR and translation services.</p>
+    <p>The <strong>API Usage</strong> tab provides comprehensive monitoring and cost analysis for Custom AI usage, while
+      older Gemini and OpenAI labels remain relevant to legacy logs and re-enabled provider paths.</p>
 
     <p>
       <img src="screenshots/API_Stats_en.png" alt="API Usage Tab" />
@@ -1401,7 +1402,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
 
     <p>This tab displays detailed statistics across several categories for each provider:</p>
 
-    <h3 id="ocr-statistics">📊 OCR Statistics (Gemini & OpenAI)</h3>
+    <h3 id="ocr-statistics">OCR Statistics (Custom AI / Legacy Gemini & OpenAI)</h3>
     <ul>
       <li><strong>Total OCR Cost</strong> – Cumulative cost of all OCR API calls.</li>
       <li><strong>Total OCR Calls</strong> – Number of OCR requests sent to the API.</li>
@@ -1409,7 +1410,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li><strong>Average Cost per Call/Minute/Hour</strong> – Cost projections for sustained usage.</li>
     </ul>
 
-    <h3 id="translation-statistics">🔄 Translation Statistics (Gemini & OpenAI)</h3>
+    <h3 id="translation-statistics">Translation Statistics (Custom AI / Legacy Gemini & OpenAI)</h3>
     <ul>
       <li><strong>Total Translation Calls</strong> – Number of translation requests sent.</li>
       <li><strong>Total Words Translated</strong> – Count of words processed through the API.</li>
@@ -1419,7 +1420,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li><strong>Total Translation Cost</strong> – Cumulative cost of all translation API calls.</li>
     </ul>
 
-    <h3 id="combined-api-statistics">💰 Combined API Statistics</h3>
+    <h3 id="combined-api-statistics">Combined API Statistics</h3>
     <ul>
       <li><strong>Total API Cost</strong> – Overall cost across all services for a provider.</li>
       <li><strong>Combined Cost per Minute/Hour</strong> – Unified cost projections.</li>
@@ -1450,13 +1451,15 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       </div>
     </div>
 
-    <h2 id="other-translation-methods">Other Translation Methods</h2>
-    <h3 id="marianmt-offline-and-free">MarianMT (offline and free)</h3>
+    <h2 id="other-translation-methods">Legacy Translation Methods</h2>
+    <p>These sections describe provider paths kept for compatibility or historical reference. The current runtime path
+      uses Custom AI profiles for OpenAI-compatible translation endpoints.</p>
+    <h3 id="marianmt-offline-and-free">Legacy MarianMT (offline and free)</h3>
     <ol>
       <li>No API key required – completely free to use.</li>
       <li>Works entirely offline once models are downloaded.</li>
       <li>Models are downloaded automatically when first used (~500MB per language pair).</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>MarianMT (offline and free)</strong> as Translation Model.</li>
           <li>Selecting a language pair from the <strong>MarianMT Model</strong> dropdown.</li>
@@ -1492,7 +1495,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       </div>
     </div>
 
-    <h3 id="deepl-api">DeepL API</h3>
+    <h3 id="deepl-api">Legacy DeepL API</h3>
     <ol>
       <li>Requires a DeepL account and API key.</li>
       <li>Offers premium-quality translations but supports fewer languages.</li>
@@ -1501,7 +1504,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         2025).</li>
       <li>DeepL usage is tracked in the <a href="#api-usage-monitoring">API Usage</a> tab for comprehensive monitoring
         alongside other API services.</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>DeepL API</strong> as Translation Model.</li>
           <li>Entering your API key in the <strong>Settings</strong> tab (DeepL-specific setting).</li>
@@ -1565,12 +1568,12 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
     <p>The cache persists between application sessions, but its practical benefit should be viewed as a helpful bonus
       rather than a major API-saving feature. The more consistent and clear the text presentation, the more likely you
       are to benefit from the caching system.</p>
-    <h3 id="google-translate-api">Google Translate API</h3>
+    <h3 id="google-translate-api">Legacy Google Translate API</h3>
     <ol>
       <li>Requires a Google Cloud account and API key.</li>
       <li>Supports the widest range of languages.</li>
       <li>Good for general purpose translation with broad language coverage.</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>Google Translate API</strong> as Translation Model.</li>
           <li>Entering your API key in the <strong>Settings</strong> tab (Google Translate-specific setting).</li>

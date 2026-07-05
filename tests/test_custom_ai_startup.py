@@ -4,6 +4,7 @@ import types
 import sys
 import unittest
 import csv
+import configparser
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -36,6 +37,17 @@ class StartupOptimizationTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"], "safe")
 
+    def test_example_config_matches_custom_ai_latency_default(self):
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        example_config = configparser.ConfigParser()
+        example_config.read("ocr_translator_config.example.ini", encoding="utf-8-sig")
+
+        self.assertEqual(
+            example_config["Settings"]["custom_ai_latency_mode"],
+            DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"],
+        )
+
     def test_default_config_includes_custom_ai_submit_interval(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
@@ -44,6 +56,7 @@ class StartupOptimizationTests(unittest.TestCase):
     def test_default_config_includes_custom_ai_ocr_image_payload_settings(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_format"], "webp")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_mode"], "balanced_webp")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_quality"], "85")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_detail"], "auto")
@@ -52,9 +65,11 @@ class StartupOptimizationTests(unittest.TestCase):
         gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
         save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
 
+        self.assertIn("custom_ai_ocr_image_format_var", gui_builder_source)
         self.assertIn("custom_ai_ocr_image_mode_var", gui_builder_source)
         self.assertIn("custom_ai_ocr_image_quality_var", gui_builder_source)
         self.assertIn("custom_ai_ocr_image_detail_var", gui_builder_source)
+        self.assertIn("custom_ai_ocr_image_format", save_source)
         self.assertIn("custom_ai_ocr_image_mode", save_source)
         self.assertIn("custom_ai_ocr_image_quality", save_source)
         self.assertIn("custom_ai_ocr_image_detail", save_source)
@@ -76,6 +91,43 @@ class StartupOptimizationTests(unittest.TestCase):
                 }
             self.assertIn("custom_ai_submit_interval_label", labels, msg=path)
             self.assertTrue(labels["custom_ai_submit_interval_label"].strip(), msg=path)
+
+    def test_new_custom_ai_controls_have_all_language_labels(self):
+        required_keys = {
+            "ai_profile_structured_output_label",
+            "ai_profile_reasoning_effort_label",
+            "custom_ai_reasoning_effort_low",
+            "custom_ai_reasoning_effort_medium",
+            "custom_ai_reasoning_effort_high",
+            "custom_ai_reasoning_effort_ultra",
+            "custom_ai_latency_mode_adaptive",
+            "custom_ai_submit_interval_label",
+            "custom_ai_ocr_image_format_label",
+            "custom_ai_ocr_image_format_webp",
+            "custom_ai_ocr_image_format_png",
+            "custom_ai_ocr_image_format_jpeg",
+            "custom_ai_ocr_image_mode_label",
+            "custom_ai_ocr_image_mode_lossless",
+            "custom_ai_ocr_image_mode_balanced",
+            "custom_ai_ocr_image_mode_grayscale",
+            "custom_ai_ocr_image_quality_label",
+            "custom_ai_ocr_image_detail_label",
+            "custom_ai_ocr_image_detail_auto",
+            "custom_ai_ocr_image_detail_low",
+            "custom_ai_ocr_image_detail_high",
+        }
+
+        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv", "resources/gui_pol.csv"):
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+                labels = {
+                    row[0]: row[1]
+                    for row in csv.reader(f)
+                    if len(row) >= 2 and row[0]
+                }
+            missing_keys = required_keys - labels.keys()
+            empty_keys = {key for key in required_keys & labels.keys() if not labels[key].strip()}
+            self.assertEqual(missing_keys, set(), msg=path)
+            self.assertEqual(empty_keys, set(), msg=path)
 
     def test_app_logic_import_does_not_import_removed_provider_sdks(self):
         for optional_module in ("cv2", "pyautogui", "tesserocr"):

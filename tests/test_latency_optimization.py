@@ -860,6 +860,115 @@ class LatencyOcrRuntimeRefreshTests(unittest.TestCase):
 
 
 class LatencyShutdownTests(unittest.TestCase):
+    def test_on_closing_stops_running_app_without_user_stop_poll(self):
+        import app_logic
+
+        scheduled = []
+
+        class Root:
+            def __init__(self):
+                self.destroyed = False
+
+            def after(self, *args):
+                scheduled.append(args)
+                return f"after-{len(scheduled)}"
+
+            def after_cancel(self, _after_id):
+                return None
+
+            def winfo_exists(self):
+                return not self.destroyed
+
+            def destroy(self):
+                self.destroyed = True
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = Root()
+        app.runtime_metrics_refresh_after_id = None
+        app.ocr_preview_window = None
+        app.is_running = True
+        app.toggle_translation = Mock(
+            side_effect=AssertionError("app exit must not use the user Stop path")
+        )
+        app.threads = []
+        app.active_ocr_calls = {1}
+        app.active_translation_calls = {2}
+        app.translation_handler = Mock()
+        app.marian_translator = None
+        app.ocr_thread_pool = Mock()
+        app.translation_thread_pool = Mock()
+        app._fully_initialized = True
+        app.save_settings = Mock()
+        app.KEYBOARD_AVAILABLE = False
+        app.source_overlay = None
+        app.target_overlay = None
+        app.translation_text = object()
+
+        with patch.object(app_logic, "log_debug"):
+            app.on_closing()
+
+        self.assertEqual(scheduled, [])
+        self.assertFalse(app.is_running)
+        app.translation_handler.close.assert_called_once()
+        app.ocr_thread_pool.shutdown.assert_called_once_with(
+            wait=False,
+            cancel_futures=True,
+        )
+        app.translation_thread_pool.shutdown.assert_called_once_with(
+            wait=False,
+            cancel_futures=True,
+        )
+        self.assertTrue(app.root.destroyed)
+
+    def test_finalize_shutdown_is_idempotent_and_skips_dead_widgets(self):
+        import app_logic
+
+        class DeadWidget:
+            def winfo_exists(self):
+                return False
+
+            def config(self, *args, **kwargs):
+                raise AssertionError("dead widgets must not be touched")
+
+            def delete(self, *args, **kwargs):
+                raise AssertionError("dead widgets must not be touched")
+
+            def winfo_viewable(self):
+                raise AssertionError("dead widgets must not be touched")
+
+            def hide(self):
+                raise AssertionError("dead widgets must not be touched")
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.translation_handler = Mock()
+        app.ocr_queue = queue.Queue()
+        app.translation_queue = queue.Queue()
+        app.clear_tesseract_runtime_cache = Mock()
+        app.clear_ocr_stability_gate = Mock()
+        app.translation_text = DeadWidget()
+        app.source_overlay = DeadWidget()
+        app.target_overlay = DeadWidget()
+        app.start_stop_btn = Mock()
+        app.status_label = Mock()
+        app.ui_lang = types.SimpleNamespace(
+            get_label=lambda _key, default=None: default or _key
+        )
+        app.toggle_in_progress = True
+
+        with patch.object(app_logic, "log_debug"):
+            app._finalize_shutdown()
+            app._finalize_shutdown()
+
+        app.translation_handler.request_end_ocr_session.assert_called_once()
+        app.translation_handler.request_end_translation_session.assert_called_once()
+        app.clear_tesseract_runtime_cache.assert_called_once_with(
+            "translation stopped"
+        )
+        app.clear_ocr_stability_gate.assert_called_once_with(
+            "translation stopped"
+        )
+        self.assertFalse(app.toggle_in_progress)
+
     def test_graceful_shutdown_waits_for_active_custom_ai_sets(self):
         import app_logic
 
@@ -981,6 +1090,37 @@ class ApiOcrImagePayloadEncodingTests(unittest.TestCase):
                 mode="balanced_webp",
                 quality=85,
             )
+
+    def test_encode_api_ocr_image_payload_supports_png_and_jpeg_metadata(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        image = Image.new("RGBA", (16, 8), (10, 20, 30, 128))
+
+        png_payload = ocr_utils.encode_image_for_api_ocr_payload(
+            image,
+            mode="balanced_webp",
+            quality=85,
+            image_format="png",
+        )
+        jpeg_payload = ocr_utils.encode_image_for_api_ocr_payload(
+            image,
+            mode="balanced_webp",
+            quality=85,
+            image_format="jpeg",
+        )
+
+        self.assertEqual(png_payload.image_format, "png")
+        self.assertEqual(png_payload.mime_type, "image/png")
+        self.assertEqual(Image.open(io.BytesIO(png_payload.data)).format, "PNG")
+        self.assertEqual(jpeg_payload.image_format, "jpeg")
+        self.assertEqual(jpeg_payload.mime_type, "image/jpeg")
+        self.assertEqual(Image.open(io.BytesIO(jpeg_payload.data)).format, "JPEG")
+
+    def test_invalid_api_ocr_image_format_normalizes_to_webp(self):
+        ocr_utils = import_ocr_utils_for_tests()
+
+        self.assertEqual(ocr_utils.normalize_api_ocr_image_format("png"), "png")
+        self.assertEqual(ocr_utils.normalize_api_ocr_image_format("jpg"), "jpeg")
+        self.assertEqual(ocr_utils.normalize_api_ocr_image_format("bad"), "webp")
 
 
 class LatencyTranslationCacheTests(unittest.TestCase):
@@ -1274,6 +1414,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: True),
+            custom_ai_ocr_image_format_var=types.SimpleNamespace(get=lambda: "png"),
             custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "small_grayscale_webp"),
             custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 80),
             custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "high"),
@@ -1282,9 +1423,44 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         cache_mode_key = worker_threads._get_api_ocr_cache_mode_key(app)
 
         self.assertIn("keep_linebreaks=True", cache_mode_key)
+        self.assertIn("image_format=png", cache_mode_key)
         self.assertIn("image_mode=small_grayscale_webp", cache_mode_key)
         self.assertIn("image_quality=80", cache_mode_key)
         self.assertIn("image_detail=high", cache_mode_key)
+
+    def test_api_ocr_cache_mode_key_includes_effective_reasoning_contract(self):
+        worker_threads = import_worker_threads_for_tests()
+        profile = {
+            "id": "ocr-profile",
+            "base_url": "https://provider.example/v1",
+            "model": "vision",
+            "reasoning_effort": "low",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class Provider:
+            def reasoning_effort_request_contract(self, active_profile, request_kind):
+                self.request_kind = request_kind
+                return active_profile["reasoning_effort"]
+
+        provider = Provider()
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            translation_handler=types.SimpleNamespace(custom_ai_provider=provider),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+        )
+
+        low_key = worker_threads._get_api_ocr_cache_mode_key(app)
+        profile["reasoning_effort"] = "none"
+        none_key = worker_threads._get_api_ocr_cache_mode_key(app)
+
+        self.assertIn("reasoning_effort=low", low_key)
+        self.assertIn("reasoning_effort=none", none_key)
+        self.assertNotEqual(low_key, none_key)
+        self.assertEqual(provider.request_kind, "ocr")
 
     def test_convert_to_webp_for_api_logs_payload_metadata_without_base64(self):
         import app_logic
@@ -1342,6 +1518,47 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(len(pool.submissions), 1)
         _fn, args = pool.submissions[0]
         self.assertEqual(args[2], "ja")
+
+    def test_api_ocr_submission_carries_encoded_image_mime_type(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        encoded_image = types.SimpleNamespace(
+            data=b"png-bytes",
+            mime_type="image/png",
+            image_format="png",
+        )
+        pool = Pool()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_api_ocr_image=lambda _image: encoded_image,
+            convert_to_webp_for_api=lambda _image: (_ for _ in ()).throw(
+                AssertionError("metadata-aware encoder should be preferred")
+            ),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            custom_source_lang="en",
+            ocr_thread_pool=pool,
+        )
+
+        worker_threads.run_api_ocr(app, Image.new("RGB", (24, 12), (1, 2, 3)))
+
+        self.assertEqual(len(pool.submissions), 1)
+        _fn, args = pool.submissions[0]
+        self.assertEqual(args[1], b"png-bytes")
+        self.assertEqual(args[6], "image/png")
 
     def test_api_ocr_skips_webp_conversion_when_concurrency_limit_is_full(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2448,7 +2665,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             "frame-hash",
             "custom_ai|ocr_profile=ocr-profile|https://provider.example/v1|vision",
             "en",
-            "api|keep_linebreaks=False",
+            "api|keep_linebreaks=False|reasoning_effort=low",
             screenshot.size,
             region_origin=(10, 20),
         )
