@@ -60,6 +60,31 @@ class TranslationHandler:
         
         log_debug("Translation handler initialized with custom AI provider and unified cache")
 
+    def _set_runtime_metric_gauge(self, name, value):
+        metrics = getattr(self.app, "runtime_metrics", None)
+        setter = getattr(metrics, "set_gauge", None)
+        if callable(setter):
+            try:
+                setter(name, value)
+            except Exception:
+                pass
+
+    def _set_runtime_metric_label(self, name, value):
+        metrics = getattr(self.app, "runtime_metrics", None)
+        setter = getattr(metrics, "set_label", None)
+        if callable(setter):
+            try:
+                setter(name, value)
+            except Exception:
+                pass
+
+    def _note_custom_ai_race_winner(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
+        self._set_runtime_metric_label(
+            "race_winner",
+            f"custom_ai / {profile.get('name', 'Custom AI')}",
+        )
+
     def _get_active_llm_provider(self):
         """Get the currently active LLM provider based on selected translation model."""
         return None
@@ -534,14 +559,17 @@ Call Duration: {call_duration:.3f} seconds
     def get_translation_provider_cooldown_seconds(self):
         selected_model = self.app.translation_model_var.get()
         if selected_model != 'custom_ai':
+            self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
             return 0.0
 
         profile = self.app.custom_ai_profiles.get_active_profile("translation")
         if not profile:
+            self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
             return 0.0
 
         cooldown_getter = getattr(self.custom_ai_provider, "get_cooldown_remaining", None)
         if not callable(cooldown_getter):
+            self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
             return 0.0
 
         try:
@@ -552,12 +580,15 @@ Call Duration: {call_duration:.3f} seconds
                 max(0.0, float(cooldown_getter(candidate)))
                 for candidate in profiles
             ]
-            return min(remaining_values) if remaining_values else 0.0
+            remaining = min(remaining_values) if remaining_values else 0.0
+            self._set_runtime_metric_gauge("provider_cooldown_seconds", remaining)
+            return remaining
         except Exception as cooldown_error:
             log_debug(
                 "Custom AI cooldown check failed: "
                 f"{type(cooldown_error).__name__} - {cooldown_error}"
             )
+            self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
             return 0.0
 
     def _custom_ai_translate(
@@ -709,6 +740,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"{candidate.get('name', 'Custom AI')}: "
                     f"{error_text}"
                 ) from None
+            self._note_custom_ai_race_winner(candidate)
             return (
                 translated,
                 usage,
@@ -775,6 +807,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"profile={candidate.get('name', 'Custom AI')} "
                     f"duration={duration:.3f}s candidates={len(candidates)}"
                 )
+                self._note_custom_ai_race_winner(candidate)
                 self._release_custom_ai_race_profile(
                     self._custom_ai_race_profile_identity(candidate)
                 )

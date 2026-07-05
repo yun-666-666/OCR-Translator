@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
+from runtime_metrics import RuntimeMetrics
 
 
 def import_ocr_utils_for_tests():
@@ -1760,6 +1761,258 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertIn("total=2.500s", timing_message)
         self.assertNotIn("source-secret", timing_message)
         self.assertNotIn("translated-secret", timing_message)
+
+    def test_translation_timing_is_recorded_in_runtime_metrics(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+
+        class Handler:
+            def translate_text_with_timeout(self, text, **kwargs):
+                return "translated"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=lambda *args: None),
+            translation_handler=Handler(),
+            active_translation_calls={7},
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={7: 100.0},
+            pending_translation_request=None,
+            custom_ai_latency_mode_var=types.SimpleNamespace(get=lambda: "safe"),
+            runtime_metrics=metrics,
+            is_running=True,
+        )
+
+        with patch.object(
+            worker_threads.time,
+            "monotonic",
+            side_effect=[100.0, 102.0],
+        ):
+            worker_threads.process_translation_async(
+                app,
+                "source",
+                translation_sequence=7,
+                ocr_sequence_number=6,
+                requested_at_monotonic=99.5,
+            )
+
+        snapshot = metrics.snapshot()
+        self.assertAlmostEqual(
+            snapshot["timings"]["translation_queue_time"]["latest"],
+            0.5,
+        )
+        self.assertAlmostEqual(
+            snapshot["timings"]["translation_worker_time"]["latest"],
+            2.0,
+        )
+        self.assertAlmostEqual(
+            snapshot["timings"]["translation_total_latency"]["latest"],
+            2.5,
+        )
+        self.assertEqual(snapshot["gauges"]["active_translation_calls"], 0)
+
+    def test_translation_runtime_metrics_record_cache_duplicate_queue_and_cooldown(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        displayed = []
+        scheduled = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                if text == "Cached":
+                    return "Cached result"
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 2.5
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=0,
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys={("custom_ai", "Duplicate", "scope")},
+            active_translation_started_monotonic={},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: True),
+            custom_ai_latency_mode_var=types.SimpleNamespace(get=lambda: "safe"),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            update_translation_text=displayed.append,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            last_successful_translation_time=0.0,
+            last_translation_submit_monotonic=0.0,
+            runtime_metrics=metrics,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads.start_async_translation(app, "Cached", 1)
+            worker_threads.start_async_translation(app, "Duplicate", 2)
+            worker_threads.start_async_translation(app, "Queued", 3)
+
+        snapshot = metrics.snapshot()
+        self.assertEqual(snapshot["counters"]["instant_cache_hit"], 1)
+        self.assertEqual(snapshot["counters"]["duplicate_inflight_skip"], 1)
+        self.assertEqual(snapshot["counters"]["pending_translation_queued"], 1)
+        self.assertEqual(snapshot["gauges"]["provider_cooldown_seconds"], 2.5)
+        self.assertEqual(snapshot["gauges"]["translation_concurrency_limit"], 1)
+        self.assertEqual(snapshot["gauges"]["active_translation_calls"], 0)
+        self.assertEqual(displayed, ["Cached result"])
+        self.assertEqual(app.pending_translation_request["text"], "Queued")
+
+    def test_stale_translation_response_increments_runtime_metric(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        app = types.SimpleNamespace(
+            last_displayed_translation_sequence=5,
+            runtime_metrics=metrics,
+        )
+
+        worker_threads.process_translation_response(
+            app,
+            "Obsolete",
+            4,
+            "source",
+            3,
+        )
+
+        self.assertEqual(
+            metrics.snapshot()["counters"]["stale_response_discarded"],
+            1,
+        )
+
+    def test_streaming_partial_display_increments_runtime_metric(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        scheduled = []
+        displayed = []
+        app = types.SimpleNamespace(
+            is_running=True,
+            latest_translation_sequence_started=1,
+            last_displayed_translation_sequence=0,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            update_translation_text=displayed.append,
+            last_successful_translation_time=0.0,
+            runtime_metrics=metrics,
+        )
+
+        stream_callback = worker_threads._build_streaming_display_callback(app, 1)
+        stream_callback("Partial")
+
+        scheduled[0][1](*scheduled[0][2])
+
+        self.assertEqual(displayed, ["Partial"])
+        self.assertEqual(
+            metrics.snapshot()["counters"]["stream_partial_display"],
+            1,
+        )
+
+    def test_api_ocr_cache_hit_increments_runtime_metric(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
+        screenshot._gct_frame_hash = "frame-hash"
+        screenshot._gct_region_origin = (10, 20)
+        profile = {
+            "id": "ocr-profile",
+            "name": "OCR",
+            "base_url": "https://provider.example/v1",
+            "model": "vision",
+        }
+        cache = ocr_utils.OCRFrameCache(max_size=4)
+        key = ocr_utils.build_ocr_frame_cache_key(
+            "frame-hash",
+            "custom_ai|ocr_profile=ocr-profile|https://provider.example/v1|vision",
+            "en",
+            "api|keep_linebreaks=False",
+            screenshot.size,
+            region_origin=(10, 20),
+        )
+        cache.put(key, "Cached OCR")
+
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            custom_source_lang="en",
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            custom_ai_profiles=types.SimpleNamespace(
+                get_active_profile=lambda kind: profile
+            ),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            ocr_frame_cache=cache,
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=8,
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="Cached OCR",
+            reset_clear_timeout=Mock(),
+            runtime_metrics=metrics,
+        )
+
+        worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(
+            metrics.snapshot()["counters"]["ocr_frame_cache_hit"],
+            1,
+        )
+
+    def test_custom_ai_race_winner_runtime_label_is_redacted(self):
+        TranslationHandler = import_translation_handler_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        profile = {
+            "id": "fast",
+            "name": "Fast profile sk-test-secret",
+            "base_url": "https://provider.example/v1",
+            "api_key": "secret",
+            "model": "model-a",
+            "wire_api": "chat_completions",
+            "enabled": True,
+        }
+        app = types.SimpleNamespace(
+            runtime_metrics=metrics,
+            custom_ai_profiles=types.SimpleNamespace(
+                list_profiles=lambda *args, **kwargs: [profile]
+            ),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("Translated", {}, 0.25)
+        )
+
+        handler._custom_ai_translate_race(
+            profile,
+            "Hello",
+            "en",
+            "pl",
+            [],
+            False,
+            custom_prompt="",
+        )
+
+        race_winner = metrics.snapshot()["labels"]["race_winner"]
+        self.assertIn("Fast profile", race_winner)
+        self.assertNotIn("sk-test-secret", race_winner)
 
     def test_pending_translation_is_dropped_when_app_is_stopped(self):
         worker_threads = import_worker_threads_for_tests()

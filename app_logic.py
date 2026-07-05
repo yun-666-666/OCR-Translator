@@ -27,6 +27,7 @@ from overlay_manager import (
 from language_manager import LanguageManager
 from language_ui import UILanguageManager
 from modern_ui import apply_white_clean_theme, style_tk_canvas, style_tk_text_widget
+from runtime_metrics import RuntimeMetrics
 from custom_ai import (
     CustomAIProfileManager,
     CUSTOM_AI_LATENCY_MODE_SAFE,
@@ -183,6 +184,8 @@ class GameChangingTranslator:
         self.last_local_ocr_submitted_text = None  # Last successfully displayed local OCR source text
         self.last_local_ocr_submitted_norm = None  # Normalized local OCR source text used for resubmit dedup
         self.last_local_ocr_submitted_scope = None  # Translation scope associated with the last local OCR submit
+        self.runtime_metrics = RuntimeMetrics(max_events=240, max_age_seconds=60.0)
+        self.runtime_metrics_refresh_after_id = None
         
         # Initialize thread pools for optimized performance (especially for compiled version)
         self.ocr_thread_pool = concurrent.futures.ThreadPoolExecutor(
@@ -2292,6 +2295,12 @@ class GameChangingTranslator:
 
     def on_closing(self):
         log_debug("Main window close requested. Initiating shutdown...")
+        if getattr(self, "runtime_metrics_refresh_after_id", None):
+            try:
+                self.root.after_cancel(self.runtime_metrics_refresh_after_id)
+            except Exception:
+                pass
+            self.runtime_metrics_refresh_after_id = None
         
         # Close OCR Preview window if open
         if self.ocr_preview_window is not None:

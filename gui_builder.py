@@ -108,6 +108,186 @@ def run_profile_network_task_async(app, button, task, on_success, failure_title)
     set_button_state(tk.DISABLED)
     threading.Thread(target=worker, name="CustomAIProfileNetworkTask", daemon=True).start()
 
+
+_TIMING_LABELS = [
+    ("capture_duration", "Capture"),
+    ("ocr_duration", "OCR"),
+    ("translation_queue_time", "Translation queue"),
+    ("translation_worker_time", "Translation worker/API"),
+    ("translation_total_latency", "Total translation"),
+]
+
+_COUNTER_LABELS = [
+    ("instant_cache_hit", "Instant cache hits"),
+    ("ocr_frame_cache_hit", "OCR frame cache hits"),
+    ("duplicate_inflight_skip", "Duplicate/in-flight skips"),
+    ("pending_translation_queued", "Pending translations queued"),
+    ("stale_response_discarded", "Stale responses discarded"),
+    ("stream_partial_display", "Stream partial displays"),
+]
+
+
+def _format_metric_seconds(value):
+    try:
+        return f"{float(value):.3f}s"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _format_runtime_metrics_snapshot(snapshot):
+    timings = snapshot.get("timings", {}) if isinstance(snapshot, dict) else {}
+    counters = snapshot.get("counters", {}) if isinstance(snapshot, dict) else {}
+    gauges = snapshot.get("gauges", {}) if isinstance(snapshot, dict) else {}
+    labels = snapshot.get("labels", {}) if isinstance(snapshot, dict) else {}
+
+    lines = ["Timings (latest / p50 / p90)"]
+    for key, label in _TIMING_LABELS:
+        timing = timings.get(key)
+        if timing:
+            lines.append(
+                f"{label}: "
+                f"{_format_metric_seconds(timing.get('latest'))} / "
+                f"{_format_metric_seconds(timing.get('p50'))} / "
+                f"{_format_metric_seconds(timing.get('p90'))}"
+            )
+        else:
+            lines.append(f"{label}: - / - / -")
+
+    lines.append("")
+    lines.append("Counters")
+    for key, label in _COUNTER_LABELS:
+        lines.append(f"{label}: {int(counters.get(key, 0) or 0)}")
+
+    lines.append("")
+    lines.append("Current state")
+    active_calls = gauges.get("active_translation_calls", 0)
+    concurrency_limit = gauges.get("translation_concurrency_limit", 0)
+    lines.append(f"Active translation calls: {active_calls} / {concurrency_limit}")
+    lines.append(f"OCR queue size: {gauges.get('ocr_queue_size', 0)}")
+    lines.append(
+        "Provider cooldown remaining: "
+        f"{_format_metric_seconds(gauges.get('provider_cooldown_seconds', 0.0))}"
+    )
+    race_winner = labels.get("race_winner") or "-"
+    lines.append(f"Race winner: {race_winner}")
+    return "\n".join(lines)
+
+
+def _widget_exists(widget):
+    try:
+        return widget is not None and bool(widget.winfo_exists())
+    except (AttributeError, tk.TclError):
+        return False
+
+
+def _update_runtime_metric_gauges(app):
+    metrics = getattr(app, "runtime_metrics", None)
+    set_gauge = getattr(metrics, "set_gauge", None)
+    if not callable(set_gauge):
+        return
+
+    def safe_set(name, value):
+        try:
+            set_gauge(name, value)
+        except Exception:
+            pass
+
+    safe_set("active_translation_calls", len(getattr(app, "active_translation_calls", ()) or ()))
+    safe_set("active_ocr_calls", len(getattr(app, "active_ocr_calls", ()) or ()))
+    safe_set("ocr_queue_size", 0)
+    ocr_queue = getattr(app, "ocr_queue", None)
+    if ocr_queue is not None:
+        try:
+            safe_set("ocr_queue_size", ocr_queue.qsize())
+        except Exception:
+            pass
+
+    handler = getattr(app, "translation_handler", None)
+    concurrency_getter = getattr(handler, "get_translation_concurrency_limit", None)
+    if callable(concurrency_getter):
+        try:
+            safe_set("translation_concurrency_limit", concurrency_getter())
+        except Exception:
+            safe_set("translation_concurrency_limit", getattr(app, "max_concurrent_translation_calls", 0))
+    else:
+        safe_set("translation_concurrency_limit", getattr(app, "max_concurrent_translation_calls", 0))
+
+    cooldown_getter = getattr(handler, "get_translation_provider_cooldown_seconds", None)
+    if callable(cooldown_getter):
+        try:
+            safe_set("provider_cooldown_seconds", cooldown_getter())
+        except Exception:
+            safe_set("provider_cooldown_seconds", 0.0)
+    else:
+        safe_set("provider_cooldown_seconds", 0.0)
+
+
+def _cancel_runtime_metrics_refresh(app):
+    after_id = getattr(app, "runtime_metrics_refresh_after_id", None)
+    if not after_id:
+        return
+    try:
+        app.root.after_cancel(after_id)
+    except Exception:
+        pass
+    app.runtime_metrics_refresh_after_id = None
+
+
+def _refresh_runtime_metrics_panel(app, schedule_next=True):
+    metrics = getattr(app, "runtime_metrics", None)
+    text_widget = getattr(app, "runtime_metrics_text", None)
+    if metrics is None or not _widget_exists(text_widget):
+        return
+
+    try:
+        _update_runtime_metric_gauges(app)
+        content = _format_runtime_metrics_snapshot(metrics.snapshot())
+        text_widget.config(state=tk.NORMAL)
+        text_widget.delete("1.0", tk.END)
+        text_widget.insert(tk.END, content)
+        text_widget.config(state=tk.DISABLED)
+    except tk.TclError:
+        return
+    except Exception as e:
+        log_debug(f"Runtime metrics panel refresh failed: {e}")
+
+    if schedule_next:
+        try:
+            app.runtime_metrics_refresh_after_id = app.root.after(
+                1000,
+                _refresh_runtime_metrics_panel,
+                app,
+            )
+        except tk.TclError:
+            app.runtime_metrics_refresh_after_id = None
+
+
+def _reset_runtime_metrics_panel(app):
+    metrics = getattr(app, "runtime_metrics", None)
+    reset = getattr(metrics, "reset", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception as e:
+            log_debug(f"Runtime metrics reset failed: {e}")
+    _refresh_runtime_metrics_panel(app, schedule_next=False)
+
+
+def _copy_runtime_metrics_summary(app):
+    metrics = getattr(app, "runtime_metrics", None)
+    summary_getter = getattr(metrics, "summary_text", None)
+    if not callable(summary_getter):
+        return
+    try:
+        summary = summary_getter()
+        app.root.clipboard_clear()
+        app.root.clipboard_append(summary)
+    except tk.TclError:
+        return
+    except Exception as e:
+        log_debug(f"Runtime metrics copy failed: {e}")
+
+
 def get_system_fonts():
     """Get available system fonts with preferred fonts at the top"""
     try:
@@ -1698,6 +1878,37 @@ def create_debug_tab(app):
     button_frame.pack(fill="x", padx=5, pady=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("save_debug_images_btn"), command=app.save_debug_images).pack(side=tk.LEFT, padx=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("refresh_log_btn"), command=app.refresh_debug_log).pack(side=tk.LEFT, padx=5)
+
+    diagnostics_frame = ttk.LabelFrame(
+        frame,
+        text=app.ui_lang.get_label("performance_diagnostics_title", "Performance Diagnostics"),
+    )
+    diagnostics_frame.pack(fill="both", expand=False, padx=5, pady=5)
+
+    diagnostics_button_frame = ttk.Frame(diagnostics_frame)
+    diagnostics_button_frame.pack(fill="x", padx=5, pady=(5, 0))
+    ttk.Button(
+        diagnostics_button_frame,
+        text=app.ui_lang.get_label("reset_metrics_btn", "Reset metrics"),
+        command=lambda: _reset_runtime_metrics_panel(app),
+    ).pack(side=tk.LEFT, padx=(0, 5))
+    ttk.Button(
+        diagnostics_button_frame,
+        text=app.ui_lang.get_label("copy_metrics_summary_btn", "Copy summary"),
+        command=lambda: _copy_runtime_metrics_summary(app),
+    ).pack(side=tk.LEFT, padx=5)
+
+    app.runtime_metrics_text = tk.Text(
+        diagnostics_frame,
+        height=14,
+        width=72,
+        wrap=tk.WORD,
+    )
+    style_tk_text_widget(app.runtime_metrics_text, getattr(app, "md3_palette", None))
+    app.runtime_metrics_text.pack(fill="both", expand=True, padx=5, pady=5)
+    app.runtime_metrics_text.config(state=tk.DISABLED)
+    _cancel_runtime_metrics_refresh(app)
+    _refresh_runtime_metrics_panel(app)
 
     log_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("app_log_label"))
     log_frame.pack(fill="both", expand=True, padx=5, pady=5)
