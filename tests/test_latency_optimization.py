@@ -99,6 +99,221 @@ class LatencyCaptureBackendTests(unittest.TestCase):
         pyautogui_module.screenshot.assert_called_once_with(region=(5, 6, 7, 8))
 
 
+class LatencyCaptureBackendSelectorTests(unittest.TestCase):
+    def _make_selector(self, capture_func, monotonic_times=None, sample_count=2):
+        ocr_utils = import_ocr_utils_for_tests()
+        monotonic_values = list(monotonic_times or [100.0, 101.0, 102.0, 103.0])
+
+        def monotonic_clock():
+            if monotonic_values:
+                return monotonic_values.pop(0)
+            return 999.0
+
+        return ocr_utils.CaptureBackendSelector(
+            sample_count=sample_count,
+            min_recheck_interval_seconds=0.0,
+            capture_func=capture_func,
+            monotonic_clock=monotonic_clock,
+        )
+
+    def test_auto_selector_chooses_fastest_available_backend(self):
+        elapsed = {
+            "mss": [0.005, 0.006],
+            "pyautogui": [0.022, 0.020],
+        }
+        current_time = [0.0]
+        calls = []
+
+        def perf_counter():
+            return current_time[0]
+
+        def capture_func(region, backend="auto", **_kwargs):
+            calls.append((backend, region))
+            current_time[0] += elapsed[backend].pop(0)
+            return Image.new("RGB", (2, 2), (1, 2, 3))
+
+        selector = self._make_selector(capture_func)
+        selector.perf_counter = perf_counter
+
+        selected = selector.resolve_backend("auto", (10, 20, 300, 120))
+
+        self.assertEqual(selected, "mss")
+        self.assertEqual(
+            [backend for backend, _region in calls],
+            ["mss", "mss", "pyautogui", "pyautogui"],
+        )
+
+    def test_auto_selector_excludes_failing_mss_backend(self):
+        current_time = [0.0]
+        calls = []
+
+        def perf_counter():
+            return current_time[0]
+
+        def capture_func(region, backend="auto", **_kwargs):
+            calls.append(backend)
+            current_time[0] += 0.01
+            if backend == "mss":
+                raise RuntimeError("mss unavailable")
+            return Image.new("RGB", (2, 2), (1, 2, 3))
+
+        selector = self._make_selector(capture_func)
+        selector.perf_counter = perf_counter
+
+        selected = selector.resolve_backend("auto", (10, 20, 300, 120))
+
+        self.assertEqual(selected, "pyautogui")
+        self.assertIn("mss", calls)
+        self.assertIn("pyautogui", calls)
+
+    def test_explicit_pyautogui_is_not_replaced_by_benchmark_result(self):
+        calls = []
+
+        def capture_func(region, backend="auto", **_kwargs):
+            calls.append((backend, region))
+            return Image.new("RGB", (2, 2), (1, 2, 3))
+
+        selector = self._make_selector(capture_func)
+
+        selected = selector.resolve_backend("pyautogui", (10, 20, 300, 120))
+
+        self.assertEqual(selected, "pyautogui")
+        self.assertEqual(calls, [])
+
+    def test_auto_selector_uses_cached_benchmark_for_same_context(self):
+        current_time = [0.0]
+        calls = []
+
+        def perf_counter():
+            return current_time[0]
+
+        def capture_func(region, backend="auto", **_kwargs):
+            calls.append((backend, region))
+            current_time[0] += 0.01 if backend == "mss" else 0.02
+            return Image.new("RGB", (2, 2), (1, 2, 3))
+
+        selector = self._make_selector(capture_func)
+        selector.perf_counter = perf_counter
+
+        first = selector.resolve_backend("auto", (10, 20, 300, 120))
+        second = selector.resolve_backend("auto", (10, 20, 300, 120))
+
+        self.assertEqual(first, "mss")
+        self.assertEqual(second, "mss")
+        self.assertEqual(len(calls), 4)
+
+    def test_auto_selector_rechecks_when_geometry_changes(self):
+        elapsed = {
+            ((10, 20, 300, 120), "mss"): [0.005, 0.006],
+            ((10, 20, 300, 120), "pyautogui"): [0.025, 0.023],
+            ((50, 60, 200, 80), "mss"): [0.040, 0.042],
+            ((50, 60, 200, 80), "pyautogui"): [0.010, 0.011],
+        }
+        current_time = [0.0]
+        calls = []
+
+        def perf_counter():
+            return current_time[0]
+
+        def capture_func(region, backend="auto", **_kwargs):
+            normalized_region = tuple(region)
+            calls.append((backend, normalized_region))
+            current_time[0] += elapsed[(normalized_region, backend)].pop(0)
+            return Image.new("RGB", (2, 2), (1, 2, 3))
+
+        selector = self._make_selector(capture_func)
+        selector.perf_counter = perf_counter
+
+        first = selector.resolve_backend("auto", (10, 20, 300, 120))
+        second = selector.resolve_backend("auto", (50, 60, 200, 80))
+
+        self.assertEqual(first, "mss")
+        self.assertEqual(second, "pyautogui")
+        self.assertEqual(len(calls), 8)
+
+
+class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
+    def test_unknown_capture_backend_config_uses_auto_selector(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class FakeSelector:
+            def __init__(self):
+                self.calls = []
+
+            def resolve_backend(self, configured_backend, region):
+                self.calls.append((configured_backend, region))
+                return "mss"
+
+        app = types.SimpleNamespace(capture_backend_selector=FakeSelector())
+
+        selected = worker_threads._resolve_capture_backend(app, "legacy_slow", (1, 2, 3, 4))
+
+        self.assertEqual(selected, "mss")
+        self.assertEqual(app.capture_backend_selector.calls, [("auto", (1, 2, 3, 4))])
+
+    def test_capture_thread_uses_resolved_auto_backend_and_continues_after_capture_error(self):
+        worker_threads = import_worker_threads_for_tests()
+        screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
+        capture_backends = []
+
+        class FakeOverlay:
+            def winfo_exists(self):
+                return True
+
+            def get_geometry(self):
+                return (10, 20, 18, 28)
+
+        class FakeSelector:
+            def __init__(self):
+                self.calls = []
+
+            def resolve_backend(self, configured_backend, region):
+                self.calls.append((configured_backend, region))
+                return "mss"
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            current_scan_interval=50,
+            scan_interval_var=types.SimpleNamespace(get=lambda: 50),
+            update_adaptive_scan_interval=lambda: None,
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: True,
+            source_overlay=FakeOverlay(),
+            capture_backend_var=types.SimpleNamespace(get=lambda: "auto"),
+            capture_backend_selector=FakeSelector(),
+            ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_queue=queue.Queue(maxsize=4),
+            last_processed_subtitle=None,
+            previous_text="",
+            text_stability_counter=0,
+        )
+
+        original_put_nowait = app.ocr_queue.put_nowait
+
+        def stop_after_put(item):
+            original_put_nowait(item)
+            app.is_running = False
+
+        app.ocr_queue.put_nowait = stop_after_put
+
+        def capture_func(region, backend="auto"):
+            capture_backends.append(backend)
+            if len(capture_backends) == 1:
+                raise RuntimeError("transient capture failure")
+            return screenshot
+
+        with (
+            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
+            patch.object(worker_threads, "capture_screen_region", side_effect=capture_func),
+            patch.object(worker_threads.time, "sleep", return_value=None),
+        ):
+            worker_threads.run_capture_thread(app)
+
+        self.assertEqual(capture_backends, ["mss", "mss"])
+        self.assertEqual(app.capture_backend_selector.calls[0], ("auto", (10, 20, 8, 8)))
+        self.assertIs(app.ocr_queue.get_nowait(), screenshot)
+
+
 class LatencyOcrCacheTests(unittest.TestCase):
     def test_ocr_frame_cache_returns_cached_text_without_recomputing(self):
         ocr_utils = import_ocr_utils_for_tests()

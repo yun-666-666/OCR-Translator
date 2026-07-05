@@ -22,7 +22,7 @@ from ocr_utils import (
     remove_text_after_last_punctuation_mark, capture_screen_region,
     build_capture_signature, build_ocr_frame_cache_key,
     get_tesseract_ocr_config, resolve_tessdata_dir_from_tesseract_path,
-    TesseractOcrUnavailableError,
+    TesseractOcrUnavailableError, CaptureBackendSelector,
 )
 from translation_utils import (
     is_translation_error_result,
@@ -76,6 +76,31 @@ def _safe_queue_size(queue_obj):
         return int(queue_obj.qsize())
     except Exception:
         return 0
+
+
+def _get_capture_backend_selector(app):
+    selector = getattr(app, 'capture_backend_selector', None)
+    if selector is None:
+        selector = CaptureBackendSelector()
+        try:
+            app.capture_backend_selector = selector
+        except Exception:
+            pass
+    return selector
+
+
+def _resolve_capture_backend(app, configured_backend, region):
+    configured_backend = str(configured_backend or 'auto').strip().lower()
+    if configured_backend not in ('auto', 'mss', 'pyautogui'):
+        log_debug(f"CAPTURE_SELECTOR: unknown configured backend={configured_backend}; using auto")
+        configured_backend = 'auto'
+    if configured_backend != 'auto':
+        return configured_backend
+    selector = _get_capture_backend_selector(app)
+    resolver = getattr(selector, 'resolve_backend', None)
+    if callable(resolver):
+        return resolver(configured_backend, region)
+    return configured_backend
 
 
 def _refresh_translation_metric_gauges(app, concurrency_limit=None, cooldown_remaining=None):
@@ -375,7 +400,8 @@ def run_capture_thread(app):
             capture_moment = time.monotonic()
             capture_backend_var = getattr(app, 'capture_backend_var', None)
             capture_backend = capture_backend_var.get() if capture_backend_var is not None else 'auto'
-            geometry_signature = (x1, y1, width, height, capture_backend, ocr_model)
+            resolved_capture_backend = _resolve_capture_backend(app, capture_backend, (x1, y1, width, height))
+            geometry_signature = (x1, y1, width, height, capture_backend, resolved_capture_backend, ocr_model)
             if geometry_signature != last_capture_geometry_signature:
                 log_debug(f"CAPTURE: source context changed to {geometry_signature}; clearing stale OCR state")
                 last_capture_geometry_signature = geometry_signature
@@ -392,16 +418,33 @@ def run_capture_thread(app):
                 except queue.Empty:
                     pass
 
-            screenshot = capture_screen_region((x1, y1, width, height), backend=capture_backend)
+            screenshot = capture_screen_region((x1, y1, width, height), backend=resolved_capture_backend)
             capture_duration = time.monotonic() - capture_moment
             last_cap_time = capture_moment
-            log_debug(f"LATENCY: capture backend={capture_backend} region={width}x{height} took {capture_duration:.3f}s")
+            actual_capture_backend = getattr(screenshot, '_gct_capture_backend', resolved_capture_backend)
+            fallback_reason = getattr(screenshot, '_gct_capture_fallback_reason', None)
+            if fallback_reason and actual_capture_backend != resolved_capture_backend:
+                selector = getattr(app, 'capture_backend_selector', None)
+                recorder = getattr(selector, 'record_backend_fallback', None)
+                if callable(recorder):
+                    recorder(
+                        capture_backend,
+                        resolved_capture_backend,
+                        actual_capture_backend,
+                        (x1, y1, width, height),
+                        reason=fallback_reason,
+                    )
+            log_debug(
+                f"LATENCY: capture backend={actual_capture_backend} "
+                f"configured={capture_backend} resolved={resolved_capture_backend} "
+                f"region={width}x{height} took {capture_duration:.3f}s"
+            )
             _record_metric_timing(app, "capture_duration", capture_duration)
             _refresh_ocr_queue_metric(app)
 
             img_small = screenshot.resize((max(1, width//4), max(1, height//4)), Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST)
             img_hash = hashlib.md5(img_small.tobytes()).hexdigest()
-            capture_signature = build_capture_signature(img_hash, (x1, y1, width, height), capture_backend)
+            capture_signature = build_capture_signature(img_hash, (x1, y1, width, height), actual_capture_backend)
             try:
                 screenshot._gct_frame_hash = img_hash
                 screenshot._gct_region_origin = (x1, y1)

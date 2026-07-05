@@ -43,6 +43,7 @@ from ocr_utils import (
     clear_tessdata_dir_cache,
     clear_tesseract_languages_cache,
     clear_tesseract_ocr_engines,
+    CaptureBackendSelector,
     OCRFrameCache,
     get_tesseract_ocr_config,
     resolve_tessdata_dir_from_tesseract_path,
@@ -192,6 +193,7 @@ class GameChangingTranslator:
         self.last_local_ocr_submitted_scope = None  # Translation scope associated with the last local OCR submit
         self.runtime_metrics = RuntimeMetrics(max_events=240, max_age_seconds=60.0)
         self.runtime_metrics_refresh_after_id = None
+        self.capture_backend_selector = CaptureBackendSelector()
         
         # Initialize thread pools for optimized performance (especially for compiled version)
         self.ocr_thread_pool = concurrent.futures.ThreadPoolExecutor(

@@ -3,6 +3,8 @@ import importlib
 import os
 import shutil
 import sys
+import statistics
+import time
 from functools import lru_cache
 import threading
 from collections import OrderedDict
@@ -449,41 +451,311 @@ def clear_tesseract_ocr_engines():
         engine.close()
 
 
-def capture_screen_region(region, backend='auto', mss_factory=None, pyautogui_module=None):
-    """Capture a screen region as a PIL RGB image using the fastest available backend."""
+_CAPTURE_BACKENDS = ('mss', 'pyautogui')
+_CAPTURE_BENCHMARK_MAX_WIDTH = 320
+_CAPTURE_BENCHMARK_MAX_HEIGHT = 180
+
+
+def _normalize_capture_backend(backend):
+    selected_backend = str(backend or 'auto').strip().lower()
+    if selected_backend not in ('auto',) + _CAPTURE_BACKENDS:
+        return 'auto'
+    return selected_backend
+
+
+def _normalize_capture_region(region):
     x, y, width, height = map(int, region)
     if width <= 0 or height <= 0:
         raise ValueError(f"Invalid capture region: {region}")
+    return x, y, width, height
 
-    selected_backend = (backend or 'auto').lower()
-    if selected_backend not in ('auto', 'mss', 'pyautogui'):
-        log_debug(f"Unknown capture backend '{backend}', falling back to auto")
-        selected_backend = 'auto'
 
-    if selected_backend in ('auto', 'mss'):
-        try:
-            factory = mss_factory
-            if factory is None:
-                mss_module = importlib.import_module('mss')
-                factory = mss_module.mss
+def _safe_benchmark_region(region):
+    x, y, width, height = _normalize_capture_region(region)
+    return (
+        x,
+        y,
+        max(1, min(width, _CAPTURE_BENCHMARK_MAX_WIDTH)),
+        max(1, min(height, _CAPTURE_BENCHMARK_MAX_HEIGHT)),
+    )
 
-            with factory() as sct:
-                monitor = {"left": x, "top": y, "width": width, "height": height}
-                shot = sct.grab(monitor)
-                image = _pil_image().frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-                log_debug(f"CAPTURE: mss captured {width}x{height}")
-                return image
-        except Exception as e:
-            log_debug(f"CAPTURE: mss backend failed ({type(e).__name__}: {e}); falling back to pyautogui")
-            if selected_backend == 'mss':
-                # Explicit mss still falls back to keep translation running.
-                pass
 
+def _validate_capture_image(image, backend):
+    size = getattr(image, 'size', None)
+    if not size or len(size) != 2:
+        raise ValueError(f"{backend} returned an invalid image")
+    width, height = map(int, size)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"{backend} returned an empty image")
+    return image
+
+
+def _set_capture_metadata(image, backend, fallback_reason=None):
+    try:
+        image._gct_capture_backend = backend
+        image._gct_capture_fallback_reason = fallback_reason
+    except Exception:
+        pass
+    return image
+
+
+def _capture_with_mss(region, mss_factory=None):
+    x, y, width, height = _normalize_capture_region(region)
+    factory = mss_factory
+    if factory is None:
+        mss_module = importlib.import_module('mss')
+        factory = mss_module.mss
+
+    with factory() as sct:
+        monitor = {"left": x, "top": y, "width": width, "height": height}
+        shot = sct.grab(monitor)
+        return _pil_image().frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+
+def _capture_with_pyautogui(region, pyautogui_module=None):
+    x, y, width, height = _normalize_capture_region(region)
     if pyautogui_module is None:
         pyautogui_module = importlib.import_module('pyautogui')
-    image = pyautogui_module.screenshot(region=(x, y, width, height))
-    log_debug(f"CAPTURE: pyautogui captured {width}x{height}")
-    return image
+    return pyautogui_module.screenshot(region=(x, y, width, height))
+
+
+def capture_screen_region(region, backend='auto', mss_factory=None, pyautogui_module=None, allow_fallback=True):
+    """Capture a screen region as a PIL RGB image using the requested backend."""
+    x, y, width, height = _normalize_capture_region(region)
+
+    selected_backend = _normalize_capture_backend(backend)
+    if selected_backend == 'auto' and str(backend or 'auto').strip().lower() != 'auto':
+        log_debug(f"Unknown capture backend '{backend}', falling back to auto")
+
+    if selected_backend == 'auto':
+        backends_to_try = list(_CAPTURE_BACKENDS)
+    elif selected_backend == 'mss':
+        backends_to_try = ['mss', 'pyautogui'] if allow_fallback else ['mss']
+    else:
+        backends_to_try = ['pyautogui', 'mss'] if allow_fallback else ['pyautogui']
+
+    fallback_reason = None
+    last_error = None
+    for backend_name in backends_to_try:
+        try:
+            if backend_name == 'mss':
+                image = _capture_with_mss((x, y, width, height), mss_factory=mss_factory)
+            else:
+                image = _capture_with_pyautogui((x, y, width, height), pyautogui_module=pyautogui_module)
+            image = _validate_capture_image(image, backend_name)
+            _set_capture_metadata(image, backend_name, fallback_reason=fallback_reason)
+            log_debug(f"CAPTURE: {backend_name} captured {width}x{height}")
+            return image
+        except Exception as e:
+            last_error = e
+            reason = f"{backend_name} backend failed ({type(e).__name__}: {e})"
+            if allow_fallback and backend_name != backends_to_try[-1]:
+                fallback_reason = reason
+                log_debug(f"CAPTURE: {reason}; falling back to {backends_to_try[backends_to_try.index(backend_name) + 1]}")
+            else:
+                log_debug(f"CAPTURE: {reason}")
+
+    raise RuntimeError(f"All capture backends failed for region {width}x{height}") from last_error
+
+
+def benchmark_capture_backends(
+    region,
+    sample_count=2,
+    capture_func=None,
+    perf_counter=None,
+    log_func=None,
+    mss_factory=None,
+    pyautogui_module=None,
+):
+    """Benchmark available capture backends for a small safe region."""
+    capture_func = capture_func or capture_screen_region
+    perf_counter = perf_counter or time.perf_counter
+    log_func = log_func or log_debug
+    benchmark_region = _safe_benchmark_region(region)
+    requested_samples = max(1, int(sample_count or 1))
+    results = {}
+
+    for backend_name in _CAPTURE_BACKENDS:
+        durations = []
+        failure_reason = None
+        for _sample_index in range(requested_samples):
+            start = perf_counter()
+            try:
+                image = capture_func(
+                    benchmark_region,
+                    backend=backend_name,
+                    mss_factory=mss_factory,
+                    pyautogui_module=pyautogui_module,
+                    allow_fallback=False,
+                )
+                _validate_capture_image(image, backend_name)
+            except TypeError:
+                try:
+                    image = capture_func(benchmark_region, backend=backend_name)
+                    _validate_capture_image(image, backend_name)
+                except Exception as e:
+                    failure_reason = f"{type(e).__name__}: {e}"
+                    break
+            except Exception as e:
+                failure_reason = f"{type(e).__name__}: {e}"
+                break
+            durations.append(max(0.0, perf_counter() - start))
+
+        if failure_reason:
+            try:
+                log_func(
+                    f"CAPTURE_SELECTOR: tested backend={backend_name} "
+                    f"sample_count={len(durations)} failed reason={failure_reason}"
+                )
+            except Exception:
+                pass
+            continue
+
+        if durations:
+            median_duration = statistics.median(durations)
+            average_duration = sum(durations) / len(durations)
+            results[backend_name] = {
+                'sample_count': len(durations),
+                'median': median_duration,
+                'average': average_duration,
+            }
+            try:
+                log_func(
+                    f"CAPTURE_SELECTOR: tested backend={backend_name} "
+                    f"sample_count={len(durations)} median={median_duration:.4f}s "
+                    f"average={average_duration:.4f}s"
+                )
+            except Exception:
+                pass
+
+    selected_backend = None
+    if results:
+        selected_backend = min(
+            results,
+            key=lambda backend_name: (
+                results[backend_name]['median'],
+                results[backend_name]['average'],
+            ),
+        )
+        try:
+            selected_result = results[selected_backend]
+            log_func(
+                f"CAPTURE_SELECTOR: selected backend={selected_backend} "
+                f"median={selected_result['median']:.4f}s "
+                f"average={selected_result['average']:.4f}s"
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            log_func("CAPTURE_SELECTOR: no benchmarked backend was usable; preserving auto fallback")
+        except Exception:
+            pass
+
+    return {
+        'selected_backend': selected_backend,
+        'results': results,
+        'region': benchmark_region,
+    }
+
+
+class CaptureBackendSelector:
+    """Cache a lightweight benchmark-backed capture backend choice."""
+
+    def __init__(
+        self,
+        sample_count=2,
+        min_recheck_interval_seconds=10.0,
+        capture_func=None,
+        monotonic_clock=None,
+        perf_counter=None,
+        log_func=None,
+    ):
+        self.sample_count = max(1, int(sample_count or 1))
+        self.min_recheck_interval_seconds = max(0.0, float(min_recheck_interval_seconds or 0.0))
+        self.capture_func = capture_func or capture_screen_region
+        self.monotonic_clock = monotonic_clock or time.monotonic
+        self.perf_counter = perf_counter or time.perf_counter
+        self.log_func = log_func or log_debug
+        self._lock = threading.Lock()
+        self._cached_signature = None
+        self._cached_backend = None
+        self._last_benchmark_monotonic = None
+        self.last_benchmark_result = None
+
+    def resolve_backend(self, configured_backend, region, mss_factory=None, pyautogui_module=None):
+        selected_config = _normalize_capture_backend(configured_backend)
+        if selected_config != 'auto':
+            return selected_config
+
+        normalized_region = _normalize_capture_region(region)
+        signature = (normalized_region, selected_config)
+        now = self.monotonic_clock()
+
+        with self._lock:
+            if self._cached_signature == signature and self._cached_backend:
+                return self._cached_backend
+
+            if (
+                self._cached_backend
+                and self._last_benchmark_monotonic is not None
+                and now - self._last_benchmark_monotonic < self.min_recheck_interval_seconds
+            ):
+                try:
+                    self.log_func(
+                        f"CAPTURE_SELECTOR: recheck throttled selected backend={self._cached_backend}"
+                    )
+                except Exception:
+                    pass
+                return self._cached_backend
+
+            result = benchmark_capture_backends(
+                normalized_region,
+                sample_count=self.sample_count,
+                capture_func=self.capture_func,
+                perf_counter=self.perf_counter,
+                log_func=self.log_func,
+                mss_factory=mss_factory,
+                pyautogui_module=pyautogui_module,
+            )
+            resolved_backend = result.get('selected_backend') or self._cached_backend or 'auto'
+            self._cached_signature = signature
+            self._cached_backend = resolved_backend
+            self._last_benchmark_monotonic = now
+            self.last_benchmark_result = result
+            return resolved_backend
+
+    def record_backend_fallback(self, configured_backend, requested_backend, actual_backend, region, reason=None):
+        if _normalize_capture_backend(configured_backend) != 'auto':
+            return
+        actual_backend = _normalize_capture_backend(actual_backend)
+        requested_backend = _normalize_capture_backend(requested_backend)
+        if actual_backend not in _CAPTURE_BACKENDS or actual_backend == requested_backend:
+            return
+
+        normalized_region = _normalize_capture_region(region)
+        with self._lock:
+            self._cached_signature = (normalized_region, 'auto')
+            self._cached_backend = actual_backend
+            self._last_benchmark_monotonic = self.monotonic_clock()
+        try:
+            self.log_func(
+                f"CAPTURE_SELECTOR: fallback reason={reason or 'capture failure'} "
+                f"requested={requested_backend} selected backend={actual_backend}"
+            )
+        except Exception:
+            pass
+
+    def invalidate(self, reason=None):
+        with self._lock:
+            self._cached_signature = None
+            self._cached_backend = None
+            self.last_benchmark_result = None
+        if reason:
+            try:
+                self.log_func(f"CAPTURE_SELECTOR: invalidated reason={reason}")
+            except Exception:
+                pass
 
 
 def build_capture_signature(image_hash, region, backend):
