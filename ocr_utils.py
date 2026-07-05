@@ -1,5 +1,6 @@
 import re
 import importlib
+import io
 import os
 import shutil
 import sys
@@ -454,6 +455,18 @@ def clear_tesseract_ocr_engines():
 _CAPTURE_BACKENDS = ('mss', 'pyautogui')
 _CAPTURE_BENCHMARK_MAX_WIDTH = 320
 _CAPTURE_BENCHMARK_MAX_HEIGHT = 180
+API_OCR_IMAGE_MODE_LOSSLESS_WEBP = 'lossless_webp'
+API_OCR_IMAGE_MODE_BALANCED_WEBP = 'balanced_webp'
+API_OCR_IMAGE_MODE_SMALL_GRAYSCALE_WEBP = 'small_grayscale_webp'
+API_OCR_IMAGE_MODE_DEFAULT = API_OCR_IMAGE_MODE_BALANCED_WEBP
+API_OCR_IMAGE_MODES = (
+    API_OCR_IMAGE_MODE_LOSSLESS_WEBP,
+    API_OCR_IMAGE_MODE_BALANCED_WEBP,
+    API_OCR_IMAGE_MODE_SMALL_GRAYSCALE_WEBP,
+)
+API_OCR_IMAGE_QUALITY_DEFAULT = 85
+API_OCR_IMAGE_DETAILS = ('auto', 'low', 'high')
+API_OCR_IMAGE_DETAIL_DEFAULT = 'auto'
 
 
 def _normalize_capture_backend(backend):
@@ -756,6 +769,85 @@ class CaptureBackendSelector:
                 self.log_func(f"CAPTURE_SELECTOR: invalidated reason={reason}")
             except Exception:
                 pass
+
+
+def normalize_api_ocr_image_mode(mode):
+    normalized = str(mode or API_OCR_IMAGE_MODE_DEFAULT).strip().lower()
+    if normalized in API_OCR_IMAGE_MODES:
+        return normalized
+    return API_OCR_IMAGE_MODE_DEFAULT
+
+
+def normalize_api_ocr_image_quality(quality):
+    try:
+        normalized = int(quality)
+    except (TypeError, ValueError):
+        normalized = API_OCR_IMAGE_QUALITY_DEFAULT
+    return max(1, min(100, normalized))
+
+
+def normalize_api_ocr_image_detail(detail):
+    normalized = str(detail or API_OCR_IMAGE_DETAIL_DEFAULT).strip().lower()
+    if normalized in API_OCR_IMAGE_DETAILS:
+        return normalized
+    return API_OCR_IMAGE_DETAIL_DEFAULT
+
+
+def _flatten_transparency_for_api_ocr(pil_image):
+    Image = _pil_image()
+    if pil_image.mode in ('RGBA', 'LA'):
+        rgb_img = Image.new('RGB', pil_image.size, (255, 255, 255))
+        if pil_image.mode == 'RGBA':
+            rgb_img.paste(pil_image, mask=pil_image.split()[-1])
+        else:
+            rgb_img.paste(pil_image)
+        return rgb_img
+    if pil_image.mode == 'P' and getattr(pil_image, 'info', {}).get('transparency') is not None:
+        return _flatten_transparency_for_api_ocr(pil_image.convert('RGBA'))
+    return pil_image
+
+
+def _prepare_image_for_api_ocr(pil_image, mode):
+    image = _flatten_transparency_for_api_ocr(pil_image)
+    if mode == API_OCR_IMAGE_MODE_SMALL_GRAYSCALE_WEBP:
+        if image.mode != 'L':
+            image = image.convert('L')
+        return image
+    if image.mode not in ('RGB', 'L'):
+        image = image.convert('RGB')
+    return image
+
+
+def encode_image_for_api_ocr(pil_image, mode=API_OCR_IMAGE_MODE_DEFAULT, quality=API_OCR_IMAGE_QUALITY_DEFAULT):
+    """Encode a PIL image for Custom AI OCR API upload."""
+    if pil_image is None:
+        raise ValueError("Cannot encode an empty OCR image")
+
+    normalized_mode = normalize_api_ocr_image_mode(mode)
+    normalized_quality = normalize_api_ocr_image_quality(quality)
+    image = _prepare_image_for_api_ocr(pil_image, normalized_mode)
+    buffer = io.BytesIO()
+
+    if normalized_mode == API_OCR_IMAGE_MODE_LOSSLESS_WEBP:
+        image.save(
+            buffer,
+            format='WebP',
+            lossless=True,
+            method=0,
+            exact=True,
+        )
+    else:
+        image.save(
+            buffer,
+            format='WebP',
+            quality=normalized_quality,
+            method=3,
+        )
+
+    webp_bytes = buffer.getvalue()
+    if not webp_bytes:
+        raise ValueError("Encoded OCR image payload is empty")
+    return webp_bytes
 
 
 def build_capture_signature(image_hash, region, backend):

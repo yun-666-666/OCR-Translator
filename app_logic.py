@@ -11,8 +11,6 @@ import os
 import re
 import gc
 import traceback
-import io
-import base64
 import concurrent.futures
 
 from logger import log_debug, set_debug_logging_enabled, is_debug_logging_enabled
@@ -45,7 +43,14 @@ from ocr_utils import (
     clear_tesseract_ocr_engines,
     CaptureBackendSelector,
     OCRFrameCache,
+    API_OCR_IMAGE_DETAIL_DEFAULT,
+    API_OCR_IMAGE_MODE_DEFAULT,
+    API_OCR_IMAGE_QUALITY_DEFAULT,
+    encode_image_for_api_ocr,
     get_tesseract_ocr_config,
+    normalize_api_ocr_image_detail,
+    normalize_api_ocr_image_mode,
+    normalize_api_ocr_image_quality,
     resolve_tessdata_dir_from_tesseract_path,
 )
 
@@ -307,6 +312,21 @@ class GameChangingTranslator:
         self.custom_ai_submit_interval_ms_var = tk.IntVar(
             value=max(0, min(5000, custom_ai_submit_interval_ms))
         )
+        self.custom_ai_ocr_image_mode_var = tk.StringVar(
+            value=normalize_api_ocr_image_mode(
+                self.config['Settings'].get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
+            )
+        )
+        self.custom_ai_ocr_image_quality_var = tk.IntVar(
+            value=normalize_api_ocr_image_quality(
+                self.config['Settings'].get('custom_ai_ocr_image_quality', str(API_OCR_IMAGE_QUALITY_DEFAULT))
+            )
+        )
+        self.custom_ai_ocr_image_detail_var = tk.StringVar(
+            value=normalize_api_ocr_image_detail(
+                self.config['Settings'].get('custom_ai_ocr_image_detail', API_OCR_IMAGE_DETAIL_DEFAULT)
+            )
+        )
         
         # Separate Gemini model selection for OCR and Translation
         self.gemini_translation_model_var = tk.StringVar(value=self.config['Settings'].get('gemini_translation_model', 'Gemini 2.5 Flash-Lite'))
@@ -472,6 +492,9 @@ class GameChangingTranslator:
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
         self.custom_ai_latency_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
+        self.custom_ai_ocr_image_mode_var.trace_add("write", self.settings_changed_callback)
+        self.custom_ai_ocr_image_quality_var.trace_add("write", self.settings_changed_callback)
+        self.custom_ai_ocr_image_detail_var.trace_add("write", self.settings_changed_callback)
         self.preprocessing_mode_var.trace_add("write", self.settings_changed_callback)
         self.preprocessing_mode_var.trace_add("write", self.on_ocr_parameter_change)
         self.adaptive_block_size_var.trace_add("write", self.settings_changed_callback)
@@ -862,40 +885,60 @@ class GameChangingTranslator:
             return False
 
     def convert_to_webp_for_api(self, pil_image):
-        """Convert PIL image to lossless WebP bytes for API calls."""
-        try:
-            from PIL import Image
+        """Convert a PIL image to configured WebP bytes for API OCR calls."""
+        mode_getter = getattr(self, 'get_custom_ai_ocr_image_mode', None)
+        quality_getter = getattr(self, 'get_custom_ai_ocr_image_quality', None)
+        detail_getter = getattr(self, 'get_custom_ai_ocr_image_detail', None)
+        if callable(mode_getter):
+            mode = mode_getter()
+        else:
+            mode_var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
+            mode = normalize_api_ocr_image_mode(mode_var.get() if mode_var is not None else API_OCR_IMAGE_MODE_DEFAULT)
+        if callable(quality_getter):
+            quality = quality_getter()
+        else:
+            quality_var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
+            quality = normalize_api_ocr_image_quality(quality_var.get() if quality_var is not None else API_OCR_IMAGE_QUALITY_DEFAULT)
+        if callable(detail_getter):
+            detail = detail_getter()
+        else:
+            detail_var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
+            detail = normalize_api_ocr_image_detail(detail_var.get() if detail_var is not None else API_OCR_IMAGE_DETAIL_DEFAULT)
+        start = time.monotonic()
 
-            # Optimize image for OCR if needed
-            if pil_image.mode in ('RGBA', 'LA'):
-                rgb_img = Image.new('RGB', pil_image.size, (255, 255, 255))
-                if pil_image.mode == 'RGBA':
-                    rgb_img.paste(pil_image, mask=pil_image.split()[-1])
-                else:
-                    rgb_img.paste(pil_image)
-                pil_image = rgb_img
-            
-            # Create memory buffer
-            buffer = io.BytesIO()
-            
-            # Save as WebP lossless in memory
-            pil_image.save(
-                buffer, 
-                format='WebP', 
-                lossless=True, 
-                method=0,
-                exact=True
+        try:
+            webp_bytes = encode_image_for_api_ocr(
+                pil_image,
+                mode=mode,
+                quality=quality,
             )
-            
-            # Get bytes
-            webp_bytes = buffer.getvalue()
-            
-            log_debug(f"Converted PIL image to WebP for API: {len(webp_bytes)} bytes")
-            return webp_bytes
-            
         except Exception as e:
-            log_debug(f"Error converting image to WebP for API: {e}")
-            return None
+            log_debug(
+                "API OCR image encoding failed "
+                f"mode={mode} quality={quality} detail={detail}: {type(e).__name__} - {e}; "
+                "retrying mode=lossless_webp"
+            )
+            try:
+                mode = 'lossless_webp'
+                webp_bytes = encode_image_for_api_ocr(
+                    pil_image,
+                    mode=mode,
+                    quality=quality,
+                )
+            except Exception as fallback_error:
+                log_debug(
+                    "API OCR image encoding failed "
+                    f"mode=lossless_webp quality={quality} detail={detail}: "
+                    f"{type(fallback_error).__name__} - {fallback_error}"
+                )
+                return None
+
+        duration = time.monotonic() - start
+        log_debug(
+            "API OCR image encoded "
+            f"mode={mode} bytes={len(webp_bytes)} detail={detail} duration={duration:.3f}s"
+        )
+        return webp_bytes
 
     def _pre_initialize_gemini_model(self):
         """Pre-configure Gemini API at startup to avoid thread initialization delays."""
@@ -2138,6 +2181,30 @@ class GameChangingTranslator:
             return normalize_custom_ai_latency_mode(var.get() if var is not None else CUSTOM_AI_LATENCY_MODE_SAFE)
         except Exception:
             return CUSTOM_AI_LATENCY_MODE_SAFE
+
+    def get_custom_ai_ocr_image_mode(self):
+        """Return the selected Custom AI OCR image encoding mode."""
+        var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
+        try:
+            return normalize_api_ocr_image_mode(var.get() if var is not None else API_OCR_IMAGE_MODE_DEFAULT)
+        except Exception:
+            return API_OCR_IMAGE_MODE_DEFAULT
+
+    def get_custom_ai_ocr_image_quality(self):
+        """Return the selected Custom AI OCR image quality."""
+        var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
+        try:
+            return normalize_api_ocr_image_quality(var.get() if var is not None else API_OCR_IMAGE_QUALITY_DEFAULT)
+        except Exception:
+            return API_OCR_IMAGE_QUALITY_DEFAULT
+
+    def get_custom_ai_ocr_image_detail(self):
+        """Return the selected Custom AI OCR vision detail mode."""
+        var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
+        try:
+            return normalize_api_ocr_image_detail(var.get() if var is not None else API_OCR_IMAGE_DETAIL_DEFAULT)
+        except Exception:
+            return API_OCR_IMAGE_DETAIL_DEFAULT
 
     def get_current_gemini_model_for_translation(self):
         """Get the API name of currently selected Gemini translation model."""

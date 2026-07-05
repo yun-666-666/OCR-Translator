@@ -127,6 +127,11 @@ class TranslationHandler:
                 source_lang,
                 keep_linebreaks=self.app.keep_linebreaks_var.get(),
                 latency_mode=self._get_custom_ai_latency_mode(),
+                image_detail=(
+                    self.app.get_custom_ai_ocr_image_detail()
+                    if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
+                    else "auto"
+                ),
             )
             self._log_custom_short_call("ocr", profile, result, usage, duration)
             return result

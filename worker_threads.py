@@ -23,6 +23,9 @@ from ocr_utils import (
     build_capture_signature, build_ocr_frame_cache_key,
     get_tesseract_ocr_config, resolve_tessdata_dir_from_tesseract_path,
     TesseractOcrUnavailableError, CaptureBackendSelector,
+    API_OCR_IMAGE_DETAIL_DEFAULT, API_OCR_IMAGE_MODE_DEFAULT,
+    API_OCR_IMAGE_QUALITY_DEFAULT, normalize_api_ocr_image_detail,
+    normalize_api_ocr_image_mode, normalize_api_ocr_image_quality,
 )
 from translation_utils import (
     is_translation_error_result,
@@ -740,14 +743,62 @@ def _route_local_ocr_candidate_for_translation(
 
 def _get_api_ocr_cache_mode_key(app):
     keep_linebreaks_var = getattr(app, 'keep_linebreaks_var', None)
+    parts = ['api']
     if keep_linebreaks_var is None:
-        return 'api'
+        keep_linebreaks = None
+    else:
+        try:
+            keep_linebreaks = bool(keep_linebreaks_var.get())
+        except Exception:
+            keep_linebreaks = False
+        parts.append(f"keep_linebreaks={keep_linebreaks}")
 
-    try:
-        keep_linebreaks = bool(keep_linebreaks_var.get())
-    except Exception:
-        keep_linebreaks = False
-    return f"api|keep_linebreaks={keep_linebreaks}"
+    has_image_payload_settings = any(
+        hasattr(app, attr)
+        for attr in (
+            'custom_ai_ocr_image_mode_var',
+            'custom_ai_ocr_image_quality_var',
+            'custom_ai_ocr_image_detail_var',
+            'get_custom_ai_ocr_image_mode',
+            'get_custom_ai_ocr_image_quality',
+            'get_custom_ai_ocr_image_detail',
+        )
+    )
+    if has_image_payload_settings:
+        try:
+            image_mode = app.get_custom_ai_ocr_image_mode()
+        except Exception:
+            image_mode_var = getattr(app, 'custom_ai_ocr_image_mode_var', None)
+            try:
+                image_mode = image_mode_var.get() if image_mode_var is not None else API_OCR_IMAGE_MODE_DEFAULT
+            except Exception:
+                image_mode = API_OCR_IMAGE_MODE_DEFAULT
+
+        try:
+            image_quality = app.get_custom_ai_ocr_image_quality()
+        except Exception:
+            image_quality_var = getattr(app, 'custom_ai_ocr_image_quality_var', None)
+            try:
+                image_quality = image_quality_var.get() if image_quality_var is not None else API_OCR_IMAGE_QUALITY_DEFAULT
+            except Exception:
+                image_quality = API_OCR_IMAGE_QUALITY_DEFAULT
+
+        try:
+            image_detail = app.get_custom_ai_ocr_image_detail()
+        except Exception:
+            image_detail_var = getattr(app, 'custom_ai_ocr_image_detail_var', None)
+            try:
+                image_detail = image_detail_var.get() if image_detail_var is not None else API_OCR_IMAGE_DETAIL_DEFAULT
+            except Exception:
+                image_detail = API_OCR_IMAGE_DETAIL_DEFAULT
+
+        parts.extend([
+            f"image_mode={normalize_api_ocr_image_mode(image_mode)}",
+            f"image_quality={normalize_api_ocr_image_quality(image_quality)}",
+            f"image_detail={normalize_api_ocr_image_detail(image_detail)}",
+        ])
+
+    return "|".join(parts)
 
 
 def _get_tesseract_ocr_cache_mode_key(app):

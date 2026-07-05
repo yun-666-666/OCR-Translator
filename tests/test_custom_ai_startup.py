@@ -41,6 +41,24 @@ class StartupOptimizationTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_submit_interval_ms"], "300")
 
+    def test_default_config_includes_custom_ai_ocr_image_payload_settings(self):
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_mode"], "balanced_webp")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_quality"], "85")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_detail"], "auto")
+
+    def test_custom_ai_ocr_image_payload_controls_are_wired_to_settings(self):
+        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("custom_ai_ocr_image_mode_var", gui_builder_source)
+        self.assertIn("custom_ai_ocr_image_quality_var", gui_builder_source)
+        self.assertIn("custom_ai_ocr_image_detail_var", gui_builder_source)
+        self.assertIn("custom_ai_ocr_image_mode", save_source)
+        self.assertIn("custom_ai_ocr_image_quality", save_source)
+        self.assertIn("custom_ai_ocr_image_detail", save_source)
+
     def test_custom_ai_submit_interval_is_wired_to_settings_and_localizations(self):
         gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
         save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")

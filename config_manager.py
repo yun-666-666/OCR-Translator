@@ -4,6 +4,14 @@ import os
 import sys
 from credential_store import create_default_credential_store
 from logger import log_debug
+from ocr_utils import (
+    API_OCR_IMAGE_DETAIL_DEFAULT,
+    API_OCR_IMAGE_MODE_DEFAULT,
+    API_OCR_IMAGE_QUALITY_DEFAULT,
+    normalize_api_ocr_image_detail,
+    normalize_api_ocr_image_mode,
+    normalize_api_ocr_image_quality,
+)
 from resource_handler import get_resource_path
 
 PROVIDER_CREDENTIAL_SERVICE = "OCR-Translator-Providers"
@@ -68,6 +76,9 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_target_lang': 'en',
     'custom_ai_latency_mode': 'safe',
     'custom_ai_submit_interval_ms': '300',
+    'custom_ai_ocr_image_mode': API_OCR_IMAGE_MODE_DEFAULT,
+    'custom_ai_ocr_image_quality': str(API_OCR_IMAGE_QUALITY_DEFAULT),
+    'custom_ai_ocr_image_detail': API_OCR_IMAGE_DETAIL_DEFAULT,
     # Adaptive thresholding parameters
     'adaptive_block_size': '41',
     'adaptive_c': '-60',
@@ -209,6 +220,27 @@ def load_app_config():
         config_settings['custom_ai_latency_mode'] = 'safe'
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")
+
+    current_image_mode = config_settings.get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
+    normalized_image_mode = normalize_api_ocr_image_mode(current_image_mode)
+    if normalized_image_mode != current_image_mode:
+        config_settings['custom_ai_ocr_image_mode'] = normalized_image_mode
+        settings_changed = True
+        log_debug(f"Config: Invalid Custom AI OCR image mode '{current_image_mode}' changed to '{normalized_image_mode}'")
+
+    current_image_quality = config_settings.get('custom_ai_ocr_image_quality', str(API_OCR_IMAGE_QUALITY_DEFAULT))
+    normalized_image_quality = str(normalize_api_ocr_image_quality(current_image_quality))
+    if normalized_image_quality != str(current_image_quality):
+        config_settings['custom_ai_ocr_image_quality'] = normalized_image_quality
+        settings_changed = True
+        log_debug(f"Config: Invalid Custom AI OCR image quality '{current_image_quality}' changed to '{normalized_image_quality}'")
+
+    current_image_detail = config_settings.get('custom_ai_ocr_image_detail', API_OCR_IMAGE_DETAIL_DEFAULT)
+    normalized_image_detail = normalize_api_ocr_image_detail(current_image_detail)
+    if normalized_image_detail != current_image_detail:
+        config_settings['custom_ai_ocr_image_detail'] = normalized_image_detail
+        settings_changed = True
+        log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
 
     if migrate_provider_api_keys_to_credentials(config_settings):
         settings_changed = True

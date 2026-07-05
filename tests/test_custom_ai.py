@@ -2653,6 +2653,53 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("data:image/webp;base64,", serialized)
         self.assertIn("Transcribe", serialized)
 
+    def test_build_ocr_payload_adds_requested_image_detail(self):
+        provider = CustomAIProvider()
+
+        payload = provider.build_ocr_payload(
+            profile={"model": "vision-model"},
+            image_data=b"webp-bytes",
+            source_lang="ja",
+            keep_linebreaks=False,
+            image_detail="low",
+        )
+        image_url = payload["messages"][0]["content"][1]["image_url"]
+
+        self.assertEqual(image_url["detail"], "low")
+
+    def test_build_ocr_payload_omits_auto_image_detail_for_compatibility(self):
+        provider = CustomAIProvider()
+
+        payload = provider.build_ocr_payload(
+            profile={"model": "vision-model"},
+            image_data=b"webp-bytes",
+            source_lang="ja",
+            keep_linebreaks=False,
+            image_detail="auto",
+        )
+        image_url = payload["messages"][0]["content"][1]["image_url"]
+
+        self.assertNotIn("detail", image_url)
+
+    def test_responses_payload_preserves_input_image_detail(self):
+        provider = CustomAIProvider()
+        chat_payload = provider.build_ocr_payload(
+            profile={"model": "vision-model"},
+            image_data=b"webp-bytes",
+            source_lang="ja",
+            keep_linebreaks=False,
+            image_detail="high",
+        )
+
+        responses_payload = provider.build_responses_payload_from_chat_payload(
+            {"model": "vision-model"},
+            chat_payload,
+        )
+        image_content = responses_payload["input"][0]["content"][1]
+
+        self.assertEqual(image_content["type"], "input_image")
+        self.assertEqual(image_content["detail"], "high")
+
     def test_build_ocr_payload_includes_non_auto_source_language_hint(self):
         provider = CustomAIProvider()
         payload = provider.build_ocr_payload(

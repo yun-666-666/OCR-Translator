@@ -1,5 +1,7 @@
 import importlib
 import importlib.util
+import base64
+import io
 import os
 import queue
 import sys
@@ -903,6 +905,84 @@ class LatencyShutdownTests(unittest.TestCase):
         self.assertEqual(scheduled[0][0], 100)
 
 
+class ApiOcrImagePayloadEncodingTests(unittest.TestCase):
+    def test_lossless_webp_matches_current_api_encoding(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        image = Image.new("RGBA", (16, 8), (10, 20, 30, 128))
+        expected_image = Image.new("RGB", image.size, (255, 255, 255))
+        expected_image.paste(image, mask=image.split()[-1])
+        expected_buffer = io.BytesIO()
+        expected_image.save(
+            expected_buffer,
+            format="WebP",
+            lossless=True,
+            method=0,
+            exact=True,
+        )
+
+        encoded = ocr_utils.encode_image_for_api_ocr(
+            image,
+            mode="lossless_webp",
+            quality=85,
+        )
+
+        self.assertEqual(encoded, expected_buffer.getvalue())
+
+    def test_balanced_webp_is_smaller_than_lossless_for_noisy_frame(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        rng = np.random.default_rng(1234)
+        image = Image.fromarray(
+            rng.integers(0, 256, size=(96, 160, 3), dtype=np.uint8)
+        )
+
+        lossless = ocr_utils.encode_image_for_api_ocr(
+            image,
+            mode="lossless_webp",
+            quality=85,
+        )
+        balanced = ocr_utils.encode_image_for_api_ocr(
+            image,
+            mode="balanced_webp",
+            quality=85,
+        )
+
+        self.assertLess(len(balanced), len(lossless))
+
+    def test_small_grayscale_webp_handles_rgba_images(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        image = Image.new("RGBA", (32, 24), (20, 40, 220, 180))
+        image.putpixel((5, 5), (255, 32, 16, 255))
+
+        encoded = ocr_utils.encode_image_for_api_ocr(
+            image,
+            mode="small_grayscale_webp",
+            quality=80,
+        )
+        decoded = Image.open(io.BytesIO(encoded))
+        sample = decoded.convert("RGB").getpixel((5, 5))
+
+        self.assertEqual(decoded.format, "WEBP")
+        self.assertEqual(decoded.size, image.size)
+        self.assertLessEqual(max(sample) - min(sample), 2)
+
+    def test_encode_image_for_api_ocr_rejects_empty_payload(self):
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class EmptySavingImage:
+            mode = "RGB"
+            size = (10, 10)
+
+            def save(self, _buffer, **_kwargs):
+                return None
+
+        with self.assertRaises(ValueError):
+            ocr_utils.encode_image_for_api_ocr(
+                EmptySavingImage(),
+                mode="balanced_webp",
+                quality=85,
+            )
+
+
 class LatencyTranslationCacheTests(unittest.TestCase):
     def test_api_ocr_cache_hit_reuses_cached_text_without_webp_or_submit(self):
         worker_threads = import_worker_threads_for_tests()
@@ -1135,6 +1215,99 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(convert_calls, ["called"])
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_ocr_calls, {1})
+
+    def test_api_ocr_cache_does_not_cross_image_payload_settings(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        cache = ocr_utils.OCRFrameCache(max_size=4)
+        stale_default_payload_key = ocr_utils.build_ocr_frame_cache_key(
+            "repeat-hash",
+            "custom_ai",
+            "en",
+            "api|keep_linebreaks=False",
+            (320, 120),
+            region_origin=(10, 20),
+        )
+        cache.put(stale_default_payload_key, "Cached with different payload settings")
+
+        screenshot = Image.new("RGB", (320, 120), (1, 2, 3))
+        screenshot._gct_frame_hash = "repeat-hash"
+        screenshot._gct_region_origin = (10, 20)
+
+        convert_calls = []
+        pool = Pool()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: convert_calls.append("called") or b"balanced-webp",
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "balanced_webp"),
+            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 85),
+            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "low"),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=cache,
+        )
+
+        with patch.object(worker_threads, "start_async_translation"):
+            worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(convert_calls, ["called"])
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(app.active_ocr_calls, {1})
+
+    def test_api_ocr_cache_mode_key_includes_image_payload_settings(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: True),
+            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "small_grayscale_webp"),
+            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 80),
+            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "high"),
+        )
+
+        cache_mode_key = worker_threads._get_api_ocr_cache_mode_key(app)
+
+        self.assertIn("keep_linebreaks=True", cache_mode_key)
+        self.assertIn("image_mode=small_grayscale_webp", cache_mode_key)
+        self.assertIn("image_quality=80", cache_mode_key)
+        self.assertIn("image_detail=high", cache_mode_key)
+
+    def test_convert_to_webp_for_api_logs_payload_metadata_without_base64(self):
+        import app_logic
+
+        log_messages = []
+        image = Image.new("RGB", (48, 24), (250, 250, 250))
+        app = types.SimpleNamespace(
+            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "small_grayscale_webp"),
+            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 80),
+            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "low"),
+        )
+
+        with patch.object(app_logic, "log_debug", side_effect=log_messages.append):
+            encoded = app_logic.GameChangingTranslator.convert_to_webp_for_api(app, image)
+
+        encoded_base64 = base64.b64encode(encoded).decode("ascii")
+        log_text = "\n".join(log_messages)
+        self.assertIn("mode=small_grayscale_webp", log_text)
+        self.assertIn("bytes=", log_text)
+        self.assertIn("detail=low", log_text)
+        self.assertIn("duration=", log_text)
+        self.assertNotIn(encoded_base64, log_text)
+        self.assertNotIn("data:image", log_text)
 
     def test_custom_ai_api_ocr_uses_custom_source_language(self):
         worker_threads = import_worker_threads_for_tests()

@@ -428,6 +428,7 @@ def create_settings_tab(app):
     validate_scan_interval = frame.register(lambda P: validate_int_range(P, 50, 2000))
     validate_custom_context_window = frame.register(lambda P: validate_int_range(P, 0, 10))
     validate_custom_ai_submit_interval = frame.register(lambda P: validate_int_range(P, 0, 5000))
+    validate_custom_ai_ocr_image_quality = frame.register(lambda P: validate_int_range(P, 1, 100))
     validate_timeout = frame.register(lambda P: validate_int_range(P, 0, 60))
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_confidence = frame.register(lambda P: validate_int_range(P, 0, 100))
@@ -1470,7 +1471,113 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
-    row_offset = 20
+    app.custom_ai_ocr_image_mode_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("custom_ai_ocr_image_mode_label", "OCR image mode:"),
+    )
+    app.custom_ai_ocr_image_mode_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
+    custom_ai_ocr_image_mode_options = [
+        ("lossless_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_lossless", "Lossless WebP")),
+        ("balanced_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_balanced", "Balanced WebP")),
+        ("small_grayscale_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_grayscale", "Small grayscale WebP")),
+    ]
+    mode_display_by_value = {value: display for value, display in custom_ai_ocr_image_mode_options}
+    mode_value_by_display = {display: value for value, display in custom_ai_ocr_image_mode_options}
+    app.custom_ai_ocr_image_mode_display_var = tk.StringVar(
+        value=mode_display_by_value.get(
+            app.custom_ai_ocr_image_mode_var.get(),
+            mode_display_by_value["balanced_webp"],
+        )
+    )
+    app.custom_ai_ocr_image_mode_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.custom_ai_ocr_image_mode_display_var,
+        values=[display for _, display in custom_ai_ocr_image_mode_options],
+        width=25,
+        state='readonly',
+    )
+    app.custom_ai_ocr_image_mode_combobox.grid(row=20, column=1, padx=5, pady=5, sticky="ew")
+
+    def on_custom_ai_ocr_image_mode_changed(event):
+        selected_display = app.custom_ai_ocr_image_mode_display_var.get()
+        app.custom_ai_ocr_image_mode_var.set(mode_value_by_display.get(selected_display, "balanced_webp"))
+        if app._fully_initialized:
+            app.save_settings()
+
+    app.custom_ai_ocr_image_mode_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_custom_ai_ocr_image_mode_changed),
+    )
+
+    app.custom_ai_ocr_image_quality_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("custom_ai_ocr_image_quality_label", "OCR image quality:"),
+    )
+    app.custom_ai_ocr_image_quality_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_quality_spinbox = ttk.Spinbox(
+        frame,
+        from_=1,
+        to=100,
+        increment=5,
+        textvariable=app.custom_ai_ocr_image_quality_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_custom_ai_ocr_image_quality, '%P'),
+    )
+    app.custom_ai_ocr_image_quality_spinbox.grid(row=21, column=1, padx=5, pady=5, sticky="w")
+
+    def on_custom_ai_ocr_image_quality_focus_out(event):
+        try:
+            value = int(app.custom_ai_ocr_image_quality_var.get())
+            app.custom_ai_ocr_image_quality_var.set(max(1, min(100, value)))
+        except (ValueError, tk.TclError):
+            app.custom_ai_ocr_image_quality_var.set(85)
+        app.save_settings()
+
+    app.custom_ai_ocr_image_quality_spinbox.bind(
+        "<FocusOut>",
+        on_custom_ai_ocr_image_quality_focus_out,
+    )
+
+    app.custom_ai_ocr_image_detail_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("custom_ai_ocr_image_detail_label", "OCR image detail:"),
+    )
+    app.custom_ai_ocr_image_detail_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
+    custom_ai_ocr_image_detail_options = [
+        ("auto", app.ui_lang.get_label("custom_ai_ocr_image_detail_auto", "Auto")),
+        ("low", app.ui_lang.get_label("custom_ai_ocr_image_detail_low", "Low")),
+        ("high", app.ui_lang.get_label("custom_ai_ocr_image_detail_high", "High")),
+    ]
+    detail_display_by_value = {value: display for value, display in custom_ai_ocr_image_detail_options}
+    detail_value_by_display = {display: value for value, display in custom_ai_ocr_image_detail_options}
+    app.custom_ai_ocr_image_detail_display_var = tk.StringVar(
+        value=detail_display_by_value.get(
+            app.custom_ai_ocr_image_detail_var.get(),
+            detail_display_by_value["auto"],
+        )
+    )
+    app.custom_ai_ocr_image_detail_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.custom_ai_ocr_image_detail_display_var,
+        values=[display for _, display in custom_ai_ocr_image_detail_options],
+        width=25,
+        state='readonly',
+    )
+    app.custom_ai_ocr_image_detail_combobox.grid(row=22, column=1, padx=5, pady=5, sticky="ew")
+
+    def on_custom_ai_ocr_image_detail_changed(event):
+        selected_display = app.custom_ai_ocr_image_detail_display_var.get()
+        app.custom_ai_ocr_image_detail_var.set(detail_value_by_display.get(selected_display, "auto"))
+        if app._fully_initialized:
+            app.save_settings()
+
+    app.custom_ai_ocr_image_detail_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_custom_ai_ocr_image_detail_changed),
+    )
+
+    row_offset = 23
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),

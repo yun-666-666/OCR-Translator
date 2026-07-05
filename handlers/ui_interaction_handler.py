@@ -140,6 +140,18 @@ class UIInteractionHandler:
             manage_grid(self.app.custom_ai_submit_interval_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_submit_interval_spinbox'):
             manage_grid(self.app.custom_ai_submit_interval_spinbox, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_mode_label'):
+            manage_grid(self.app.custom_ai_ocr_image_mode_label, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_mode_combobox'):
+            manage_grid(self.app.custom_ai_ocr_image_mode_combobox, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_quality_label'):
+            manage_grid(self.app.custom_ai_ocr_image_quality_label, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_quality_spinbox'):
+            manage_grid(self.app.custom_ai_ocr_image_quality_spinbox, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_detail_label'):
+            manage_grid(self.app.custom_ai_ocr_image_detail_label, show=is_custom)
+        if hasattr(self.app, 'custom_ai_ocr_image_detail_combobox'):
+            manage_grid(self.app.custom_ai_ocr_image_detail_combobox, show=is_custom)
 
         # Manage "Keep Linebreaks" checkbox state
         if hasattr(self.app, 'keep_linebreaks_checkbox'):
@@ -1296,6 +1308,21 @@ class UIInteractionHandler:
             cfg['custom_ai_latency_mode'] = self.app.get_custom_ai_latency_mode() if hasattr(self.app, 'get_custom_ai_latency_mode') else self.app.custom_ai_latency_mode_var.get()
             cfg['custom_ai_submit_interval_ms'] = str(
                 max(0, min(5000, int(self.app.custom_ai_submit_interval_ms_var.get())))
+            )
+            cfg['custom_ai_ocr_image_mode'] = (
+                self.app.get_custom_ai_ocr_image_mode()
+                if hasattr(self.app, 'get_custom_ai_ocr_image_mode')
+                else self.app.custom_ai_ocr_image_mode_var.get()
+            )
+            cfg['custom_ai_ocr_image_quality'] = str(
+                self.app.get_custom_ai_ocr_image_quality()
+                if hasattr(self.app, 'get_custom_ai_ocr_image_quality')
+                else self.app.custom_ai_ocr_image_quality_var.get()
+            )
+            cfg['custom_ai_ocr_image_detail'] = (
+                self.app.get_custom_ai_ocr_image_detail()
+                if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
+                else self.app.custom_ai_ocr_image_detail_var.get()
             )
             cfg['openai_file_cache'] = str(self.app.openai_file_cache_var.get())
             cfg['openai_api_log_enabled'] = str(self.app.openai_api_log_enabled_var.get())

@@ -9,6 +9,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from credential_store import create_default_credential_store
 from logger import log_debug
+from ocr_utils import normalize_api_ocr_image_detail
 
 
 ACTIVE_PROFILE_KINDS = {"translation", "ocr"}
@@ -1340,10 +1341,16 @@ class CustomAIProvider:
                     converted.append({"type": "input_text", "text": str(part.get("text") or "")})
                 elif part_type == "image_url":
                     image_url = part.get("image_url")
+                    detail = part.get("detail")
                     if isinstance(image_url, dict):
+                        detail = image_url.get("detail", detail)
                         image_url = image_url.get("url")
                     if image_url:
-                        converted.append({"type": "input_image", "image_url": str(image_url)})
+                        converted_image = {"type": "input_image", "image_url": str(image_url)}
+                        normalized_detail = normalize_api_ocr_image_detail(detail)
+                        if normalized_detail != "auto":
+                            converted_image["detail"] = normalized_detail
+                        converted.append(converted_image)
             return converted
         return str(content or "")
 
@@ -1378,7 +1385,7 @@ class CustomAIProvider:
             response_payload["reasoning"] = {"effort": reasoning_effort}
         return response_payload
 
-    def build_ocr_payload(self, profile, image_data, source_lang, keep_linebreaks=False):
+    def build_ocr_payload(self, profile, image_data, source_lang, keep_linebreaks=False, image_detail="auto"):
         source_lang_hint = ""
         normalized_source_lang = str(source_lang or "").strip()
         if normalized_source_lang and normalized_source_lang.lower() != "auto":
@@ -1393,6 +1400,10 @@ class CustomAIProvider:
         prompt += "If there is no text in the image, return only: <EMPTY>."
 
         data_url = "data:image/webp;base64," + base64.b64encode(image_data).decode("ascii")
+        image_url = {"url": data_url}
+        normalized_detail = normalize_api_ocr_image_detail(image_detail)
+        if normalized_detail != "auto":
+            image_url["detail"] = normalized_detail
         return {
             "model": profile["model"],
             "messages": [
@@ -1400,7 +1411,7 @@ class CustomAIProvider:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "image_url", "image_url": image_url},
                     ],
                 }
             ],
@@ -1575,8 +1586,14 @@ class CustomAIProvider:
         )
         return result, self._extract_usage(response_json), duration
 
-    def recognize(self, profile, image_data, source_lang, keep_linebreaks=False, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
-        payload = self.build_ocr_payload(profile, image_data, source_lang, keep_linebreaks=keep_linebreaks)
+    def recognize(self, profile, image_data, source_lang, keep_linebreaks=False, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE, image_detail="auto"):
+        payload = self.build_ocr_payload(
+            profile,
+            image_data,
+            source_lang,
+            keep_linebreaks=keep_linebreaks,
+            image_detail=image_detail,
+        )
         response_json, duration = self._post(profile, payload, latency_mode=latency_mode)
         result = self._parse_response_text(profile, response_json)
         if keep_linebreaks:
