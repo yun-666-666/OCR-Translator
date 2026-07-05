@@ -18,6 +18,7 @@ from custom_ai import (
     CUSTOM_AI_LATENCY_MODE_RACE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
     CUSTOM_AI_LATENCY_MODE_STREAM,
+    normalize_custom_ai_structured_output_mode,
     normalize_custom_ai_latency_mode,
     normalize_custom_ai_wire_api,
 )
@@ -439,7 +440,11 @@ Call Duration: {call_duration:.3f} seconds
 
         return None
 
-    def _get_custom_ai_cache_profile_and_params(self, current_source=None):
+    def _get_custom_ai_cache_profile_and_params(
+        self,
+        current_source=None,
+        latency_mode=None,
+    ):
         profile = self.app.custom_ai_profiles.get_active_profile("translation")
         if not profile:
             return None, None, None, None
@@ -449,6 +454,7 @@ Call Duration: {call_duration:.3f} seconds
         cache_params = self._cache_params_for_profile(
             profile,
             current_source=current_source,
+            latency_mode=latency_mode,
         )
         return profile, source_lang, target_lang, cache_params
 
@@ -511,6 +517,7 @@ Call Duration: {call_duration:.3f} seconds
             cache_params.get("credential_scope", ""),
             cache_params.get("wire_api", "chat_completions"),
             cache_params.get("reasoning_effort", ""),
+            cache_params.get("structured_output_contract", "text"),
             cache_params.get("custom_prompt", ""),
             cache_params.get("keep_linebreaks", False),
             cache_params.get("context", ()),
@@ -606,8 +613,14 @@ Call Duration: {call_duration:.3f} seconds
     ):
         with self._custom_context_lock:
             context_generation = self._custom_context_generation
+        latency_mode = normalize_custom_ai_latency_mode(
+            self._get_custom_ai_latency_mode()
+            if latency_mode is None
+            else latency_mode
+        )
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text_main,
+            latency_mode=latency_mode,
         )
         if not profile:
             return "AI model profile for translation is missing."
@@ -624,11 +637,6 @@ Call Duration: {call_duration:.3f} seconds
         if cached_result:
             return cached_result
 
-        latency_mode = normalize_custom_ai_latency_mode(
-            self._get_custom_ai_latency_mode()
-            if latency_mode is None
-            else latency_mode
-        )
         context = list(cache_params.get("context", ()))
         keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
         custom_prompt = cache_params.get("custom_prompt", "")
@@ -663,6 +671,13 @@ Call Duration: {call_duration:.3f} seconds
                     stream_callback=stream_callback if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM else None,
                 )
                 winning_profile = profile
+                cache_params = self._cache_params_for_profile(
+                    profile,
+                    custom_prompt=custom_prompt,
+                    keep_linebreaks=keep_linebreaks,
+                    context=context,
+                    latency_mode=latency_mode,
+                )
             self._log_custom_short_call("translation", winning_profile, translated_api_text, usage, duration)
         except Exception as e:
             error_text = self._sanitize_custom_ai_profile_error(
@@ -686,8 +701,15 @@ Call Duration: {call_duration:.3f} seconds
                     custom_prompt=custom_prompt,
                     keep_linebreaks=keep_linebreaks,
                     context=context,
+                    latency_mode=latency_mode,
                 )
-                if active_cache_params != cache_params:
+                if (
+                    active_cache_params != cache_params
+                    and active_cache_params.get(
+                        "structured_output_contract"
+                    )
+                    == cache_params.get("structured_output_contract")
+                ):
                     cache_targets.append(active_cache_params)
             for target_cache_params in cache_targets:
                 self.unified_cache.store(
@@ -755,6 +777,7 @@ Call Duration: {call_duration:.3f} seconds
                     custom_prompt=custom_prompt,
                     keep_linebreaks=keep_linebreaks,
                     context=context,
+                    latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
                 ),
                 candidate,
             )
@@ -827,6 +850,7 @@ Call Duration: {call_duration:.3f} seconds
                         custom_prompt=custom_prompt,
                         keep_linebreaks=keep_linebreaks,
                         context=context,
+                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
                     ),
                     candidate,
                 )
@@ -904,6 +928,9 @@ Call Duration: {call_duration:.3f} seconds
                 or profile.get("model_reasoning_effort")
                 or ""
             ).strip().lower(),
+            normalize_custom_ai_structured_output_mode(
+                profile.get("structured_output_mode")
+            ),
         )
 
     def _custom_ai_race_profile_identity(self, profile):
@@ -952,6 +979,7 @@ Call Duration: {call_duration:.3f} seconds
         custom_prompt=None,
         keep_linebreaks=None,
         context=None,
+        latency_mode=None,
     ):
         if keep_linebreaks is None:
             keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
@@ -965,6 +993,20 @@ Call Duration: {call_duration:.3f} seconds
             context = self._get_custom_context_for_request(
                 current_source=current_source,
             )
+        try:
+            request_latency_mode = normalize_custom_ai_latency_mode(
+                latency_mode
+                if latency_mode is not None
+                else self._get_custom_ai_latency_mode()
+            )
+        except Exception:
+            request_latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+        structured_output_contract = (
+            self.custom_ai_provider.structured_output_request_contract(
+                profile,
+                latency_mode=request_latency_mode,
+            )
+        )
 
         return {
             "profile_id": profile.get("id", ""),
@@ -983,6 +1025,7 @@ Call Duration: {call_duration:.3f} seconds
                 or profile.get("model_reasoning_effort")
                 or ""
             ).strip().lower(),
+            "structured_output_contract": structured_output_contract,
             "custom_prompt": custom_prompt,
             "keep_linebreaks": keep_linebreaks,
             "context": tuple(context),

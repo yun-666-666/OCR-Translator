@@ -70,6 +70,16 @@ def build_custom_ai_profile_values_from_form(app):
         reasoning_effort = str(selected_profile.get("reasoning_effort") or selected_profile.get("model_reasoning_effort") or "").strip()
         if reasoning_effort:
             values["reasoning_effort"] = reasoning_effort
+        structured_output_mode = str(selected_profile.get("structured_output_mode") or "").strip()
+        if structured_output_mode:
+            values["structured_output_mode"] = structured_output_mode
+    structured_var = getattr(app, "ai_profile_structured_output_mode_var", None)
+    if structured_var is not None:
+        values["structured_output_mode"] = _read_var(
+            app,
+            "ai_profile_structured_output_mode_var",
+            strip=True,
+        )
     return values
 
 
@@ -1151,6 +1161,7 @@ def create_settings_tab(app):
     app.ai_profile_url_var = tk.StringVar()
     app.ai_profile_key_var = tk.StringVar()
     app.ai_profile_model_var = tk.StringVar()
+    app.ai_profile_structured_output_mode_var = tk.StringVar(value="auto")
     app.ai_profile_model_values = []
 
     def get_profile_by_name(name):
@@ -1199,12 +1210,21 @@ def create_settings_tab(app):
             app.ai_profile_url_var.set("")
             app.ai_profile_key_var.set("")
             app.ai_profile_model_var.set("")
+            app.ai_profile_structured_output_mode_var.set("auto")
             return
         app.ai_profile_selected_id = profile["id"]
         app.ai_profile_name_var.set(profile.get("name", ""))
         app.ai_profile_url_var.set(profile.get("base_url", ""))
         app.ai_profile_key_var.set(profile.get("api_key", ""))
         app.ai_profile_model_var.set(profile.get("model", ""))
+        structured_output_mode = str(
+            profile.get("structured_output_mode") or "auto"
+        ).strip().lower()
+        if structured_output_mode not in {"off", "auto", "strict"}:
+            structured_output_mode = "auto"
+        app.ai_profile_structured_output_mode_var.set(
+            structured_output_mode
+        )
 
     def on_profile_name_selected(event=None):
         load_profile(get_profile_by_name(app.ai_profile_name_var.get()))
@@ -1331,8 +1351,30 @@ def create_settings_tab(app):
     app.ai_profile_fetch_models_button = ttk.Button(model_frame, text=app.ui_lang.get_label("fetch_model_list_btn", "Fetch Models"), command=fetch_model_list_form)
     app.ai_profile_fetch_models_button.grid(row=0, column=1, padx=(5, 0))
 
+    ttk.Label(
+        app.ai_profiles_frame,
+        text=app.ui_lang.get_label(
+            "ai_profile_structured_output_label",
+            "Structured output",
+        ),
+    ).grid(row=4, column=0, padx=5, pady=3, sticky="w")
+    app.ai_profile_structured_output_combobox = ttk.Combobox(
+        app.ai_profiles_frame,
+        textvariable=app.ai_profile_structured_output_mode_var,
+        values=["auto", "strict", "off"],
+        state="readonly",
+        width=12,
+    )
+    app.ai_profile_structured_output_combobox.grid(
+        row=4,
+        column=1,
+        padx=5,
+        pady=3,
+        sticky="w",
+    )
+
     profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
-    profile_buttons.grid(row=0, column=2, rowspan=4, padx=(10, 8), pady=6, sticky="nsew")
+    profile_buttons.grid(row=0, column=2, rowspan=5, padx=(10, 8), pady=6, sticky="nsew")
     ttk.Button(
         profile_buttons,
         text=app.ui_lang.get_label("add_btn", "Add"),

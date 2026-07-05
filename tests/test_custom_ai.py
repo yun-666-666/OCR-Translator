@@ -366,6 +366,31 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
             self.assertEqual(profile["wire_api"], "chat_completions")
 
+    def test_profile_manager_defaults_to_auto_structured_output_and_persists_updates(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+
+            profile = manager.add_profile(
+                name="Structured Relay",
+                base_url="https://relay.example/v1",
+                api_key="secret",
+                model="gpt-5.5",
+            )
+            self.assertEqual(profile["structured_output_mode"], "auto")
+
+            manager.update_profile(
+                profile["id"],
+                structured_output_mode="strict",
+            )
+            reloaded = CustomAIProfileManager(path, credential_store=store)
+
+            self.assertEqual(
+                reloaded.get_profile(profile["id"])["structured_output_mode"],
+                "strict",
+            )
+
 
 class CustomAIProviderTests(unittest.TestCase):
     def test_provider_base_url_key_canonicalizes_network_equivalence(self):
@@ -1137,6 +1162,7 @@ class CustomAIProviderTests(unittest.TestCase):
                         "base_url": "https://host.example/v1",
                         "api_key": "super-secret",
                         "model": "demo",
+                        "structured_output_mode": "off",
                         "wire_api": wire_api,
                     },
                     "Hello",
@@ -1534,6 +1560,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "base_url": "https://host.example/v1",
                 "api_key": "super-secret",
                 "model": "gpt-5.5",
+                "structured_output_mode": "off",
                 "wire_api": "responses",
             },
             "Hello",
@@ -1578,6 +1605,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "base_url": "https://host.example/v1",
                 "api_key": "super-secret",
                 "model": "gpt-test",
+                "structured_output_mode": "off",
             },
             "Select the OCR source area.",
             "en",
@@ -2286,6 +2314,65 @@ class CustomAIProviderTests(unittest.TestCase):
             ],
         )
 
+    def test_translation_payload_auto_and_strict_request_json_schema(self):
+        provider = CustomAIProvider()
+
+        for mode in ["auto", "strict"]:
+            with self.subTest(mode=mode):
+                payload = provider.build_translation_payload(
+                    {
+                        "model": "demo",
+                        "base_url": "https://host.example/v1",
+                        "structured_output_mode": mode,
+                    },
+                    "Bonjour",
+                    "fr",
+                    "en",
+                )
+
+                response_format = payload["response_format"]
+                schema_wrapper = response_format["json_schema"]
+                schema = schema_wrapper["schema"]
+
+                self.assertEqual(response_format["type"], "json_schema")
+                self.assertTrue(schema_wrapper["strict"])
+                self.assertEqual(schema["type"], "object")
+                self.assertEqual(schema["required"], ["translation"])
+                self.assertFalse(schema["additionalProperties"])
+                self.assertEqual(
+                    schema["properties"]["translation"]["type"],
+                    "string",
+                )
+                self.assertIn(
+                    "translation",
+                    payload["messages"][0]["content"],
+                )
+
+    def test_responses_payload_converts_translation_json_schema_format(self):
+        provider = CustomAIProvider()
+        chat_payload = provider.build_translation_payload(
+            {
+                "model": "demo",
+                "base_url": "https://host.example/v1",
+                "wire_api": "responses",
+                "structured_output_mode": "auto",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+        )
+
+        responses_payload = provider.build_responses_payload_from_chat_payload(
+            {"model": "demo", "wire_api": "responses"},
+            chat_payload,
+        )
+
+        text_format = responses_payload["text"]["format"]
+        self.assertEqual(text_format["type"], "json_schema")
+        self.assertTrue(text_format["strict"])
+        self.assertEqual(text_format["schema"]["required"], ["translation"])
+        self.assertNotIn("response_format", responses_payload)
+
     def test_translation_payload_json_round_trips_instruction_like_source(self):
         provider = CustomAIProvider()
         source = (
@@ -2389,6 +2476,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "base_url": "https://host.example/v1",
                 "api_key": "super-secret",
                 "model": "demo",
+                "structured_output_mode": "off",
             },
             "Bonjour",
             "fr",
@@ -2407,11 +2495,317 @@ class CustomAIProviderTests(unittest.TestCase):
                     "base_url": "https://host.example/v1",
                     "api_key": "super-secret",
                     "model": "demo",
+                    "structured_output_mode": "off",
                 },
                 "Bonjour",
                 "fr",
                 "en",
             )
+
+    def test_structured_translation_response_uses_translation_field(self):
+        provider = CustomAIProvider(http_client=object())
+        provider._post = Mock(
+            return_value=(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps({
+                                    "translation": "Hello"
+                                })
+                            }
+                        }
+                    ]
+                },
+                0.1,
+            )
+        )
+
+        result, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "structured_output_mode": "auto",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+        )
+
+        self.assertEqual(result, "Hello")
+
+    def test_structured_translation_response_rejects_missing_or_bad_translation(self):
+        provider = CustomAIProvider(http_client=object())
+
+        bad_payloads = [
+            {"translated": "Hello"},
+            {"translation": 42},
+            {"translation": ""},
+        ]
+        for bad_payload in bad_payloads:
+            with self.subTest(bad_payload=bad_payload):
+                provider._post = Mock(
+                    return_value=(
+                        {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json.dumps(bad_payload)
+                                    }
+                                }
+                            ]
+                        },
+                        0.1,
+                    )
+                )
+
+                with self.assertRaisesRegex(ValueError, "translation"):
+                    provider.translate(
+                        {
+                            "base_url": "https://host.example/v1",
+                            "api_key": "super-secret",
+                            "model": "demo",
+                            "structured_output_mode": "auto",
+                        },
+                        "Bonjour",
+                        "fr",
+                        "en",
+                    )
+
+    def test_auto_structured_output_retries_plain_text_when_endpoint_rejects_schema(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.headers = {}
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.payloads.append(dict(json))
+                if "response_format" in json:
+                    return Response(
+                        400,
+                        {
+                            "error": {
+                                "message": (
+                                    "Unsupported parameter: "
+                                    "response_format.json_schema"
+                                )
+                            }
+                        },
+                    )
+                return Response(
+                    200,
+                    {"choices": [{"message": {"content": "Hello"}}]},
+                )
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+
+        translated, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "structured_output_mode": "auto",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+        )
+        second_payload = provider.build_translation_payload(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "structured_output_mode": "auto",
+            },
+            "Salut",
+            "fr",
+            "en",
+        )
+
+        self.assertEqual(translated, "Hello")
+        self.assertEqual(len(client.payloads), 2)
+        self.assertIn("response_format", client.payloads[0])
+        self.assertNotIn("response_format", client.payloads[1])
+        self.assertNotIn("response_format", second_payload)
+
+    def test_strict_structured_output_does_not_fallback_when_endpoint_rejects_schema(self):
+        class Response:
+            status_code = 422
+            text = json.dumps({
+                "error": {
+                    "message": "response_format json_schema is unsupported"
+                }
+            })
+            headers = {}
+
+            def json(self):
+                return json.loads(self.text)
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.payloads.append(dict(json))
+                return Response()
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+
+        with self.assertRaisesRegex(ValueError, "structured output"):
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "demo",
+                    "structured_output_mode": "strict",
+                },
+                "Bonjour",
+                "fr",
+                "en",
+            )
+
+        self.assertEqual(len(client.payloads), 1)
+        self.assertIn("response_format", client.payloads[0])
+
+    def test_auto_stream_translation_uses_plain_text_contract_for_partial_display(self):
+        provider = CustomAIProvider(http_client=object())
+        captured_payloads = []
+
+        def fake_stream_post(
+            profile,
+            payload,
+            stream_callback=None,
+            latency_mode="stream",
+        ):
+            captured_payloads.append(dict(payload))
+            stream_callback("Yo")
+            stream_callback("Yo!")
+            return {"choices": [{"message": {"content": "Yo!"}}]}, 0.1
+
+        provider._stream_post = Mock(side_effect=fake_stream_post)
+        partials = []
+
+        result, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "structured_output_mode": "auto",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+            latency_mode="stream",
+            stream_callback=partials.append,
+        )
+
+        self.assertEqual(result, "Yo!")
+        self.assertEqual(partials, ["Yo", "Yo!"])
+        self.assertNotIn("response_format", captured_payloads[0])
+
+    def test_structured_output_capability_memory_is_endpoint_scoped(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.headers = {}
+
+            def json(self):
+                return self.payload
+
+        json_module = json
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.calls.append((url, dict(json)))
+                if "first.example" in url and "response_format" in json:
+                    return Response(
+                        400,
+                        {
+                            "error": {
+                                "message": (
+                                    "Unsupported parameter: "
+                                    "response_format"
+                                )
+                            }
+                        },
+                    )
+                if "second.example" in url:
+                    if "response_format" not in json:
+                        return Response(
+                            500,
+                            {"error": {"message": "schema was required"}},
+                        )
+                    return Response(
+                        200,
+                        {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": json_module.dumps({
+                                            "translation": "structured"
+                                        })
+                                    }
+                                }
+                            ]
+                        },
+                    )
+                return Response(
+                    200,
+                    {"choices": [{"message": {"content": "fallback"}}]},
+                )
+
+        provider = CustomAIProvider(http_client=Client())
+        first_profile = {
+            "base_url": "https://first.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+        second_profile = {
+            "base_url": "https://second.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        first, _usage, _duration = provider.translate(
+            first_profile,
+            "Bonjour",
+            "fr",
+            "en",
+        )
+        second, _usage, _duration = provider.translate(
+            second_profile,
+            "Bonjour",
+            "fr",
+            "en",
+        )
+
+        self.assertEqual(first, "fallback")
+        self.assertEqual(second, "structured")
+        second_payloads = [
+            payload
+            for url, payload in provider.http_client.calls
+            if "second.example" in url
+        ]
+        self.assertIn("response_format", second_payloads[0])
 
     def test_translate_normalizes_responses_and_stream_final_output(self):
         provider = CustomAIProvider(http_client=object())
@@ -2419,6 +2813,7 @@ class CustomAIProviderTests(unittest.TestCase):
             "base_url": "https://host.example/v1",
             "api_key": "super-secret",
             "model": "demo",
+            "structured_output_mode": "off",
             "wire_api": "responses",
         }
         provider._post = Mock(
@@ -4040,6 +4435,47 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertNotEqual(safe_key, stream_key)
         handler.close()
 
+    def test_inflight_and_cache_params_include_structured_output_contract(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+
+        auto_key = handler.get_inflight_translation_key("Hello")
+        auto_params = handler._cache_params_for_profile(profile)
+        profile["structured_output_mode"] = "off"
+        off_key = handler.get_inflight_translation_key("Hello")
+        off_params = handler._cache_params_for_profile(profile)
+
+        self.assertNotEqual(auto_key, off_key)
+        self.assertEqual(
+            auto_params["structured_output_contract"],
+            "json_schema",
+        )
+        self.assertEqual(
+            off_params["structured_output_contract"],
+            "text",
+        )
+        handler.close()
+
     def test_inflight_and_cache_params_change_when_profile_key_changes(self):
         profile = {
             "id": "profile-1",
@@ -4076,6 +4512,90 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         )
         self.assertNotIn("first-super-secret", repr(first_params))
         self.assertNotIn("second-super-secret", repr(second_params))
+        handler.close()
+
+    def test_bad_structured_translation_error_is_not_cached(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("fr"),
+            target_lang_var=DummyVar("en"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=ValueError(
+                "Structured translation response missing translation"
+            )
+        )
+
+        result = handler._custom_ai_translate("Bonjour", 0.0)
+
+        self.assertIn("Custom AI translation error", result)
+        handler.unified_cache.store.assert_not_called()
+        handler.close()
+
+    def test_auto_structured_fallback_stores_plain_text_contract(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("fr"),
+            target_lang_var=DummyVar("en"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+
+        def translate_with_fallback_memory(*args, **kwargs):
+            handler.custom_ai_provider._remember_unsupported_structured_output(
+                profile
+            )
+            return "Hello", {}, 0.01
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=translate_with_fallback_memory
+        )
+
+        result = handler._custom_ai_translate("Bonjour", 0.0)
+
+        self.assertEqual(result, "Hello")
+        self.assertEqual(
+            handler.unified_cache.store.call_args.kwargs[
+                "structured_output_contract"
+            ],
+            "text",
+        )
         handler.close()
 
     def test_cache_params_share_equivalent_configured_endpoint_urls(self):
@@ -4858,6 +5378,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "model": "same-model",
             "wire_api": "responses",
             "reasoning_effort": "high",
+            "structured_output_mode": "auto",
         }
         compatible = {
             "id": "compatible",
@@ -4865,6 +5386,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "model": "same-model",
             "wire_api": "responses",
             "model_reasoning_effort": "high",
+            "structured_output_mode": "auto",
         }
         different_wire = {
             "id": "different-wire",
@@ -4872,6 +5394,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "model": "same-model",
             "wire_api": "chat_completions",
             "reasoning_effort": "high",
+            "structured_output_mode": "auto",
         }
         different_reasoning = {
             "id": "different-reasoning",
@@ -4879,6 +5402,15 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "model": "same-model",
             "wire_api": "responses",
             "reasoning_effort": "low",
+            "structured_output_mode": "auto",
+        }
+        different_structured_output = {
+            "id": "different-structured-output",
+            "base_url": "https://plain.example/v1",
+            "model": "same-model",
+            "wire_api": "responses",
+            "reasoning_effort": "high",
+            "structured_output_mode": "off",
         }
         different_model = {
             "id": "different-model",
@@ -4886,6 +5418,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "model": "other-model",
             "wire_api": "responses",
             "reasoning_effort": "high",
+            "structured_output_mode": "auto",
         }
 
         class Profiles:
@@ -4895,6 +5428,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                     compatible,
                     different_wire,
                     different_reasoning,
+                    different_structured_output,
                     different_model,
                 ]
 
@@ -5552,6 +6086,7 @@ class ProfileFormValuesTests(unittest.TestCase):
             "enabled": True,
             "wire_api": "responses",
             "reasoning_effort": "xhigh",
+            "structured_output_mode": "strict",
         }
 
         class Profiles:
@@ -5578,6 +6113,7 @@ class ProfileFormValuesTests(unittest.TestCase):
         self.assertEqual(values["model"], "gpt-5.4")
         self.assertEqual(values["wire_api"], "responses")
         self.assertEqual(values["reasoning_effort"], "xhigh")
+        self.assertEqual(values["structured_output_mode"], "strict")
 
 
 class UILanguageManagerTests(unittest.TestCase):
