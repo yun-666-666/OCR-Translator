@@ -1538,16 +1538,13 @@ class CustomAIProvider:
                 "The user message is JSON data. Translate only the current source text "
                 "in the current_source field."
             ),
+            (
+                "Use entries in previous_approved_translations only as approved "
+                "subtitle context for terminology, tone, and character voice when "
+                "that field is present. Translate only the current source text."
+            ),
             linebreak_instruction,
         ]
-        if context:
-            system_parts.append(
-                "Use entries in previous_approved_translations only as approved "
-                "subtitle context for terminology, tone, and character voice. "
-                "Translate only the current source text."
-            )
-        if custom_prompt:
-            system_parts.append(f"User custom instruction: {custom_prompt}")
 
         user_data = {}
         if context:
@@ -1583,6 +1580,15 @@ class CustomAIProvider:
             ],
             "temperature": 0,
         }
+        messages = payload["messages"]
+        if custom_prompt:
+            messages.insert(
+                1,
+                {
+                    "role": "system",
+                    "content": f"User custom instruction:\n{custom_prompt}",
+                },
+            )
         max_tokens = self._translation_max_tokens(text, profile)
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -2563,9 +2569,18 @@ class CustomAIProvider:
             if isinstance(prompt_details, dict)
             else 0
         )
+        cached_input_ratio = (
+            cached_prompt_tokens / prompt_tokens
+            if prompt_tokens > 0
+            else 0.0
+        )
         return {
             "prompt_tokens": prompt_tokens,
+            "input_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "output_tokens": completion_tokens,
             "total_tokens": int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
             "cached_prompt_tokens": cached_prompt_tokens,
+            "cached_input_tokens": cached_prompt_tokens,
+            "cached_input_ratio": cached_input_ratio,
         }

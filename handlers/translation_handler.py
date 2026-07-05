@@ -27,6 +27,12 @@ REQUESTS_AVAILABLE = False
 CUSTOM_CONTEXT_MAX_CHAR_BUDGET = 2400
 CUSTOM_CONTEXT_MIN_CHAR_BUDGET = 600
 CUSTOM_CONTEXT_SOURCE_PENALTY_CAP = 1800
+CUSTOM_PROMPT_CACHE_EMA_ALPHA = 0.25
+CUSTOM_PROMPT_CACHE_MIN_SAMPLES = 3
+CUSTOM_PROMPT_CACHE_LOW_RATIO = 0.20
+CUSTOM_PROMPT_CACHE_WEAK_RATIO = 0.45
+CUSTOM_PROMPT_CACHE_LONG_INPUT_TOKENS = 3500
+CUSTOM_PROMPT_CACHE_VERY_LONG_INPUT_TOKENS = 6000
 
 
 class TranslationHandler:
@@ -51,6 +57,10 @@ class TranslationHandler:
             thread_name_prefix="CustomAIShortLog",
         )
         self._custom_session_started = set()
+        self._custom_prompt_cache_metrics_lock = threading.Lock()
+        self._custom_prompt_cache_sample_count = 0
+        self._custom_cached_input_ratio_ema = None
+        self._custom_input_tokens_ema = None
         self._custom_race_state_lock = threading.Lock()
         self._custom_race_inflight_profiles = set()
         
@@ -1186,10 +1196,37 @@ Call Duration: {call_duration:.3f} seconds
             CUSTOM_CONTEXT_SOURCE_PENALTY_CAP,
             len(source_text),
         )
-        return max(
+        base_budget = max(
             CUSTOM_CONTEXT_MIN_CHAR_BUDGET,
             CUSTOM_CONTEXT_MAX_CHAR_BUDGET - source_penalty,
         )
+        budget_factor = self._get_custom_prompt_cache_budget_factor()
+        return max(
+            CUSTOM_CONTEXT_MIN_CHAR_BUDGET,
+            int(base_budget * budget_factor),
+        )
+
+    def _get_custom_prompt_cache_budget_factor(self):
+        with self._custom_prompt_cache_metrics_lock:
+            sample_count = self._custom_prompt_cache_sample_count
+            cached_ratio_ema = self._custom_cached_input_ratio_ema
+            input_tokens_ema = self._custom_input_tokens_ema
+
+        if sample_count < CUSTOM_PROMPT_CACHE_MIN_SAMPLES:
+            return 1.0
+
+        factor = 1.0
+        if input_tokens_ema is not None:
+            if input_tokens_ema >= CUSTOM_PROMPT_CACHE_VERY_LONG_INPUT_TOKENS:
+                factor = min(factor, 0.5)
+            elif input_tokens_ema >= CUSTOM_PROMPT_CACHE_LONG_INPUT_TOKENS:
+                factor = min(factor, 0.75)
+        if cached_ratio_ema is not None:
+            if cached_ratio_ema < CUSTOM_PROMPT_CACHE_LOW_RATIO:
+                factor = min(factor, 0.5)
+            elif cached_ratio_ema < CUSTOM_PROMPT_CACHE_WEAK_RATIO:
+                factor = min(factor, 0.75)
+        return factor
 
     def _get_custom_context_entry_char_count(self, entry):
         if isinstance(entry, (tuple, list)):
@@ -1222,6 +1259,77 @@ Call Duration: {call_duration:.3f} seconds
         except (TypeError, ValueError):
             value = 5
         return max(0, min(10, value))
+
+    def _custom_usage_number(self, usage, *keys):
+        if not isinstance(usage, dict):
+            return 0.0
+        for key in keys:
+            value = usage.get(key)
+            if value is None:
+                continue
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _custom_usage_cached_input_ratio(self, usage):
+        prompt_tokens = self._custom_usage_number(
+            usage,
+            "input_tokens",
+            "prompt_tokens",
+        )
+        cached_tokens = self._custom_usage_number(
+            usage,
+            "cached_input_tokens",
+            "cached_prompt_tokens",
+        )
+        ratio_value = None
+        if isinstance(usage, dict):
+            try:
+                ratio_value = float(usage.get("cached_input_ratio"))
+            except (TypeError, ValueError):
+                ratio_value = None
+        if ratio_value is None:
+            ratio_value = cached_tokens / prompt_tokens if prompt_tokens > 0 else 0.0
+        return max(0.0, min(1.0, ratio_value)), prompt_tokens
+
+    def _record_custom_prompt_cache_usage(self, call_type, usage):
+        cached_ratio, prompt_tokens = self._custom_usage_cached_input_ratio(usage)
+        if call_type != "translation" or prompt_tokens <= 0:
+            return cached_ratio
+
+        alpha = CUSTOM_PROMPT_CACHE_EMA_ALPHA
+        with self._custom_prompt_cache_metrics_lock:
+            if self._custom_prompt_cache_sample_count == 0:
+                self._custom_cached_input_ratio_ema = cached_ratio
+                self._custom_input_tokens_ema = prompt_tokens
+            else:
+                self._custom_cached_input_ratio_ema = (
+                    (1.0 - alpha) * self._custom_cached_input_ratio_ema
+                    + alpha * cached_ratio
+                )
+                self._custom_input_tokens_ema = (
+                    (1.0 - alpha) * self._custom_input_tokens_ema
+                    + alpha * prompt_tokens
+                )
+            self._custom_prompt_cache_sample_count += 1
+            cached_ratio_ema = self._custom_cached_input_ratio_ema
+            input_tokens_ema = self._custom_input_tokens_ema
+
+        self._set_runtime_metric_gauge(
+            "custom_ai_cached_input_ratio",
+            cached_ratio,
+        )
+        self._set_runtime_metric_gauge(
+            "custom_ai_cached_input_ratio_ema",
+            cached_ratio_ema,
+        )
+        self._set_runtime_metric_gauge(
+            "custom_ai_input_tokens_ema",
+            input_tokens_ema,
+        )
+        return cached_ratio
 
     def _write_custom_short_log(self, log_file, block):
         try:
@@ -1259,9 +1367,25 @@ Call Duration: {call_duration:.3f} seconds
                     else "===== TRANSLATION CALL ======="
                 )
                 cost = 0.0
-                prompt_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
-                completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0
-                cached_prompt_tokens = usage.get("cached_prompt_tokens", 0) if isinstance(usage, dict) else 0
+                prompt_tokens = int(self._custom_usage_number(
+                    usage,
+                    "input_tokens",
+                    "prompt_tokens",
+                ))
+                completion_tokens = int(self._custom_usage_number(
+                    usage,
+                    "output_tokens",
+                    "completion_tokens",
+                ))
+                cached_prompt_tokens = int(self._custom_usage_number(
+                    usage,
+                    "cached_input_tokens",
+                    "cached_prompt_tokens",
+                ))
+                cached_input_ratio = self._record_custom_prompt_cache_usage(
+                    call_type,
+                    usage,
+                )
                 block = (
                     f"{session_header}"
                     f"{header}\n"
@@ -1270,6 +1394,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"Duration: {duration:.3f}s\n"
                     f"Input Tokens: {prompt_tokens}\n"
                     f"Cached Input Tokens: {cached_prompt_tokens}\n"
+                    f"cached_input_ratio={cached_input_ratio:.2f}\n"
                     f"Output Tokens: {completion_tokens}\n"
                     f"Cost: ${cost:.8f}\n"
                     f"Result:\n--------------------\n{result_text}\n--------------------\n\n"

@@ -473,6 +473,22 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertEqual(chat_usage.get("cached_prompt_tokens"), 1024)
         self.assertEqual(responses_usage.get("cached_prompt_tokens"), 1152)
+        self.assertEqual(chat_usage.get("input_tokens"), 1200)
+        self.assertEqual(chat_usage.get("output_tokens"), 20)
+        self.assertEqual(chat_usage.get("cached_input_tokens"), 1024)
+        self.assertAlmostEqual(
+            chat_usage.get("cached_input_ratio"),
+            1024 / 1200,
+            places=4,
+        )
+        self.assertEqual(responses_usage.get("input_tokens"), 1300)
+        self.assertEqual(responses_usage.get("output_tokens"), 25)
+        self.assertEqual(responses_usage.get("cached_input_tokens"), 1152)
+        self.assertAlmostEqual(
+            responses_usage.get("cached_input_ratio"),
+            1152 / 1300,
+            places=4,
+        )
 
     def test_normalize_chat_completions_url(self):
         provider = CustomAIProvider()
@@ -2304,7 +2320,7 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("Bonjour", serialized)
         self.assertIn("previous_approved_translations", serialized)
         self.assertIn("Translate only the current source text", serialized)
-        user_data = json.loads(payload["messages"][1]["content"])
+        user_data = json.loads(payload["messages"][-1]["content"])
         self.assertEqual(user_data["current_source"], "Bonjour")
         self.assertEqual(
             user_data["previous_approved_translations"],
@@ -2313,6 +2329,82 @@ class CustomAIProviderTests(unittest.TestCase):
                 {"source": "Ca va?", "translation": "How are you?"},
             ],
         )
+
+    def test_translation_payload_keeps_stable_prompt_prefix_when_context_changes(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "qwen-translator",
+            "wire_api": "chat_completions",
+            "structured_output_mode": "auto",
+        }
+
+        no_context_payload = provider.build_translation_payload(
+            profile=profile,
+            text="Line one",
+            source_lang="ja",
+            target_lang="en",
+            custom_prompt="Use concise RPG menu terminology.",
+            context=[],
+        )
+        with_context_payload = provider.build_translation_payload(
+            profile=profile,
+            text="Line two",
+            source_lang="ja",
+            target_lang="en",
+            custom_prompt="Use concise RPG menu terminology.",
+            context=[("Save", "Save"), ("Load", "Load")],
+        )
+
+        no_context_prefix = no_context_payload["messages"][:-1]
+        with_context_prefix = with_context_payload["messages"][:-1]
+        self.assertEqual(no_context_prefix, with_context_prefix)
+        self.assertEqual(no_context_prefix[0]["role"], "system")
+        self.assertEqual(no_context_prefix[1]["role"], "system")
+        self.assertIn(
+            "Use concise RPG menu terminology.",
+            no_context_prefix[1]["content"],
+        )
+
+        user_content = with_context_payload["messages"][-1]["content"]
+        self.assertLess(
+            user_content.index("previous_approved_translations"),
+            user_content.index("current_source"),
+        )
+        self.assertEqual(
+            json.loads(user_content)["current_source"],
+            "Line two",
+        )
+
+    def test_structured_output_payload_keeps_cache_layout_contract(self):
+        provider = CustomAIProvider()
+
+        payload = provider.build_translation_payload(
+            {
+                "model": "demo",
+                "base_url": "https://host.example/v1",
+                "structured_output_mode": "strict",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+            custom_prompt="Keep item names consistent.",
+            context=[("Potion", "Potion")],
+        )
+
+        self.assertEqual(payload["messages"][0]["role"], "system")
+        self.assertEqual(payload["messages"][1]["role"], "system")
+        self.assertEqual(payload["messages"][-1]["role"], "user")
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertIn(
+            "translation",
+            payload["messages"][0]["content"],
+        )
+        user_data = json.loads(payload["messages"][-1]["content"])
+        self.assertEqual(
+            user_data["previous_approved_translations"],
+            [{"source": "Potion", "translation": "Potion"}],
+        )
+        self.assertEqual(user_data["current_source"], "Bonjour")
 
     def test_translation_payload_auto_and_strict_request_json_schema(self):
         provider = CustomAIProvider()
@@ -2387,7 +2479,7 @@ class CustomAIProviderTests(unittest.TestCase):
             context=[('Speaker: "A"', "角色：甲")],
         )
 
-        user_data = json.loads(payload["messages"][1]["content"])
+        user_data = json.loads(payload["messages"][-1]["content"])
         self.assertEqual(user_data["current_source"], source)
         self.assertEqual(
             user_data["previous_approved_translations"],
@@ -4324,6 +4416,75 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "Cached Input Tokens: 1024",
             append_text.call_args.args[1],
         )
+        self.assertIn(
+            "cached_input_ratio=0.85",
+            append_text.call_args.args[1],
+        )
+
+    def test_low_cached_ratio_conservatively_reduces_custom_ai_context_budget(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        profile = {"name": "Translator", "model": "translation-model"}
+        handler.custom_context_window = [
+            ("old-source-" + ("a" * 500), "old-translation-" + ("b" * 500)),
+            ("mid-source-" + ("c" * 500), "mid-translation-" + ("d" * 500)),
+            ("new-source-" + ("e" * 500), "new-translation-" + ("f" * 500)),
+        ]
+
+        with patch.object(translation_handler_module, "append_rotating_text"):
+            for _ in range(4):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 2400,
+                        "completion_tokens": 20,
+                        "cached_prompt_tokens": 0,
+                    },
+                    0.20,
+                )
+
+        budget = handler._get_custom_context_char_budget("x" * 40)
+        context = handler._get_custom_context_for_request("x" * 40)
+
+        self.assertLess(budget, 2360)
+        self.assertGreaterEqual(budget, 600)
+        self.assertEqual(len(context), 1)
+        self.assertTrue(context[0][0].startswith("new-source-"))
+        handler.close()
+
+    def test_high_cached_ratio_short_source_keeps_recent_custom_ai_context(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+        handler = TranslationHandler(App())
+        profile = {"name": "Translator", "model": "translation-model"}
+        handler.custom_context_window = [
+            (f"source-{index}-" + ("s" * 240), f"translation-{index}-" + ("t" * 240))
+            for index in range(4)
+        ]
+
+        with patch.object(translation_handler_module, "append_rotating_text"):
+            for _ in range(4):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 1800,
+                        "completion_tokens": 18,
+                        "cached_prompt_tokens": 1620,
+                    },
+                    0.15,
+                )
+
+        context = handler._get_custom_context_for_request("x" * 40)
+
+        self.assertEqual(context, handler.custom_context_window)
+        handler.close()
 
     def test_custom_ai_short_log_does_not_block_translation_and_close_flushes(self):
         handler = TranslationHandler(object())
