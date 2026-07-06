@@ -5,15 +5,15 @@ import modern_ui
 
 
 class ModernUiThemeTests(unittest.TestCase):
-    def test_white_clean_palette_exports_light_neutral_colors(self):
+    def test_white_clean_palette_exports_tool_console_colors(self):
         palette = modern_ui.WHITE_CLEAN_PALETTE
 
-        self.assertEqual(palette["window"], "#f7f8fb")
+        self.assertEqual(palette["window"], "#f6f8fb")
         self.assertEqual(palette["surface"], "#ffffff")
-        self.assertEqual(palette["text"], "#1f2937")
-        self.assertEqual(palette["primary"], "#2563eb")
-        self.assertEqual(palette["success"], "#16a34a")
-        self.assertEqual(palette["warning"], "#d97706")
+        self.assertEqual(palette["text"], "#18212f")
+        self.assertEqual(palette["primary"], "#0f766e")
+        self.assertEqual(palette["success"], "#15803d")
+        self.assertEqual(palette["warning"], "#c2410c")
         self.assertNotIn("glass", palette)
 
     def test_white_clean_theme_api_is_available(self):
@@ -38,11 +38,28 @@ class ModernUiThemeTests(unittest.TestCase):
         try:
             modern_ui.apply_white_clean_theme(root)
             style = modern_ui.ttk.Style(root)
-            self.assertEqual(style.lookup("ProfileAdd.TButton", "background"), "#16a34a")
-            self.assertEqual(style.lookup("ProfileSave.TButton", "background"), "#2563eb")
-            self.assertEqual(style.lookup("ProfileDelete.TButton", "background"), "#dc2626")
-            self.assertEqual(style.lookup("ProfileTest.TButton", "background"), "#d97706")
+            self.assertEqual(style.lookup("Secondary.TButton", "background"), "#edf2f7")
+            self.assertEqual(style.lookup("Secondary.TButton", "relief"), "solid")
+            self.assertEqual(style.lookup("ProfileAdd.TButton", "background"), "#15803d")
+            self.assertEqual(style.lookup("ProfileSave.TButton", "background"), "#0f766e")
+            self.assertEqual(style.lookup("ProfileDelete.TButton", "background"), "#b42318")
+            self.assertEqual(style.lookup("ProfileTest.TButton", "background"), "#c2410c")
             self.assertEqual(style.lookup("TNotebook", "tabmargins"), "0 4 0 0")
+        finally:
+            root.destroy()
+
+    def test_theme_registers_status_track_and_section_styles(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        try:
+            modern_ui.apply_white_clean_theme(root)
+            style = modern_ui.ttk.Style(root)
+            self.assertEqual(style.lookup("StatusTrack.TFrame", "background"), "#e7f5f2")
+            self.assertEqual(style.lookup("StatusTrackDone.TLabel", "foreground"), "#0f766e")
+            self.assertEqual(style.lookup("Section.TLabelframe", "bordercolor"), "#ccd6e0")
+            self.assertEqual(style.lookup("SettingsGroup.TLabel", "foreground"), "#0f766e")
         finally:
             root.destroy()
 

@@ -3,19 +3,19 @@
 from tkinter import ttk
 
 WHITE_CLEAN_PALETTE = {
-    "window": "#f7f8fb",
+    "window": "#f6f8fb",
     "surface": "#ffffff",
-    "surface_variant": "#f1f5f9",
-    "primary": "#2563eb",
-    "primary_container": "#dbeafe",
-    "secondary": "#64748b",
-    "text": "#1f2937",
-    "text_muted": "#64748b",
-    "outline": "#d8dee8",
-    "outline_variant": "#edf2f7",
-    "success": "#16a34a",
-    "warning": "#d97706",
-    "danger": "#dc2626",
+    "surface_variant": "#edf2f7",
+    "primary": "#0f766e",
+    "primary_container": "#e7f5f2",
+    "secondary": "#5c6b7a",
+    "text": "#18212f",
+    "text_muted": "#5c6b7a",
+    "outline": "#ccd6e0",
+    "outline_variant": "#e3e9ef",
+    "success": "#15803d",
+    "warning": "#c2410c",
+    "danger": "#b42318",
 }
 
 MD3_LIGHT_PALETTE = WHITE_CLEAN_PALETTE
@@ -49,30 +49,45 @@ def apply_white_clean_theme(root, palette=None):
     except Exception:
         pass
 
-    style.configure(".", background=palette["window"], foreground=palette["text"])
+    style.configure(".", background=palette["window"], foreground=palette["text"], font=("Segoe UI", 10))
     style.configure("TFrame", background=palette["window"])
+    style.configure("Surface.TFrame", background=palette["surface"])
     style.configure("TLabelframe", background=palette["window"], bordercolor=palette["outline"], relief="solid")
-    style.configure("TLabelframe.Label", background=palette["window"], foreground=palette["text_muted"])
+    style.configure("TLabelframe.Label", background=palette["window"], foreground=palette["text_muted"], font=("Segoe UI Semibold", 10))
+    style.configure("Section.TLabelframe", background=palette["surface"], bordercolor=palette["outline"], relief="solid")
+    style.configure("Section.TLabelframe.Label", background=palette["surface"], foreground=palette["text"], font=("Segoe UI Semibold", 10))
     style.configure("TLabel", background=palette["window"], foreground=palette["text"])
+    style.configure("Muted.TLabel", background=palette["window"], foreground=palette["text_muted"], font=("Segoe UI", 9))
+    style.configure("SectionMuted.TLabel", background=palette["surface"], foreground=palette["text_muted"], font=("Segoe UI", 9))
+    style.configure("Header.TLabel", background=palette["window"], foreground=palette["text"], font=("Segoe UI Semibold", 10))
     style.configure("TCheckbutton", background=palette["window"], foreground=palette["text"])
-    style.configure("TButton", background=palette["surface"], foreground=palette["text"],
+    style.configure("TButton", background=palette["surface_variant"], foreground=palette["text"],
                     bordercolor=palette["outline"], focusthickness=1, focuscolor=palette["primary"],
-                    padding=(10, 5), relief="flat")
+                    padding=(10, 5), relief="solid", borderwidth=1)
     style.map("TButton",
-              background=[("active", "#eef4ff"), ("pressed", palette["primary_container"]),
+              background=[("active", palette["primary_container"]), ("pressed", palette["primary_container"]),
                           ("disabled", palette["surface_variant"])],
               foreground=[("disabled", palette["text_muted"])],
               bordercolor=[("focus", palette["primary"]), ("active", palette["primary"])])
-    _configure_action_button_style(style, "ProfileAdd.TButton", palette["success"], "#15803d")
-    _configure_action_button_style(style, "ProfileSave.TButton", palette["primary"], "#1d4ed8")
-    _configure_action_button_style(style, "ProfileDelete.TButton", palette["danger"], "#b91c1c")
-    _configure_action_button_style(style, "ProfileTest.TButton", palette["warning"], "#b45309")
+    style.configure("Secondary.TButton", background=palette["surface_variant"], foreground=palette["text"],
+                    bordercolor=palette["outline"], focusthickness=1, focuscolor=palette["primary"],
+                    padding=(12, 6), relief="solid", borderwidth=1)
+    style.map("Secondary.TButton",
+              background=[("active", palette["primary_container"]), ("pressed", palette["primary_container"]),
+                          ("disabled", palette["surface_variant"])],
+              foreground=[("disabled", palette["text_muted"])],
+              bordercolor=[("focus", palette["primary"]), ("active", palette["primary"])])
+    _configure_action_button_style(style, "Primary.TButton", palette["primary"], "#0d5f59")
+    _configure_action_button_style(style, "ProfileAdd.TButton", palette["success"], "#166534")
+    _configure_action_button_style(style, "ProfileSave.TButton", palette["primary"], "#0d5f59")
+    _configure_action_button_style(style, "ProfileDelete.TButton", palette["danger"], "#9f1d14")
+    _configure_action_button_style(style, "ProfileTest.TButton", palette["warning"], "#9a3412")
 
     style.configure("TNotebook", background=palette["window"], borderwidth=0, tabmargins=(0, 4, 0, 0))
     style.configure("TNotebook.Tab", background=palette["surface_variant"], foreground=palette["text_muted"],
                     bordercolor=palette["outline"], padding=(10, 7))
     style.map("TNotebook.Tab",
-              background=[("selected", palette["surface"]), ("active", "#eef4ff")],
+              background=[("selected", palette["surface"]), ("active", palette["primary_container"])],
               foreground=[("selected", palette["text"]), ("active", palette["text"])])
 
     style.configure("TEntry", fieldbackground=palette["surface"], foreground=palette["text"],
@@ -93,6 +108,15 @@ def apply_white_clean_theme(root, palette=None):
     style.configure("Horizontal.TScrollbar", background=palette["surface_variant"],
                     troughcolor=palette["window"], bordercolor=palette["window"],
                     arrowcolor=palette["text_muted"])
+    style.configure("StatusTrack.TFrame", background=palette["primary_container"])
+    style.configure("StatusTrackStep.TLabel", background=palette["primary_container"],
+                    foreground=palette["text_muted"], font=("Segoe UI Semibold", 9))
+    style.configure("StatusTrackDone.TLabel", background=palette["primary_container"],
+                    foreground=palette["primary"], font=("Segoe UI Semibold", 9))
+    style.configure("StatusTrackArrow.TLabel", background=palette["primary_container"],
+                    foreground=palette["text_muted"], font=("Segoe UI", 9))
+    style.configure("SettingsGroup.TLabel", background=palette["surface"], foreground=palette["primary"],
+                    font=("Segoe UI Semibold", 9))
     root.md3_palette = palette
     root.white_clean_palette = palette
     return palette

@@ -1531,50 +1531,15 @@ class GameChangingTranslator:
     def format_currency_for_display(self, amount, unit_suffix=""):
         """Format currency amount according to current UI language."""
         try:
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: "0,04941340 USD/min"
-                amount_str = f"{amount:.8f}"
-                amount_str = amount_str.replace('.', ',')  # Replace decimal point with comma
-
-                # Add thousand separators (space) for large numbers
-                parts = amount_str.split(',')
-                integer_part = parts[0]
-                decimal_part = parts[1] if len(parts) > 1 else ""
-
-                # Add space thousand separators to integer part
-                if len(integer_part) > 3:
-                    formatted_integer = ""
-                    for i, digit in enumerate(reversed(integer_part)):
-                        if i > 0 and i % 3 == 0:
-                            formatted_integer = " " + formatted_integer
-                        formatted_integer = digit + formatted_integer
-                    integer_part = formatted_integer
-
-                if decimal_part:
-                    amount_str = f"{integer_part},{decimal_part}"
-                else:
-                    amount_str = integer_part
-
-                # Translate unit suffixes for Polish
-                if unit_suffix == "/min":
-                    unit_suffix = " USD/min"
-                elif unit_suffix == "/hr":
-                    unit_suffix = " USD/godz."
-                elif unit_suffix == "":
-                    unit_suffix = " USD"
-
-                return f"{amount_str}{unit_suffix}"
-            else:
-                # English format: "$0.04941340/min"
-                prefix = "$" if not unit_suffix else "$"
-                return f"{prefix}{amount:.8f}{unit_suffix}"
+            prefix = "$" if not unit_suffix else "$"
+            return f"{prefix}{amount:.8f}{unit_suffix}"
         except Exception as e:
             log_debug(f"Error formatting currency: {e}")
-            return f"${amount:.8f}{unit_suffix}"  # Fallback to English format
+            return f"${amount:.8f}{unit_suffix}"
 
     def format_cost_for_display(self, cost_value):
-        """Format cost value according to current UI language (legacy method)."""
-        return self.format_currency_for_display(cost_value, " USD" if self.ui_lang.current_lang == 'pol' else "")
+        """Format cost value for display."""
+        return self.format_currency_for_display(cost_value, "")
 
     def format_number_with_separators(self, number):
         """Format integer numbers with thousand separators according to current UI language."""
@@ -1582,21 +1547,7 @@ class GameChangingTranslator:
             # Convert to integer to avoid decimal formatting issues
             num = int(number)
 
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: use space as thousand separator
-                num_str = str(num)
-                if len(num_str) > 3:
-                    formatted = ""
-                    for i, digit in enumerate(reversed(num_str)):
-                        if i > 0 and i % 3 == 0:
-                            formatted = " " + formatted
-                        formatted = digit + formatted
-                    return formatted
-                else:
-                    return num_str
-            else:
-                # English format: use comma as thousand separator
-                return f"{num:,}"
+            return f"{num:,}"
         except Exception as e:
             log_debug(f"Error formatting number with separators: {e}")
             return str(number)  # Fallback to string representation

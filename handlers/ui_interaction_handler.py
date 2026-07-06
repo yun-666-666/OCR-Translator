@@ -131,7 +131,14 @@ class UIInteractionHandler:
         is_openai = False
         is_marian = (selected_model_ui_code == 'marianmt')
         is_api_model = is_custom
+        show_provider_settings = is_google or is_deepl or is_gemini or is_openai
 
+        if hasattr(self.app, 'settings_provider_group'):
+            manage_grid(self.app.settings_provider_group, show=show_provider_settings)
+        if hasattr(self.app, 'settings_marian_group'):
+            manage_grid(self.app.settings_marian_group, show=is_marian)
+        if hasattr(self.app, 'settings_custom_ai_group'):
+            manage_grid(self.app.settings_custom_ai_group, show=is_custom)
         if hasattr(self.app, 'custom_ai_latency_mode_label'):
             manage_grid(self.app.custom_ai_latency_mode_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_latency_mode_combobox'):
@@ -313,14 +320,7 @@ class UIInteractionHandler:
             localized_models_list.append(localized_display_name)
             localized_models_dict[localized_display_name] = model_path
 
-        # IMPORTANT FIX: Sort the localized names properly for Polish
-        # This addresses Issue 2: MarianMT sorting in Polish
-        if ui_language == 'polish':
-            # Use Polish-aware sorting for correct alphabetical order
-            localized_models_list = self.app.language_manager.sort_polish_names(localized_models_list)
-        else:
-            # Use standard sorting for English and other languages
-            localized_models_list.sort()
+        localized_models_list.sort()
 
         # Update the combobox values
         self.app.marian_model_combobox['values'] = localized_models_list
@@ -427,7 +427,7 @@ class UIInteractionHandler:
     def get_current_ui_language_for_lookup(self):
         """Get the current UI language in the format expected by localization methods."""
         current_ui_language = self.app.ui_lang.current_lang
-        ui_language_for_lookup = 'polish' if current_ui_language == 'pol' else 'english'
+        ui_language_for_lookup = 'english'
 
         # Add debugging to track UI language state
         log_debug(f"UI Language Detection: app.ui_lang.current_lang='{current_ui_language}' -> lookup='{ui_language_for_lookup}'")
@@ -447,10 +447,10 @@ class UIInteractionHandler:
                     values.append(lm.get_localized_language_name(code, provider, ui_language_for_lookup))
                 if "Auto" in values:
                     values.remove("Auto")
-                    values = lm.sort_polish_names(values) if ui_language_for_lookup == 'polish' else sorted(values)
+                    values = sorted(values)
                     values.insert(0, "Auto")
                 else:
-                    values = lm.sort_polish_names(values) if ui_language_for_lookup == 'polish' else sorted(values)
+                    values = sorted(values)
                 return values
 
             def set_display(var, code, values, fallback):
@@ -499,16 +499,10 @@ class UIInteractionHandler:
             # Sort alphabetically, but keep "Auto" at the top if present
             if "Auto" in source_names_list:
                 source_names_list.remove("Auto")
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
                 source_names_list.insert(0, "Auto")
             else:
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
 
             current_source_api_code_from_app = self.app.google_source_lang
         elif active_model_code == 'deepl_api':
@@ -526,16 +520,10 @@ class UIInteractionHandler:
             # Sort alphabetically, but keep "Auto" at the top if present
             if "Auto" in source_names_list:
                 source_names_list.remove("Auto")
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
                 source_names_list.insert(0, "Auto")
             else:
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
 
             current_source_api_code_from_app = self.app.deepl_source_lang
         elif active_model_code == 'gemini_api':
@@ -553,16 +541,10 @@ class UIInteractionHandler:
             # Sort alphabetically, but keep "Auto" at the top if present
             if "Auto" in source_names_list:
                 source_names_list.remove("Auto")
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
                 source_names_list.insert(0, "Auto")
             else:
-                if ui_language_for_lookup == 'polish':
-                    source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-                else:
-                    source_names_list.sort()
+                source_names_list.sort()
 
             current_source_api_code_from_app = self.app.gemini_source_lang
         elif active_model_code == 'openai_api':
@@ -577,11 +559,7 @@ class UIInteractionHandler:
                 source_names_list.append(localized_name)
                 source_name_to_code[localized_name] = code
 
-            # Sort alphabetically
-            if ui_language_for_lookup == 'polish':
-                source_names_list = self.app.language_manager.sort_polish_names(source_names_list)
-            else:
-                source_names_list.sort()
+            source_names_list.sort()
 
             current_source_api_code_from_app = self.app.openai_source_lang
 
@@ -663,11 +641,7 @@ class UIInteractionHandler:
                 target_names_list.append(localized_name)
                 target_name_to_code[localized_name] = code
 
-            # Sort alphabetically
-            if ui_language_for_lookup == 'polish':
-                target_names_list = self.app.language_manager.sort_polish_names(target_names_list)
-            else:
-                target_names_list.sort()
+            target_names_list.sort()
 
             current_target_api_code_from_app = self.app.google_target_lang
         elif active_model_code == 'deepl_api':
@@ -682,11 +656,7 @@ class UIInteractionHandler:
                 target_names_list.append(localized_name)
                 target_name_to_code[localized_name] = code
 
-            # Sort alphabetically
-            if ui_language_for_lookup == 'polish':
-                target_names_list = self.app.language_manager.sort_polish_names(target_names_list)
-            else:
-                target_names_list.sort()
+            target_names_list.sort()
 
             current_target_api_code_from_app = self.app.deepl_target_lang
         elif active_model_code == 'gemini_api':
@@ -701,11 +671,7 @@ class UIInteractionHandler:
                 target_names_list.append(localized_name)
                 target_name_to_code[localized_name] = code
 
-            # Sort alphabetically
-            if ui_language_for_lookup == 'polish':
-                target_names_list = self.app.language_manager.sort_polish_names(target_names_list)
-            else:
-                target_names_list.sort()
+            target_names_list.sort()
 
             current_target_api_code_from_app = self.app.gemini_target_lang
         elif active_model_code == 'openai_api':
@@ -720,11 +686,7 @@ class UIInteractionHandler:
                 target_names_list.append(localized_name)
                 target_name_to_code[localized_name] = code
 
-            # Sort alphabetically
-            if ui_language_for_lookup == 'polish':
-                target_names_list = self.app.language_manager.sort_polish_names(target_names_list)
-            else:
-                target_names_list.sort()
+            target_names_list.sort()
 
             current_target_api_code_from_app = self.app.openai_target_lang
 

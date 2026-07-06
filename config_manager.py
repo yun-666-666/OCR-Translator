@@ -15,6 +15,7 @@ from ocr_utils import (
     normalize_api_ocr_image_quality,
 )
 from resource_handler import get_resource_path
+from language_ui import normalize_gui_language_display_name
 
 PROVIDER_CREDENTIAL_SERVICE = "OCR-Translator-Providers"
 PROVIDER_API_KEY_SETTINGS = (
@@ -229,6 +230,13 @@ def load_app_config():
         config_settings['ocr_model'] = 'paddleocr'
         settings_changed = True
         log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'paddleocr'")
+
+    current_gui_language = config_settings.get('gui_language', 'English')
+    normalized_gui_language = normalize_gui_language_display_name(current_gui_language)
+    if normalized_gui_language != current_gui_language:
+        config_settings['gui_language'] = normalized_gui_language
+        settings_changed = True
+        log_debug(f"Config: GUI language '{current_gui_language}' changed to '{normalized_gui_language}'")
 
     current_latency_mode = config_settings.get('custom_ai_latency_mode', 'safe')
     if current_latency_mode not in ['none', 'safe', 'stream', 'race', 'adaptive']:
