@@ -14,6 +14,7 @@ from custom_ai import (
     CUSTOM_AI_REASONING_EFFORT_ULTRA,
     normalize_custom_ai_reasoning_effort,
 )
+from paddle_ocr_backend import PADDLEOCR_DISPLAY_NAME, PADDLEOCR_MODEL_CODE
 
 
 CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
@@ -22,6 +23,34 @@ CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
     (CUSTOM_AI_REASONING_EFFORT_HIGH, "custom_ai_reasoning_effort_high", "High"),
     (CUSTOM_AI_REASONING_EFFORT_ULTRA, "custom_ai_reasoning_effort_ultra", "Ultra"),
 )
+
+
+def get_tesseract_ocr_display_name(app):
+    return app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")
+
+
+def get_paddleocr_ocr_display_name(app):
+    return app.ui_lang.get_label("ocr_model_paddleocr", PADDLEOCR_DISPLAY_NAME)
+
+
+def build_ocr_model_display_options(app):
+    options = [
+        get_tesseract_ocr_display_name(app),
+        get_paddleocr_ocr_display_name(app),
+    ]
+    options.extend([p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)])
+    return options
+
+
+def resolve_ocr_model_display_selection(app, selected_display):
+    if selected_display == get_tesseract_ocr_display_name(app):
+        return "tesseract", None
+    if selected_display == get_paddleocr_ocr_display_name(app):
+        return PADDLEOCR_MODEL_CODE, None
+    for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):
+        if profile["name"] == selected_display:
+            return "custom_ai", profile["id"]
+    return None, None
 
 def filter_model_values(models, query):
     """Return model names containing the query, preserving the original order."""
@@ -560,8 +589,7 @@ def create_settings_tab(app):
     # Row 0.5: OCR Model Selection
     ttk.Label(frame, text=app.ui_lang.get_label("ocr_model_label", "OCR Model")).grid(row=1, column=0, padx=5, pady=5, sticky="w")
     
-    ocr_models_available_for_ui = [app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")]
-    ocr_models_available_for_ui.extend([p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)])
+    ocr_models_available_for_ui = build_ocr_model_display_options(app)
     
     
     app.ocr_model_combobox = ttk.Combobox(frame, textvariable=app.ocr_model_display_var,
@@ -576,16 +604,17 @@ def create_settings_tab(app):
         # Suppress traces during OCR model update to prevent premature saves
         app.suppress_traces()
         try:
-            if selected_display == app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)"):
+            model_code, profile_id = resolve_ocr_model_display_selection(app, selected_display)
+            if model_code == 'tesseract':
                 app.ocr_model_var.set('tesseract')
                 log_debug("OCR model set to tesseract")
-            else:
-                for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):
-                    if profile["name"] == selected_display:
-                        app.custom_ai_profiles.set_active_profile("ocr", profile["id"])
-                        app.ocr_model_var.set('custom_ai')
-                        log_debug(f"OCR model set to custom_ai profile: {selected_display}")
-                        break
+            elif model_code == PADDLEOCR_MODEL_CODE:
+                app.ocr_model_var.set(PADDLEOCR_MODEL_CODE)
+                log_debug("OCR model set to paddleocr")
+            elif model_code == 'custom_ai' and profile_id:
+                app.custom_ai_profiles.set_active_profile("ocr", profile_id)
+                app.ocr_model_var.set('custom_ai')
+                log_debug(f"OCR model set to custom_ai profile: {selected_display}")
         finally:
             # Always restore traces
             app.restore_traces()
@@ -1245,14 +1274,19 @@ def create_settings_tab(app):
         active_translation = app.custom_ai_profiles.get_active_profile("translation")
         app.translation_model_display_var.set(active_translation["name"] if active_translation else translation_names[0])
 
-        ocr_names = [app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")]
+        ocr_names = [
+            get_tesseract_ocr_display_name(app),
+            get_paddleocr_ocr_display_name(app),
+        ]
         ocr_names.extend(enabled_names)
         app.ocr_model_combobox.config(values=ocr_names)
         active_ocr = app.custom_ai_profiles.get_active_profile("ocr")
         if app.ocr_model_var.get() == "custom_ai" and active_ocr:
             app.ocr_model_display_var.set(active_ocr["name"])
+        elif app.ocr_model_var.get() == PADDLEOCR_MODEL_CODE:
+            app.ocr_model_display_var.set(get_paddleocr_ocr_display_name(app))
         elif app.ocr_model_var.get() != "custom_ai":
-            app.ocr_model_display_var.set(app.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)"))
+            app.ocr_model_display_var.set(get_tesseract_ocr_display_name(app))
 
         profile_to_load = None
         if select_profile_id:

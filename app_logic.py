@@ -50,11 +50,21 @@ from ocr_utils import (
     encode_image_for_api_ocr,
     encode_image_for_api_ocr_payload,
     get_tesseract_ocr_config,
+    normalize_adaptive_block_size,
     normalize_api_ocr_image_detail,
     normalize_api_ocr_image_format,
     normalize_api_ocr_image_mode,
     normalize_api_ocr_image_quality,
     resolve_tessdata_dir_from_tesseract_path,
+)
+from paddle_ocr_backend import (
+    PADDLEOCR_DISPLAY_NAME,
+    PADDLEOCR_MODEL_CODE,
+    clear_paddleocr_engines,
+    get_paddleocr_engine,
+    get_paddleocr_text_recognition_engine,
+    prepare_paddleocr_image,
+    recognize_with_paddleocr,
 )
 
 from handlers import (
@@ -214,6 +224,11 @@ class GameChangingTranslator:
             thread_name_prefix="Translation"
         )
         log_debug("Initialized thread pools for OCR and translation processing")
+        self._paddleocr_prewarm_lock = threading.RLock()
+        self._paddleocr_prewarm_thread = None
+        self._paddleocr_prewarm_settings = None
+        self._paddleocr_prewarmed_settings = None
+        self._paddleocr_prewarm_generation = 0
         
         # Adaptive Scan Interval Infrastructure
         self.base_scan_interval = 500  # User's preferred setting (will be updated from config)
@@ -259,7 +274,7 @@ class GameChangingTranslator:
         
         # OCR Model Selection
         configured_ocr_model = self.config['Settings'].get('ocr_model', 'tesseract')
-        if configured_ocr_model != 'custom_ai':
+        if configured_ocr_model not in ['tesseract', PADDLEOCR_MODEL_CODE, 'custom_ai']:
             configured_ocr_model = 'tesseract'
         self.ocr_model_var = tk.StringVar(value=configured_ocr_model)
         
@@ -335,6 +350,37 @@ class GameChangingTranslator:
                 self.config['Settings'].get('custom_ai_ocr_image_detail', API_OCR_IMAGE_DETAIL_DEFAULT)
             )
         )
+
+        self.paddleocr_source_dir_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_source_dir', 'PaddleOCR-3.7.0')
+        )
+        self.paddleocr_lang_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_lang', 'en')
+        )
+        self.paddleocr_ocr_version_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_ocr_version', 'PP-OCRv6')
+        )
+        self.paddleocr_model_size_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_model_size', 'tiny')
+        )
+        self.paddleocr_device_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_device', 'cpu')
+        )
+        self.paddleocr_min_score_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_min_score', '0.35')
+        )
+        self.paddleocr_upscale_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_upscale', '1.0')
+        )
+        self.paddleocr_text_det_limit_side_len_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_text_det_limit_side_len', '960')
+        )
+        self.paddleocr_text_det_limit_type_var = tk.StringVar(
+            value=self.config['Settings'].get('paddleocr_text_det_limit_type', 'max')
+        )
+        self.paddleocr_use_textline_orientation_var = tk.BooleanVar(
+            value=self.config.getboolean('Settings', 'paddleocr_use_textline_orientation', fallback=False)
+        )
         
         # Separate Gemini model selection for OCR and Translation
         self.gemini_translation_model_var = tk.StringVar(value=self.config['Settings'].get('gemini_translation_model', 'Gemini 2.5 Flash-Lite'))
@@ -369,7 +415,9 @@ class GameChangingTranslator:
         self.preprocessing_mode_var = tk.StringVar(value=self.config['Settings'].get('image_preprocessing_mode', 'none'))
         
         # Adaptive thresholding parameters
-        self.adaptive_block_size_var = tk.IntVar(value=int(self.config['Settings'].get('adaptive_block_size', '41')))
+        self.adaptive_block_size_var = tk.IntVar(
+            value=normalize_adaptive_block_size(self.config['Settings'].get('adaptive_block_size', '41'))
+        )
         self.adaptive_c_var = tk.IntVar(value=int(self.config['Settings'].get('adaptive_c', '-60')))
         
         # Create a translated display variable for preprocessing mode
@@ -387,12 +435,14 @@ class GameChangingTranslator:
         self.custom_ocr_profile_display_var = tk.StringVar()
         initial_ocr_model_code = self.ocr_model_var.get()
         initial_ocr_display_name = ""
-        if initial_ocr_model_code not in ['tesseract', 'custom_ai']:
+        if initial_ocr_model_code not in ['tesseract', PADDLEOCR_MODEL_CODE, 'custom_ai']:
             log_debug(f"Configured legacy OCR model '{initial_ocr_model_code}' migrated to tesseract")
             self.ocr_model_var.set('tesseract')
             initial_ocr_model_code = 'tesseract'
         if initial_ocr_model_code == 'tesseract':
             initial_ocr_display_name = self.ui_lang.get_label("ocr_model_tesseract", "Tesseract (offline)")
+        elif initial_ocr_model_code == PADDLEOCR_MODEL_CODE:
+            initial_ocr_display_name = self.ui_lang.get_label("ocr_model_paddleocr", PADDLEOCR_DISPLAY_NAME)
         elif initial_ocr_model_code == 'custom_ai':
             active_ocr_profile = self.custom_ai_profiles.get_active_profile("ocr")
             initial_ocr_display_name = active_ocr_profile["name"] if active_ocr_profile else self.ui_lang.get_label("custom_ai_no_profiles", "Add an AI model profile")
@@ -504,6 +554,20 @@ class GameChangingTranslator:
         self.custom_ai_ocr_image_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_quality_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_detail_var.trace_add("write", self.settings_changed_callback)
+        for paddleocr_var in (
+            self.paddleocr_source_dir_var,
+            self.paddleocr_lang_var,
+            self.paddleocr_ocr_version_var,
+            self.paddleocr_model_size_var,
+            self.paddleocr_device_var,
+            self.paddleocr_min_score_var,
+            self.paddleocr_upscale_var,
+            self.paddleocr_text_det_limit_side_len_var,
+            self.paddleocr_text_det_limit_type_var,
+            self.paddleocr_use_textline_orientation_var,
+        ):
+            paddleocr_var.trace_add("write", self.settings_changed_callback)
+            paddleocr_var.trace_add("write", self.on_ocr_parameter_change)
         self.preprocessing_mode_var.trace_add("write", self.settings_changed_callback)
         self.preprocessing_mode_var.trace_add("write", self.on_ocr_parameter_change)
         self.adaptive_block_size_var.trace_add("write", self.settings_changed_callback)
@@ -718,6 +782,7 @@ class GameChangingTranslator:
         # Ensure OCR model UI is correctly set up on initial load
         if hasattr(self, 'ui_interaction_handler'):
             self.ui_interaction_handler.update_ocr_model_ui()
+        self.schedule_initial_paddleocr_prewarm()
 
     def ensure_window_visible(self):
         """Ensure the main window is visible after all initialization is complete."""
@@ -738,6 +803,133 @@ class GameChangingTranslator:
             log_debug(f"Tesseract OCR runtime cache cleared ({reason})")
         except Exception as e:
             log_debug(f"Tesseract OCR runtime cache clear failed ({reason}): {e}")
+
+    def clear_paddleocr_runtime_cache(self, reason="runtime settings changed"):
+        """Release cached PaddleOCR engine instances after settings or lifecycle changes."""
+        try:
+            self._invalidate_paddleocr_prewarm_state()
+            clear_paddleocr_engines()
+            log_debug(f"PaddleOCR runtime cache cleared ({reason})")
+        except Exception as e:
+            log_debug(f"PaddleOCR runtime cache clear failed ({reason}): {e}")
+
+    def _ensure_paddleocr_prewarm_state(self):
+        """Create prewarm bookkeeping for lightweight test doubles and old instances."""
+        if not hasattr(self, '_paddleocr_prewarm_lock'):
+            self._paddleocr_prewarm_lock = threading.RLock()
+        if not hasattr(self, '_paddleocr_prewarm_thread'):
+            self._paddleocr_prewarm_thread = None
+        if not hasattr(self, '_paddleocr_prewarm_settings'):
+            self._paddleocr_prewarm_settings = None
+        if not hasattr(self, '_paddleocr_prewarmed_settings'):
+            self._paddleocr_prewarmed_settings = None
+        if not hasattr(self, '_paddleocr_prewarm_generation'):
+            self._paddleocr_prewarm_generation = 0
+        return self._paddleocr_prewarm_lock
+
+    def _invalidate_paddleocr_prewarm_state(self):
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            self._paddleocr_prewarm_generation += 1
+            self._paddleocr_prewarm_settings = None
+            self._paddleocr_prewarmed_settings = None
+
+    def schedule_initial_paddleocr_prewarm(self):
+        """Start local PaddleOCR loading after the UI is up when it is the selected OCR."""
+        try:
+            selected_ocr_model = self.get_ocr_model_setting()
+        except Exception as e:
+            log_debug(f"PaddleOCR startup prewarm skipped; OCR model unavailable: {e}")
+            return False
+        if selected_ocr_model != PADDLEOCR_MODEL_CODE:
+            log_debug(
+                "PaddleOCR startup prewarm skipped; selected OCR model is "
+                f"{selected_ocr_model}"
+            )
+            return False
+        try:
+            self.root.after(
+                0,
+                lambda: self.ensure_paddleocr_ready_if_selected("application startup"),
+            )
+            log_debug("PaddleOCR startup prewarm scheduled")
+            return True
+        except Exception as e:
+            log_debug(f"PaddleOCR startup prewarm scheduling failed: {e}")
+            return self.ensure_paddleocr_ready_if_selected("application startup")
+
+    def ensure_paddleocr_ready_if_selected(self, reason="PaddleOCR selected"):
+        """Warm PaddleOCR engines in the background only when the local OCR is selected."""
+        try:
+            selected_ocr_model = self.get_ocr_model_setting()
+        except Exception as e:
+            log_debug(f"PaddleOCR prewarm skipped ({reason}); OCR model unavailable: {e}")
+            return False
+        if selected_ocr_model != PADDLEOCR_MODEL_CODE:
+            return False
+        try:
+            from worker_threads import get_paddleocr_settings_from_app
+
+            settings = get_paddleocr_settings_from_app(self)
+        except Exception as e:
+            log_debug(f"PaddleOCR prewarm skipped ({reason}); settings unavailable: {e}")
+            return False
+        return self.start_paddleocr_prewarm(settings, reason)
+
+    def start_paddleocr_prewarm(self, settings, reason="PaddleOCR selected"):
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            if self._paddleocr_prewarmed_settings == settings:
+                log_debug(f"PaddleOCR prewarm skipped ({reason}); engine already ready")
+                return False
+            active_thread = self._paddleocr_prewarm_thread
+            if (
+                active_thread is not None
+                and active_thread.is_alive()
+                and self._paddleocr_prewarm_settings == settings
+            ):
+                log_debug(f"PaddleOCR prewarm already running ({reason})")
+                return False
+
+            self._paddleocr_prewarm_generation += 1
+            generation = self._paddleocr_prewarm_generation
+            self._paddleocr_prewarm_settings = settings
+            prewarm_thread = threading.Thread(
+                target=self._run_paddleocr_prewarm,
+                args=(settings, generation, reason),
+                name="PaddleOCRPrewarm",
+                daemon=True,
+            )
+            self._paddleocr_prewarm_thread = prewarm_thread
+
+        prewarm_thread.start()
+        log_debug(
+            "PaddleOCR prewarm started "
+            f"reason={reason} version={settings.ocr_version} "
+            f"size={settings.model_size} device={settings.device}"
+        )
+        return True
+
+    def _run_paddleocr_prewarm(self, settings, generation, reason):
+        start_time = time.monotonic()
+        try:
+            get_paddleocr_text_recognition_engine(settings)
+            get_paddleocr_engine(settings)
+        except Exception as e:
+            lock = self._ensure_paddleocr_prewarm_state()
+            with lock:
+                if generation == self._paddleocr_prewarm_generation:
+                    self._paddleocr_prewarmed_settings = None
+                    self._paddleocr_prewarm_settings = None
+            log_debug(f"PaddleOCR prewarm failed ({reason}): {e}")
+            return
+
+        duration = time.monotonic() - start_time
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            if generation == self._paddleocr_prewarm_generation:
+                self._paddleocr_prewarmed_settings = settings
+        log_debug(f"PaddleOCR prewarm completed ({reason}) in {duration:.2f}s")
 
     def clear_ocr_stability_gate(self, reason="OCR state changed"):
         """Clear pending OCR text that has not yet been submitted for translation."""
@@ -764,10 +956,13 @@ class GameChangingTranslator:
     def on_ocr_parameter_change(self, *args):
         """Called when OCR parameters change to refresh preview if it's open."""
         try:
-            if not hasattr(self, 'get_ocr_model_setting') or self.get_ocr_model_setting() == 'tesseract':
+            current_ocr_model = self.get_ocr_model_setting() if hasattr(self, 'get_ocr_model_setting') else 'tesseract'
+            if current_ocr_model == 'tesseract':
                 self.clear_tesseract_runtime_cache("OCR parameter changed")
+            elif current_ocr_model == PADDLEOCR_MODEL_CODE:
+                self.clear_paddleocr_runtime_cache("OCR parameter changed")
         except Exception as e:
-            log_debug(f"Error clearing Tesseract runtime after OCR parameter change: {e}")
+            log_debug(f"Error clearing OCR runtime after OCR parameter change: {e}")
         if self.ocr_preview_window is not None:
             try:
                 if self.ocr_preview_window.winfo_exists():
@@ -786,6 +981,7 @@ class GameChangingTranslator:
         """Called when OCR model selection changes to update UI visibility."""
         try:
             self.clear_tesseract_runtime_cache("OCR model changed")
+            self.clear_paddleocr_runtime_cache("OCR model changed")
             self.clear_ocr_stability_gate("OCR model changed")
 
             # End OCR session if switching away from API OCR while translation is running
@@ -824,7 +1020,14 @@ class GameChangingTranslator:
 
     def save_settings(self):
         if self._fully_initialized:
-            return self.ui_interaction_handler.save_settings()
+            saved = self.ui_interaction_handler.save_settings()
+            if saved and not getattr(self, "_app_is_closing", False):
+                try:
+                    if self.get_ocr_model_setting() == PADDLEOCR_MODEL_CODE:
+                        self.ensure_paddleocr_ready_if_selected("settings saved")
+                except Exception as e:
+                    log_debug(f"PaddleOCR prewarm after settings save failed: {e}")
+            return saved
         log_debug("Attempted to save settings before full initialization.")
         return False
 
@@ -1685,7 +1888,11 @@ class GameChangingTranslator:
         try:
             # Get current settings
             prep_mode = self.preprocessing_mode_var.get()
-            block_size = self.adaptive_block_size_var.get()
+            try:
+                raw_block_size = self.adaptive_block_size_var.get()
+            except Exception:
+                raw_block_size = None
+            block_size = normalize_adaptive_block_size(raw_block_size)
             c_value = self.adaptive_c_var.get()
             
             # Always try to capture from source area for real-time preview (independent of translation state)
@@ -1715,30 +1922,65 @@ class GameChangingTranslator:
                 import cv2
                 import numpy as np
                 from PIL import Image, ImageTk
+                current_ocr_model = self.get_ocr_model_setting()
 
-                # Optimized image processing: Direct PIL to OpenCV conversion
-                img_np = np.array(screenshot_pil)
-                img_shape = img_np.shape
-                
-                # Optimized conversion based on common cases (avoid repeated checks)
-                if len(img_shape) == 3:
-                    if img_shape[2] == 3:  # RGB - most common case
-                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                    elif img_shape[2] == 4:  # RGBA
-                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
-                    else:
-                        raise ValueError(f"Unexpected 3D image channels: {img_shape[2]}")
-                elif len(img_shape) == 2:  # Grayscale
-                    img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+                if current_ocr_model == PADDLEOCR_MODEL_CODE:
+                    from worker_threads import get_paddleocr_settings_from_app
+
+                    paddleocr_settings = get_paddleocr_settings_from_app(self)
+                    processed_pil = prepare_paddleocr_image(screenshot_pil, paddleocr_settings)
+                    ocr_cleaned_text, _lines = recognize_with_paddleocr(
+                        screenshot_pil,
+                        paddleocr_settings,
+                        keep_linebreaks=bool(self.keep_linebreaks_var.get()),
+                    )
                 else:
-                    raise ValueError(f"Unexpected image dimensions: {len(img_shape)}D")
-                
-                # Process image
-                from ocr_utils import preprocess_for_ocr
-                processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
-                
+                    # Optimized image processing: Direct PIL to OpenCV conversion
+                    img_np = np.array(screenshot_pil)
+                    img_shape = img_np.shape
+
+                    # Optimized conversion based on common cases (avoid repeated checks)
+                    if len(img_shape) == 3:
+                        if img_shape[2] == 3:  # RGB - most common case
+                            img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                        elif img_shape[2] == 4:  # RGBA
+                            img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+                        else:
+                            raise ValueError(f"Unexpected 3D image channels: {img_shape[2]}")
+                    elif len(img_shape) == 2:  # Grayscale
+                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+                    else:
+                        raise ValueError(f"Unexpected image dimensions: {len(img_shape)}D")
+
+                    # Process image
+                    from ocr_utils import preprocess_for_ocr
+                    processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
+                    processed_pil = Image.fromarray(processed_cv_img)
+
+                    # Perform OCR on processed image with all post-processing steps
+                    tess_langs = self.get_tesseract_lang_code()
+                    from ocr_utils import ocr_region_with_confidence, post_process_ocr_text_general, remove_text_after_last_punctuation_mark
+
+                    tess_params = get_tesseract_ocr_config('general')
+                    tessdata_dir = resolve_tessdata_dir_from_tesseract_path(self.tesseract_path_var.get())
+                    full_img_region = (0, 0, processed_cv_img.shape[1], processed_cv_img.shape[0])
+                    confidence_threshold = self.confidence_var.get()
+
+                    ocr_raw_text = ocr_region_with_confidence(
+                        processed_cv_img,
+                        full_img_region,
+                        tess_langs,
+                        tess_params,
+                        confidence_threshold,
+                        tessdata_dir=tessdata_dir,
+                    )
+                    ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
+
+                    # Apply post-processing steps including "Remove Trailing Garbage" if enabled
+                    if self.remove_trailing_garbage_var.get() and ocr_cleaned_text:
+                        ocr_cleaned_text = remove_text_after_last_punctuation_mark(ocr_cleaned_text)
+
                 # Convert processed image to PIL for display
-                processed_pil = Image.fromarray(processed_cv_img)
                 processed_tk = ImageTk.PhotoImage(processed_pil)
                 
                 # Update image display in canvas
@@ -1757,29 +1999,6 @@ class GameChangingTranslator:
                 # Update the canvas window size and scroll region
                 self.preview_image_canvas.itemconfig(self.preview_image_canvas_item, width=image_width, height=image_height)
                 self.preview_image_canvas.configure(scrollregion=(0, 0, image_width, image_height))
-                
-                # Perform OCR on processed image with all post-processing steps
-                tess_langs = self.get_tesseract_lang_code()
-                from ocr_utils import ocr_region_with_confidence, post_process_ocr_text_general, remove_text_after_last_punctuation_mark
-                
-                tess_params = get_tesseract_ocr_config('general')
-                tessdata_dir = resolve_tessdata_dir_from_tesseract_path(self.tesseract_path_var.get())
-                full_img_region = (0, 0, processed_cv_img.shape[1], processed_cv_img.shape[0])
-                confidence_threshold = self.confidence_var.get()
-                
-                ocr_raw_text = ocr_region_with_confidence(
-                    processed_cv_img,
-                    full_img_region,
-                    tess_langs,
-                    tess_params,
-                    confidence_threshold,
-                    tessdata_dir=tessdata_dir,
-                )
-                ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
-                
-                # Apply post-processing steps including "Remove Trailing Garbage" if enabled
-                if self.remove_trailing_garbage_var.get() and ocr_cleaned_text:
-                    ocr_cleaned_text = remove_text_after_last_punctuation_mark(ocr_cleaned_text)
                 
                 # Update text display
                 self.preview_text_widget.config(state=tk.NORMAL)

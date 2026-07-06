@@ -824,6 +824,21 @@ def normalize_api_ocr_image_format(image_format):
     return API_OCR_IMAGE_FORMAT_DEFAULT
 
 
+def normalize_adaptive_block_size(value, default=41):
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        try:
+            normalized = int(default)
+        except (TypeError, ValueError):
+            normalized = 41
+    if normalized < 3:
+        normalized = 3
+    if normalized % 2 == 0:
+        normalized += 1
+    return normalized
+
+
 def _flatten_transparency_for_api_ocr(pil_image):
     Image = _pil_image()
     if pil_image.mode in ('RGBA', 'LA'):
@@ -1026,9 +1041,12 @@ def preprocess_for_ocr(img, mode='adaptive', block_size=41, c_value=-60): # Para
         if mode == 'adaptive':
             # --- Adaptive Thresholding ---
             # Use the configurable parameters
-            blockSize = block_size  # Size of the pixel neighborhood used to calculate the threshold.
-                                    # Must be an odd number (e.g., 3, 5, 7, 11, 21).
-                                    # Smaller for smaller text/details, larger for larger features.
+            blockSize = normalize_adaptive_block_size(block_size)
+            if str(block_size).strip() != str(blockSize):
+                log_debug(f"Normalized adaptive block size '{block_size}' to '{blockSize}'")
+            # Size of the pixel neighborhood used to calculate the threshold.
+            # Must be an odd number (e.g., 3, 5, 7, 11, 21).
+            # Smaller for smaller text/details, larger for larger features.
             C = c_value             # A constant subtracted from the mean or weighted mean.
                                     # Normally, it is positive but may be zero or negative as well.
                                     # Helps fine-tune the threshold.

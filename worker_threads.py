@@ -26,7 +26,13 @@ from ocr_utils import (
     API_OCR_IMAGE_DETAIL_DEFAULT, API_OCR_IMAGE_FORMAT_DEFAULT, API_OCR_IMAGE_MODE_DEFAULT,
     API_OCR_IMAGE_QUALITY_DEFAULT, normalize_api_ocr_image_detail,
     normalize_api_ocr_image_format, normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
+    normalize_api_ocr_image_quality, normalize_adaptive_block_size,
+)
+from paddle_ocr_backend import (
+    PADDLEOCR_MODEL_CODE,
+    PaddleOCRSettings,
+    prepare_paddleocr_image,
+    recognize_subtitle_with_paddleocr,
 )
 from translation_utils import (
     is_translation_error_result,
@@ -249,6 +255,13 @@ def _looks_like_low_quality_ocr_candidate(text):
 
     has_terminal_punctuation = _ocr_candidate_has_terminal_punctuation(text)
     tokens = _ocr_candidate_tokens(normalized)
+    if (
+        len(tokens) == 1
+        and len(tokens[0]) <= 8
+        and not has_terminal_punctuation
+        and not any(char in "aeiou" for char in tokens[0])
+    ):
+        return True
     if len(normalized) <= 2 and not has_terminal_punctuation:
         return True
     if (
@@ -263,7 +276,35 @@ def _looks_like_low_quality_ocr_candidate(text):
         and not has_terminal_punctuation
     ):
         return True
+    if (
+        len(tokens) >= 4
+        and len(tokens[-1]) == 3
+        and not has_terminal_punctuation
+    ):
+        return True
     return False
+
+
+def _is_transient_custom_ai_provider_error(value):
+    if not isinstance(value, str):
+        return False
+    normalized = value.casefold()
+    if not normalized.lstrip().startswith("custom ai translation error:"):
+        return False
+    transient_markers = (
+        "streaming api response did not contain message content",
+        "streaming responses api response did not contain output text",
+        "structured translation response contained empty translation",
+        "tls/ssl connection was closed",
+        "ssleoferror",
+        "unexpected_eof_while_reading",
+        "read timed out",
+        "connectionreseterror",
+        "connection aborted",
+        "remote host forcibly closed",
+        "远程主机强迫关闭",
+    )
+    return any(marker in normalized for marker in transient_markers)
 
 
 def _ocr_candidate_quality_score(text):
@@ -619,6 +660,35 @@ def _clear_ocr_stability_gate(app, reason):
     return had_pending
 
 
+def enqueue_ocr_frame_for_model(app, screenshot, ocr_model):
+    ocr_queue = app.ocr_queue
+    if ocr_model == PADDLEOCR_MODEL_CODE:
+        try:
+            while True:
+                ocr_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    try:
+        if not ocr_queue.full():
+            ocr_queue.put_nowait(screenshot)
+            _refresh_ocr_queue_metric(app)
+            return True
+        if ocr_model == PADDLEOCR_MODEL_CODE:
+            try:
+                ocr_queue.get_nowait()
+            except queue.Empty:
+                pass
+            ocr_queue.put_nowait(screenshot)
+            _refresh_ocr_queue_metric(app)
+            return True
+    except queue.Full:
+        _refresh_ocr_queue_metric(app)
+        return False
+    _refresh_ocr_queue_metric(app)
+    return False
+
+
 def _local_ocr_candidate_has_instant_cache(app, text_to_translate):
     enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
     try:
@@ -871,9 +941,10 @@ def _get_tesseract_ocr_cache_mode_key(app):
         preprocessing_mode_value = 'none'
 
     try:
-        block_size_value = int(adaptive_block_size.get()) if adaptive_block_size is not None else 41
+        raw_block_size_value = adaptive_block_size.get() if adaptive_block_size is not None else 41
     except Exception:
-        block_size_value = 41
+        raw_block_size_value = None
+    block_size_value = normalize_adaptive_block_size(raw_block_size_value)
 
     try:
         c_value = int(adaptive_c.get()) if adaptive_c is not None else -60
@@ -903,6 +974,162 @@ def _get_tesseract_ocr_cache_mode_key(app):
         f"|keep_linebreaks={keep_linebreaks}"
         f"|remove_trailing_garbage={remove_trailing_garbage}"
     )
+
+
+def _read_app_var(app, attr, default=None):
+    var = getattr(app, attr, None)
+    getter = getattr(var, "get", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return default
+    return default
+
+
+def _coerce_float(value, default, min_value=None, max_value=None):
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError):
+        coerced = float(default)
+    if min_value is not None:
+        coerced = max(float(min_value), coerced)
+    if max_value is not None:
+        coerced = min(float(max_value), coerced)
+    return coerced
+
+
+def _coerce_int(value, default, min_value=None, max_value=None):
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        coerced = int(default)
+    if min_value is not None:
+        coerced = max(int(min_value), coerced)
+    if max_value is not None:
+        coerced = min(int(max_value), coerced)
+    return coerced
+
+
+def _coerce_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+def get_paddleocr_settings_from_app(app):
+    return PaddleOCRSettings(
+        source_dir=str(_read_app_var(app, "paddleocr_source_dir_var", "PaddleOCR-3.7.0") or "PaddleOCR-3.7.0"),
+        lang=str(_read_app_var(app, "paddleocr_lang_var", "en") or "en"),
+        ocr_version=str(_read_app_var(app, "paddleocr_ocr_version_var", "PP-OCRv6") or "PP-OCRv6"),
+        model_size=str(_read_app_var(app, "paddleocr_model_size_var", "tiny") or "tiny"),
+        device=str(_read_app_var(app, "paddleocr_device_var", "cpu") or "cpu"),
+        min_score=_coerce_float(_read_app_var(app, "paddleocr_min_score_var", "0.35"), 0.35, 0.0, 1.0),
+        upscale=_coerce_float(_read_app_var(app, "paddleocr_upscale_var", "1.0"), 1.0, 1.0, 4.0),
+        text_det_limit_side_len=_coerce_int(
+            _read_app_var(app, "paddleocr_text_det_limit_side_len_var", "960"),
+            960,
+            128,
+            4096,
+        ),
+        text_det_limit_type=str(_read_app_var(app, "paddleocr_text_det_limit_type_var", "max") or "max"),
+        use_textline_orientation=_coerce_bool(
+            _read_app_var(app, "paddleocr_use_textline_orientation_var", False),
+            False,
+        ),
+    )
+
+
+def get_paddleocr_ocr_cache_mode_key(app):
+    settings = get_paddleocr_settings_from_app(app)
+    try:
+        keep_linebreaks = bool(app.keep_linebreaks_var.get())
+    except Exception:
+        keep_linebreaks = False
+    return (
+        f"paddleocr|version={settings.ocr_version}"
+        f"|size={settings.model_size}"
+        f"|device={settings.device}"
+        f"|min_score={settings.min_score}"
+        f"|upscale={settings.upscale}"
+        f"|det_limit={settings.text_det_limit_side_len}"
+        f"|det_limit_type={settings.text_det_limit_type}"
+        f"|orientation={settings.use_textline_orientation}"
+        f"|keep_linebreaks={keep_linebreaks}"
+    )
+
+
+def _pil_to_debug_bgr(pil_image):
+    rgb = np.array(pil_image.convert("RGB"))
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def process_local_ocr_frame(
+    app,
+    screenshot_pil,
+    ocr_model,
+    tess_langs,
+    tessdata_dir,
+    current_conf_thresh,
+    prep_mode,
+    block_size,
+    c_value,
+):
+    if ocr_model == PADDLEOCR_MODEL_CODE:
+        settings = get_paddleocr_settings_from_app(app)
+        try:
+            keep_linebreaks = bool(app.keep_linebreaks_var.get())
+        except Exception:
+            keep_linebreaks = False
+        ocr_cleaned_text, _lines = recognize_subtitle_with_paddleocr(
+            screenshot_pil,
+            settings,
+            keep_linebreaks=keep_linebreaks,
+        )
+        preview_pil = prepare_paddleocr_image(screenshot_pil, settings)
+        return ocr_cleaned_text, _pil_to_debug_bgr(preview_pil), "PaddleOCR"
+
+    img_np = np.array(screenshot_pil)
+    img_shape = img_np.shape
+
+    if len(img_shape) == 3:
+        if img_shape[2] == 3:
+            img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        elif img_shape[2] == 4:
+            img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+        else:
+            raise ValueError(f"WT: OCR: Unexpected 3D image channels: {img_shape[2]}")
+    elif len(img_shape) == 2:
+        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+    else:
+        raise ValueError(f"WT: OCR: Unexpected image dimensions: {len(img_shape)}D")
+
+    processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
+    full_img_region = (0, 0, processed_cv_img.shape[1], processed_cv_img.shape[0])
+    ocr_raw_text = ocr_region_with_confidence(
+        processed_cv_img,
+        full_img_region,
+        tess_langs,
+        get_tesseract_ocr_config(prep_mode if prep_mode in ['gaming', 'document', 'subtitle'] else 'general'),
+        current_conf_thresh,
+        tessdata_dir=tessdata_dir,
+    )
+
+    ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
+    try:
+        keep_linebreaks = bool(app.keep_linebreaks_var.get())
+    except Exception:
+        keep_linebreaks = False
+    if keep_linebreaks:
+        ocr_cleaned_text = ocr_cleaned_text.replace('\n', '<br>')
+    else:
+        ocr_cleaned_text = ocr_cleaned_text.replace('\n', ' ')
+    return ocr_cleaned_text, processed_cv_img, "Tesseract"
 
 
 def run_capture_thread(app):
@@ -1051,9 +1278,7 @@ def run_capture_thread(app):
                 last_cap_signature = capture_signature
 
             try:
-                if not app.ocr_queue.full():
-                    app.ocr_queue.put_nowait(screenshot)
-                    _refresh_ocr_queue_metric(app)
+                enqueue_ocr_frame_for_model(app, screenshot, ocr_model)
             except queue.Full:
                 _refresh_ocr_queue_metric(app)
                 pass # Skip frame if queue is full
@@ -1147,17 +1372,26 @@ def run_ocr_thread(app):
             frame_hash = _get_screenshot_frame_hash(screenshot_pil)
 
             prep_mode = app.preprocessing_mode_var.get()
-            block_size = app.adaptive_block_size_var.get()
+            try:
+                raw_block_size = app.adaptive_block_size_var.get()
+            except Exception:
+                raw_block_size = None
+            block_size = normalize_adaptive_block_size(raw_block_size)
             c_value = app.adaptive_c_var.get()
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
             ocr_cache_key = None
             if hasattr(app, 'ocr_frame_cache') and not app.is_api_based_ocr_model(ocr_model):
-                cache_lang = tess_langs or getattr(app, 'custom_source_lang', 'auto')
+                if ocr_model == PADDLEOCR_MODEL_CODE:
+                    cache_lang = _read_app_var(app, "paddleocr_lang_var", "en")
+                    cache_mode_key = get_paddleocr_ocr_cache_mode_key(app)
+                else:
+                    cache_lang = tess_langs or getattr(app, 'custom_source_lang', 'auto')
+                    cache_mode_key = _get_tesseract_ocr_cache_mode_key(app)
                 ocr_cache_key = build_ocr_frame_cache_key(
                     frame_hash,
                     ocr_model,
                     cache_lang,
-                    _get_tesseract_ocr_cache_mode_key(app),
+                    cache_mode_key,
                     screenshot_pil.size,
                     region_origin=region_origin,
                 )
@@ -1184,66 +1418,46 @@ def run_ocr_thread(app):
                 run_api_ocr(app, screenshot_pil)
                 continue # Skip to the next loop iteration
 
+            elif ocr_model == PADDLEOCR_MODEL_CODE:
+                log_debug("WT: OCR routing to PaddleOCR PP-OCRv6")
+
             elif ocr_model == 'tesseract':
                 log_debug("WT: OCR routing to Tesseract OCR")
                 pass
             
             else:
                 log_debug(f"WT: OCR: Unknown OCR model '{ocr_model}', falling back to Tesseract")
-                pass
+                ocr_model = 'tesseract'
 
             if not goto_post_ocr:
-                # ==================== TESSERACT OCR PROCESSING ====================
-                img_np = np.array(screenshot_pil)
-                img_shape = img_np.shape
-                
-                if len(img_shape) == 3:
-                    if img_shape[2] == 3:
-                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-                    elif img_shape[2] == 4:
-                        img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
-                    else:
-                        raise ValueError(f"WT: OCR: Unexpected 3D image channels: {img_shape[2]}")
-                elif len(img_shape) == 2:
-                    img_cv_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
-                else:
-                    raise ValueError(f"WT: OCR: Unexpected image dimensions: {len(img_shape)}D")
-
-                processed_cv_img = preprocess_for_ocr(img_cv_bgr, prep_mode, block_size, c_value)
-                app.last_processed_image = processed_cv_img
-
+                # ==================== LOCAL OCR PROCESSING ====================
                 if app.ocr_debugging_var.get():
-                    app.root.after(0, app.update_debug_display, screenshot_pil, processed_cv_img, "Processing...")
+                    app.root.after(0, app.update_debug_display, screenshot_pil, _pil_to_debug_bgr(screenshot_pil), "Processing...")
+
+                ocr_cleaned_text, processed_cv_img, engine_label = process_local_ocr_frame(
+                    app,
+                    screenshot_pil,
+                    ocr_model,
+                    tess_langs,
+                    tessdata_dir,
+                    current_conf_thresh,
+                    prep_mode,
+                    block_size,
+                    c_value,
+                )
+                app.last_processed_image = processed_cv_img
 
                 if cached_prep_mode != prep_mode:
                     cached_prep_mode = prep_mode
                     log_debug(f"WT: OCR parameters cached for mode: {prep_mode}")
-                
-                full_img_region = (0,0, processed_cv_img.shape[1], processed_cv_img.shape[0])
-                ocr_raw_text = ocr_region_with_confidence(
-                    processed_cv_img,
-                    full_img_region,
-                    tess_langs,
-                    get_tesseract_ocr_config(prep_mode if prep_mode in ['gaming', 'document', 'subtitle'] else 'general'),
-                    current_conf_thresh,
-                    tessdata_dir=tessdata_dir,
-                )
-                
-                ocr_cleaned_text = post_process_ocr_text_general(ocr_raw_text, tess_langs)
-                
-                # Apply conditional linebreak conversion for Tesseract
-                if app.keep_linebreaks_var.get():
-                    ocr_cleaned_text = ocr_cleaned_text.replace('\n', '<br>')
-                else:
-                    ocr_cleaned_text = ocr_cleaned_text.replace('\n', ' ')
 
                 if ocr_cache_key is not None:
                     app.ocr_frame_cache.put(ocr_cache_key, ocr_cleaned_text)
                 ocr_duration = time.monotonic() - ocr_proc_start_time
-                log_debug(f"LATENCY: Tesseract OCR took {ocr_duration:.3f}s")
+                log_debug(f"LATENCY: {engine_label} OCR took {ocr_duration:.3f}s")
                 _record_metric_timing(app, "ocr_duration", ocr_duration)
             
-            if app.remove_trailing_garbage_var.get() and ocr_cleaned_text:
+            if ocr_model == 'tesseract' and app.remove_trailing_garbage_var.get() and ocr_cleaned_text:
                 pattern = r'[.!?]|\.{3}|…' 
                 if not list(re.finditer(pattern, ocr_cleaned_text)):
                     app.text_stability_counter = 0
@@ -1260,6 +1474,18 @@ def run_ocr_thread(app):
                 app.previous_text = ""
                 _clear_ocr_stability_gate(app, "empty or placeholder OCR")
                 continue
+
+            if ocr_model == PADDLEOCR_MODEL_CODE:
+                route_result = _route_local_ocr_candidate_for_translation(
+                    app,
+                    ocr_cleaned_text,
+                    now=time.monotonic(),
+                    ocr_sequence_number=0,
+                )
+                if route_result in ("submitted", "skipped", "dropped", "pending"):
+                    app.text_stability_counter = 0
+                    similar_texts_count = 0
+                    continue
 
             if _has_pending_ocr_stability_candidate(app):
                 route_result = _route_local_ocr_candidate_for_translation(
@@ -2208,6 +2434,13 @@ def process_translation_response(app, translation_result, translation_sequence, 
         log_debug(f"Translation {translation_sequence}: Processing newer sequence (last displayed: {app.last_displayed_translation_sequence})")
         
         if is_translation_error_result(translation_result):
+            if _is_transient_custom_ai_provider_error(translation_result):
+                log_debug(
+                    "Translation transient provider error suppressed in "
+                    f"sequence {translation_sequence}: {translation_result}"
+                )
+                _clear_local_ocr_submit_state(app)
+                return
             log_debug(f"Translation error in sequence {translation_sequence}: {translation_result}")
             app.update_translation_text(f"Translation Error:\n{translation_result}")
             app.last_displayed_translation_sequence = translation_sequence

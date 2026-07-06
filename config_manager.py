@@ -13,6 +13,7 @@ from ocr_utils import (
     normalize_api_ocr_image_format,
     normalize_api_ocr_image_mode,
     normalize_api_ocr_image_quality,
+    normalize_adaptive_block_size,
 )
 from resource_handler import get_resource_path
 
@@ -72,8 +73,18 @@ DEFAULT_CONFIG_SETTINGS = {
     'deepl_target_lang': 'EN-GB', # DeepL's code for English (British)
     'deepl_model_type': 'latency_optimized', # Default to classic model for compatibility
     'gui_language':'English',
-    # OCR Model Selection (Phase 1 - Gemini OCR)
-    'ocr_model': 'tesseract',  # 'tesseract' or 'custom_ai'
+    # OCR Model Selection
+    'ocr_model': 'tesseract',  # 'tesseract', 'paddleocr', or 'custom_ai'
+    'paddleocr_source_dir': 'PaddleOCR-3.7.0',
+    'paddleocr_lang': 'en',
+    'paddleocr_ocr_version': 'PP-OCRv6',
+    'paddleocr_model_size': 'tiny',
+    'paddleocr_device': 'cpu',
+    'paddleocr_min_score': '0.35',
+    'paddleocr_upscale': '1.0',
+    'paddleocr_text_det_limit_side_len': '960',
+    'paddleocr_text_det_limit_type': 'max',
+    'paddleocr_use_textline_orientation': 'False',
     'custom_ai_profiles_file': 'custom_ai_profiles.json',
     'custom_source_lang': 'auto',
     'custom_target_lang': 'en',
@@ -213,6 +224,12 @@ def load_app_config():
             settings_changed = True
             log_debug(f"Config: Added missing key '{key}' with default value '{value}'.")
 
+    current_ocr_model = config_settings.get('ocr_model', 'tesseract')
+    if current_ocr_model not in ['tesseract', 'paddleocr', 'custom_ai']:
+        config_settings['ocr_model'] = 'tesseract'
+        settings_changed = True
+        log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'tesseract'")
+
     current_mode = config_settings.get('image_preprocessing_mode', 'none')
     if current_mode not in ['none', 'binary', 'binary_inv', 'adaptive']:
         config_settings['image_preprocessing_mode'] = 'none'
@@ -252,6 +269,13 @@ def load_app_config():
         config_settings['custom_ai_ocr_image_detail'] = normalized_image_detail
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
+
+    current_block_size = config_settings.get('adaptive_block_size', DEFAULT_CONFIG_SETTINGS['adaptive_block_size'])
+    normalized_block_size = str(normalize_adaptive_block_size(current_block_size))
+    if normalized_block_size != str(current_block_size):
+        config_settings['adaptive_block_size'] = normalized_block_size
+        settings_changed = True
+        log_debug(f"Config: Invalid adaptive_block_size '{current_block_size}' normalized to '{normalized_block_size}'")
 
     if migrate_provider_api_keys_to_credentials(config_settings):
         settings_changed = True

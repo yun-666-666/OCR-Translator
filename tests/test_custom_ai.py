@@ -2127,6 +2127,52 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertTrue(provider.http_client.stream_flags[0])
         self.assertTrue(provider.http_client.payloads[0]["stream"])
 
+    def test_stream_translation_empty_response_falls_back_to_non_stream_request(self):
+        class EmptyStreamResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter(["data: [DONE]"])
+
+        class JsonResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "choices": [
+                        {"message": {"content": '{"translation":"Recovered translation"}'}}
+                    ]
+                }
+
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                if stream:
+                    return EmptyStreamResponse()
+                return JsonResponse()
+
+        provider = CustomAIProvider(http_client=Client())
+
+        result, _usage, _duration = provider.translate(
+            {"base_url": "https://host.example/v1", "api_key": "super-secret", "model": "demo"},
+            "Bonjour",
+            "fr",
+            "en",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(result, "Recovered translation")
+        self.assertEqual(provider.http_client.stream_flags, [True, False])
+
     def test_stream_post_preserves_original_payload_while_adding_stream_flag(self):
         class Response:
             status_code = 200
@@ -2782,6 +2828,83 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertNotIn("response_format", client.payloads[1])
         self.assertNotIn("response_format", second_payload)
 
+    def test_stream_fallback_retries_plain_text_when_structured_translation_is_empty(self):
+        provider = CustomAIProvider(http_client=object())
+        stream_payloads = []
+        post_payloads = []
+
+        def fake_stream_post(
+            profile,
+            payload,
+            stream_callback=None,
+            latency_mode="stream",
+            request_kind=None,
+            timeout_seconds=None,
+        ):
+            stream_payloads.append(dict(payload))
+            raise ValueError(
+                "https://api.x.ai/v1/chat/completions: "
+                "Streaming API response did not contain message content"
+            )
+
+        def fake_post(
+            profile,
+            payload,
+            latency_mode="safe",
+            request_kind=None,
+            timeout_seconds=None,
+        ):
+            post_payloads.append(dict(payload))
+            if "response_format" in payload:
+                return (
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {"translation": ""}
+                                    )
+                                }
+                            }
+                        ]
+                    },
+                    1.0,
+                )
+            return (
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "Plain text fallback"
+                            }
+                        }
+                    ]
+                },
+                0.2,
+            )
+
+        provider._stream_post = Mock(side_effect=fake_stream_post)
+        provider._post = Mock(side_effect=fake_post)
+
+        result, _usage, duration = provider.translate(
+            {
+                "base_url": "https://api.x.ai/v1",
+                "api_key": "super-secret",
+                "model": "grok-demo",
+                "structured_output_mode": "auto",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(result, "Plain text fallback")
+        self.assertEqual(duration, 1.2)
+        self.assertNotIn("response_format", stream_payloads[0])
+        self.assertIn("response_format", post_payloads[0])
+        self.assertNotIn("response_format", post_payloads[1])
+
     def test_strict_structured_output_does_not_fallback_when_endpoint_rejects_schema(self):
         class Response:
             status_code = 422
@@ -2831,6 +2954,7 @@ class CustomAIProviderTests(unittest.TestCase):
             payload,
             stream_callback=None,
             latency_mode="stream",
+            request_kind=None,
         ):
             captured_payloads.append(dict(payload))
             stream_callback("Yo")
@@ -3105,6 +3229,7 @@ class CustomAIProviderTests(unittest.TestCase):
                     payload,
                     stream_callback=None,
                     latency_mode="stream",
+                    request_kind=None,
                 ):
                     stream_callback("Translation:")
                     stream_callback("Translation:\nHello")
@@ -3353,6 +3478,33 @@ class CustomAIProviderTests(unittest.TestCase):
         )
         self.assertEqual(responses_ocr["reasoning"], {"effort": "high"})
 
+    def test_responses_payload_omits_reasoning_when_chat_payload_does(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "demo",
+            "wire_api": "responses",
+            "reasoning_effort": "low",
+        }
+        provider._remember_unsupported_reasoning_effort(
+            profile,
+            "translation",
+            "low",
+        )
+
+        chat_payload = provider.build_translation_payload(
+            profile,
+            "Hi",
+            "en",
+            "zh-CN",
+        )
+        responses_payload = provider.build_responses_payload_from_chat_payload(
+            profile,
+            chat_payload,
+        )
+
+        self.assertNotIn("reasoning_effort", chat_payload)
+        self.assertNotIn("reasoning", responses_payload)
+
     def test_chat_translation_retries_without_reasoning_effort_and_remembers_contract(self):
         class Response:
             def __init__(self, status_code, payload):
@@ -3415,6 +3567,210 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(client.payloads[0]["reasoning_effort"], "medium")
         self.assertNotIn("reasoning_effort", client.payloads[1])
         self.assertNotIn("reasoning_effort", client.payloads[2])
+        self.assertEqual(
+            provider.reasoning_effort_request_contract(
+                profile,
+                "translation",
+            ),
+            "none",
+        )
+
+    def test_chat_translation_retries_after_xai_reasoning_effort_rejection(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.headers = {}
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.payloads.append(dict(json))
+                if "reasoning_effort" in json:
+                    return Response(
+                        400,
+                        {
+                            "error": {
+                                "message": (
+                                    "Model grok-4.20-0309-non-reasoning "
+                                    "does not support parameter reasoningEffort."
+                                )
+                            }
+                        },
+                    )
+                return Response(
+                    200,
+                    {"choices": [{"message": {"content": "Hello"}}]},
+                )
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok-4.20-0309-non-reasoning",
+            "reasoning_effort": "low",
+            "structured_output_mode": "off",
+        }
+
+        with patch("custom_ai.log_debug") as log_debug:
+            first, _usage, _duration = provider.translate(
+                profile,
+                "Bonjour",
+                "fr",
+                "en",
+            )
+            second, _usage, _duration = provider.translate(
+                profile,
+                "Salut",
+                "fr",
+                "en",
+            )
+
+        self.assertEqual(first, "Hello")
+        self.assertEqual(second, "Hello")
+        self.assertEqual(len(client.payloads), 3)
+        self.assertEqual(client.payloads[0]["reasoning_effort"], "low")
+        self.assertNotIn("reasoning_effort", client.payloads[1])
+        self.assertNotIn("reasoning_effort", client.payloads[2])
+        self.assertEqual(
+            provider.reasoning_effort_request_contract(
+                profile,
+                "translation",
+            ),
+            "none",
+        )
+        self.assertTrue(
+            any(
+                "COMPAT: retrying Custom AI request without unsupported "
+                "reasoning effort" in str(call.args[0])
+                for call in log_debug.call_args_list
+            )
+        )
+
+    def test_stream_translation_passes_translation_request_kind(self):
+        class Provider(CustomAIProvider):
+            def __init__(self):
+                super().__init__(http_client=object())
+                self.stream_request_kind = None
+
+            def _stream_post(self, profile, payload, **kwargs):
+                self.stream_request_kind = kwargs.get("request_kind")
+                return (
+                    {"choices": [{"message": {"content": "Hello"}}]},
+                    0.01,
+                )
+
+        provider = Provider()
+
+        translated, _usage, _duration = provider.translate(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "demo",
+                "structured_output_mode": "off",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(translated, "Hello")
+        self.assertEqual(provider.stream_request_kind, "translation")
+
+    def test_streaming_chat_retries_after_xai_reasoning_effort_rejection(self):
+        class Response:
+            def __init__(self, status_code, payload=None, lines=None):
+                self.status_code = status_code
+                self.payload = payload or {}
+                self.text = json.dumps(self.payload)
+                self.headers = {}
+                self._lines = lines or []
+
+            def json(self):
+                return self.payload
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter(self._lines)
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(
+                self,
+                url,
+                headers=None,
+                json=None,
+                timeout=None,
+                stream=False,
+            ):
+                self.payloads.append(dict(json))
+                if "reasoning_effort" in json:
+                    return Response(
+                        400,
+                        {
+                            "error": {
+                                "message": (
+                                    "Model grok-4.20-0309-non-reasoning "
+                                    "does not support parameter reasoningEffort."
+                                )
+                            }
+                        },
+                    )
+                return Response(
+                    200,
+                    lines=[
+                        'data: {"choices":[{"delta":{"content":"Hello"}}]}',
+                        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+                        "data: [DONE]",
+                    ],
+                )
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok-4.20-0309-non-reasoning",
+            "reasoning_effort": "low",
+            "structured_output_mode": "off",
+        }
+
+        first, _usage, _duration = provider.translate(
+            profile,
+            "Bonjour",
+            "fr",
+            "en",
+            latency_mode="stream",
+        )
+        second, _usage, _duration = provider.translate(
+            profile,
+            "Salut",
+            "fr",
+            "en",
+            latency_mode="stream",
+        )
+
+        self.assertEqual(first, "Hello")
+        self.assertEqual(second, "Hello")
+        self.assertEqual(len(client.payloads), 3)
+        self.assertEqual(client.payloads[0]["reasoning_effort"], "low")
+        self.assertTrue(client.payloads[0]["stream"])
+        self.assertNotIn("reasoning_effort", client.payloads[1])
+        self.assertTrue(client.payloads[1]["stream"])
+        self.assertNotIn("reasoning_effort", client.payloads[2])
+        self.assertTrue(client.payloads[2]["stream"])
         self.assertEqual(
             provider.reasoning_effort_request_contract(
                 profile,
@@ -3569,6 +3925,7 @@ class CustomAIProviderTests(unittest.TestCase):
 
         cases = [
             (401, "authentication failed"),
+            (400, "reasoning_effort quota exhausted; retry later"),
             (429, "rate limit exceeded"),
             (500, "internal server error"),
         ]

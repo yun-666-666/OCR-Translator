@@ -29,6 +29,7 @@ translator_debug*.log
 *.log
 *.log.*
 marian_models_cache/
+PaddleOCR-*/
 debug_images/
 artifacts/
 backups/

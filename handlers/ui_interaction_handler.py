@@ -11,6 +11,7 @@ from logger import (
     read_debug_log_tail,
 )
 from ocr_utils import resolve_tessdata_dir_from_tesseract_path
+from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 import traceback
 
 
@@ -264,7 +265,8 @@ class UIInteractionHandler:
                     widget.grid_remove()
         
         is_tesseract = (selected_ocr_model == 'tesseract')
-        is_gemini_ocr = (selected_ocr_model == 'gemini')
+        is_paddleocr = (selected_ocr_model == PADDLEOCR_MODEL_CODE)
+        is_local_ocr = is_tesseract or is_paddleocr
         
         # Hide/show Tesseract-specific fields when Gemini OCR is selected
         if hasattr(self.app, 'tesseract_path_label'):
@@ -280,9 +282,9 @@ class UIInteractionHandler:
         if hasattr(self.app, 'confidence_spinbox'):
             manage_grid(self.app.confidence_spinbox, show=is_tesseract)
         if hasattr(self.app, 'stability_label'):
-            manage_grid(self.app.stability_label, show=is_tesseract)
+            manage_grid(self.app.stability_label, show=is_local_ocr)
         if hasattr(self.app, 'stability_spinbox'):
-            manage_grid(self.app.stability_spinbox, show=is_tesseract)
+            manage_grid(self.app.stability_spinbox, show=is_local_ocr)
         
         # Handle "Remove Trailing Garbage" - this is a Tesseract-specific feature
         if hasattr(self.app, 'remove_trailing_label'):
@@ -290,11 +292,11 @@ class UIInteractionHandler:
         if hasattr(self.app, 'remove_trailing_checkbox'):
             manage_grid(self.app.remove_trailing_checkbox, show=is_tesseract)
         
-        # Handle OCR debugging - hide for Gemini OCR as it has different debugging needs
+        # Handle OCR debugging - keep it for local OCR engines.
         if hasattr(self.app, 'ocr_debugging_label'):
-            manage_grid(self.app.ocr_debugging_label, show=is_tesseract)
+            manage_grid(self.app.ocr_debugging_label, show=is_local_ocr)
         if hasattr(self.app, 'ocr_debug_frame'):
-            manage_grid(self.app.ocr_debug_frame, show=is_tesseract)
+            manage_grid(self.app.ocr_debug_frame, show=is_local_ocr)
         
         # Handle adaptive thresholding parameters - only show when Tesseract + Adaptive mode
         is_adaptive_mode = (self.app.preprocessing_mode_var.get() == 'adaptive')
@@ -309,7 +311,12 @@ class UIInteractionHandler:
         if hasattr(self.app, 'adaptive_c_spinbox'):
             manage_grid(self.app.adaptive_c_spinbox, show=show_adaptive)
         
-        log_debug(f"OCR model UI updated for {selected_ocr_model}: Tesseract fields={'visible' if is_tesseract else 'hidden'}, Adaptive={'visible' if show_adaptive else 'hidden'}")
+        log_debug(
+            f"OCR model UI updated for {selected_ocr_model}: "
+            f"Tesseract fields={'visible' if is_tesseract else 'hidden'}, "
+            f"PaddleOCR local={'visible' if is_paddleocr else 'hidden'}, "
+            f"Adaptive={'visible' if show_adaptive else 'hidden'}"
+        )
 
     def update_marian_models_dropdown_for_language(self, ui_language=None):
         """Update MarianMT models dropdown with localized display names."""
@@ -1332,6 +1339,18 @@ class UIInteractionHandler:
                 self.app.get_custom_ai_ocr_image_detail()
                 if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
                 else self.app.custom_ai_ocr_image_detail_var.get()
+            )
+            cfg['paddleocr_source_dir'] = self.app.paddleocr_source_dir_var.get()
+            cfg['paddleocr_lang'] = self.app.paddleocr_lang_var.get()
+            cfg['paddleocr_ocr_version'] = self.app.paddleocr_ocr_version_var.get()
+            cfg['paddleocr_model_size'] = self.app.paddleocr_model_size_var.get()
+            cfg['paddleocr_device'] = self.app.paddleocr_device_var.get()
+            cfg['paddleocr_min_score'] = self.app.paddleocr_min_score_var.get()
+            cfg['paddleocr_upscale'] = self.app.paddleocr_upscale_var.get()
+            cfg['paddleocr_text_det_limit_side_len'] = self.app.paddleocr_text_det_limit_side_len_var.get()
+            cfg['paddleocr_text_det_limit_type'] = self.app.paddleocr_text_det_limit_type_var.get()
+            cfg['paddleocr_use_textline_orientation'] = str(
+                self.app.paddleocr_use_textline_orientation_var.get()
             )
             cfg['openai_file_cache'] = str(self.app.openai_file_cache_var.get())
             cfg['openai_api_log_enabled'] = str(self.app.openai_api_log_enabled_var.get())

@@ -1208,6 +1208,11 @@ class CustomAIProvider:
         return any(
             marker in error_message
             for marker in (
+                "does not support parameter",
+                "does not support",
+                "doesn't support",
+                "do not support",
+                "not support",
                 "unsupported parameter",
                 "unknown parameter",
                 "unknown field",
@@ -1669,6 +1674,22 @@ class CustomAIProvider:
         if normalized <= 0:
             return self.timeout
         return normalized
+
+    def _stream_error_should_fallback_to_non_stream(self, error):
+        message = str(error or "").casefold()
+        transient_markers = (
+            "streaming api response did not contain message content",
+            "streaming responses api response did not contain output text",
+            "read timed out",
+            "connectionreseterror",
+            "connection aborted",
+            "remote end closed connection",
+            "chunkedencodingerror",
+            "tls/ssl connection was closed",
+            "ssleoferror",
+            "unexpected_eof_while_reading",
+        )
+        return any(marker in message for marker in transient_markers)
 
     def _prepare_payload_for_profile(self, profile, payload, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE, stream=False):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
@@ -2392,6 +2413,7 @@ class CustomAIProvider:
                 return self._stream_post(
                     profile,
                     current_payload,
+                    request_kind="translation",
                     **stream_kwargs,
                 )
             return self._post(
@@ -2402,19 +2424,61 @@ class CustomAIProvider:
                 timeout_seconds=timeout_seconds,
             )
 
-        response_json, duration = request(payload)
+        active_request = request
+        active_payload = payload
+        response_latency_mode = latency_mode
+        response_stream = latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM
+        used_stream_to_non_stream_fallback = False
+        try:
+            response_json, duration = active_request(active_payload)
+        except Exception as stream_error:
+            if (
+                latency_mode != CUSTOM_AI_LATENCY_MODE_STREAM
+                or not self._stream_error_should_fallback_to_non_stream(stream_error)
+            ):
+                raise
+            log_debug(
+                "LATENCY: custom_ai stream translation failed transiently; "
+                "retrying non-stream request: "
+                f"{type(stream_error).__name__} - {stream_error}"
+            )
+            active_payload = self.build_translation_payload(
+                profile,
+                text,
+                source_lang,
+                target_lang,
+                custom_prompt=custom_prompt,
+                context=context,
+                keep_linebreaks=keep_linebreaks,
+                latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
+                stream=False,
+            )
+
+            def active_request(current_payload):
+                return self._post(
+                    profile,
+                    current_payload,
+                    latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
+                    request_kind="translation",
+                    timeout_seconds=timeout_seconds,
+                )
+
+            response_latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+            response_stream = False
+            used_stream_to_non_stream_fallback = True
+            response_json, duration = active_request(active_payload)
         if (
-            "max_tokens" in payload
+            "max_tokens" in active_payload
             and not self._output_limit_is_known_unsupported(profile)
             and self._response_was_output_limited(profile, response_json)
         ):
-            retry_payload = dict(payload)
+            retry_payload = dict(active_payload)
             retry_payload.pop("max_tokens", None)
             log_debug(
                 "QUALITY: retrying truncated Custom AI translation "
                 "without output limit"
             )
-            response_json, retry_duration = request(retry_payload)
+            response_json, retry_duration = active_request(retry_payload)
             duration += retry_duration
         terminal_error = self._translation_terminal_error(
             profile,
@@ -2422,15 +2486,45 @@ class CustomAIProvider:
         )
         if terminal_error:
             raise ValueError(terminal_error)
-        result = self._normalize_translation_output(
-            text,
-            self._parse_translation_response_text(
+
+        try:
+            result = self._normalize_translation_output(
+                text,
+                self._parse_translation_response_text(
+                    profile,
+                    response_json,
+                    latency_mode=response_latency_mode,
+                    stream=response_stream,
+                ),
+            )
+        except ValueError as parse_error:
+            should_retry_plain_text = (
+                used_stream_to_non_stream_fallback
+                and self._structured_output_mode(profile)
+                == CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
+                and self._payload_has_structured_output(active_payload)
+                and "structured translation response" in str(parse_error).casefold()
+            )
+            if not should_retry_plain_text:
+                raise
+            retry_payload = self._without_structured_output(active_payload)
+            log_debug(
+                "LATENCY: custom_ai structured stream fallback failed; "
+                "retrying plain-text request: "
+                f"{type(parse_error).__name__} - {parse_error}"
+            )
+            response_json, retry_duration = active_request(retry_payload)
+            duration += retry_duration
+            terminal_error = self._translation_terminal_error(
                 profile,
                 response_json,
-                latency_mode=latency_mode,
-                stream=latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM,
-            ),
-        )
+            )
+            if terminal_error:
+                raise ValueError(terminal_error)
+            result = self._normalize_translation_output(
+                text,
+                self._parse_response_text(profile, response_json),
+            )
         return result, self._extract_usage(response_json), duration
 
     def recognize(

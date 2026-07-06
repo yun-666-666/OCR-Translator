@@ -2968,6 +2968,52 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 self.assertIsNone(app.last_local_ocr_submitted_norm)
                 self.assertIsNone(app.last_local_ocr_submitted_scope)
 
+    def test_transient_custom_ai_provider_errors_do_not_cover_current_subtitle(self):
+        worker_threads = import_worker_threads_for_tests()
+        cases = (
+            (
+                "Custom AI translation error: ValueError - "
+                "https://api.x.ai/v1/chat/completions: "
+                "Streaming API response did not contain message content"
+            ),
+            (
+                "Custom AI translation error: ValueError - "
+                "Structured translation response contained empty translation"
+            ),
+            (
+                "Custom AI translation error: SSLEOFError - "
+                "TLS/SSL connection was closed "
+                "(unexpected_eof_while_reading)"
+            ),
+        )
+
+        for error_text in cases:
+            with self.subTest(error_text=error_text):
+                displayed = []
+                app = types.SimpleNamespace(
+                    last_displayed_translation_sequence=0,
+                    last_successful_translation_time=123.0,
+                    last_local_ocr_submitted_text="NMMNm",
+                    last_local_ocr_submitted_norm="nmmnm",
+                    last_local_ocr_submitted_scope=("scope",),
+                    update_translation_text=displayed.append,
+                )
+
+                worker_threads.process_translation_response(
+                    app,
+                    error_text,
+                    26,
+                    "NMMNm",
+                    0,
+                )
+
+                self.assertEqual(displayed, [])
+                self.assertEqual(app.last_displayed_translation_sequence, 0)
+                self.assertEqual(app.last_successful_translation_time, 123.0)
+                self.assertIsNone(app.last_local_ocr_submitted_text)
+                self.assertIsNone(app.last_local_ocr_submitted_norm)
+                self.assertIsNone(app.last_local_ocr_submitted_scope)
+
     def test_streaming_translation_partial_updates_are_scheduled_on_ui_thread(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []
@@ -3133,6 +3179,37 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         self.assertEqual(result, "submitted")
         self.assertEqual(submitted, ["The treasure door is open."])
         self.assertEqual(scheduled, [])
+
+    def test_truncated_ocr_candidate_waits_for_more_complete_text(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        submitted = []
+        app = self._make_app(scheduled)
+
+        def submit(_app, text, sequence, requested_at_monotonic=None):
+            submitted.append((text, sequence, requested_at_monotonic))
+
+        with patch.object(worker_threads, "start_async_translation", side_effect=submit):
+            first_result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "If I'm going to lis",
+                now=700.0,
+            )
+            second_result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "If I'm going to live under Lois's rule,",
+                now=700.2,
+            )
+
+            for _delay, callback, args in list(scheduled):
+                callback(*args)
+
+        self.assertEqual(first_result, "pending")
+        self.assertEqual(second_result, "submitted")
+        self.assertEqual(
+            submitted,
+            [("If I'm going to live under Lois's rule,", 0, 700.2)],
+        )
 
     def test_pending_candidate_flushes_after_max_wait(self):
         worker_threads = import_worker_threads_for_tests()
