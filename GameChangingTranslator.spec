@@ -92,7 +92,6 @@ a = Analysis(
         # Scientific libraries (simplified to avoid docstring issues)
         'numpy',
         'cv2',
-        'tesserocr',
         'pyautogui',
         # Optional but needed dependencies
         'keyboard',
@@ -112,7 +111,7 @@ a = Analysis(
         'google.generativeai.client',
         'google.ai.generativelanguage',
         'deepl',
-        
+
         # NEW: Additional dependencies for google.genai
         'pydantic',
         'pydantic.types',
@@ -162,21 +161,21 @@ a = Analysis(
         'pytest',
         'sphinx',
         'doctest',
-        
+
         # GUI frameworks we don't use
         'PyQt5',
         'PyQt6',
         'PySide2',
-        
+
         # Web frameworks
         'flask',
         'django',
         'fastapi',
-        
+
         # Large PyTorch modules we don't need
         'torchvision',
         'torchaudio',
-        
+
         # Test modules
         'tkinter.test',
     ],

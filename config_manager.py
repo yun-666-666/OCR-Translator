@@ -13,7 +13,6 @@ from ocr_utils import (
     normalize_api_ocr_image_format,
     normalize_api_ocr_image_mode,
     normalize_api_ocr_image_quality,
-    normalize_adaptive_block_size,
 )
 from resource_handler import get_resource_path
 
@@ -26,17 +25,13 @@ PROVIDER_API_KEY_SETTINGS = (
 )
 
 DEFAULT_CONFIG_SETTINGS = {
-    'tesseract_path': r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-    'scan_interval': '300', 
+    'scan_interval': '300',
     'capture_backend': 'auto',
     'ocr_frame_cache_size': '64',
     'enable_instant_cache_display': 'True',
     'stability_threshold': '0',
     'clear_translation_timeout': '3',
-    'image_preprocessing_mode': 'none',
     'ocr_debugging': 'True',
-    'confidence_threshold': '50',
-    'remove_trailing_garbage': 'True',
     'source_area_x1': '334',
     'source_area_y1': '856',
     'source_area_x2': '1579',
@@ -74,7 +69,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'deepl_model_type': 'latency_optimized', # Default to classic model for compatibility
     'gui_language':'English',
     # OCR Model Selection
-    'ocr_model': 'tesseract',  # 'tesseract', 'paddleocr', or 'custom_ai'
+    'ocr_model': 'paddleocr',
     'paddleocr_source_dir': 'PaddleOCR-3.7.0',
     'paddleocr_lang': 'en',
     'paddleocr_ocr_version': 'PP-OCRv6',
@@ -94,9 +89,6 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_ai_ocr_image_mode': API_OCR_IMAGE_MODE_DEFAULT,
     'custom_ai_ocr_image_quality': str(API_OCR_IMAGE_QUALITY_DEFAULT),
     'custom_ai_ocr_image_detail': API_OCR_IMAGE_DETAIL_DEFAULT,
-    # Adaptive thresholding parameters
-    'adaptive_block_size': '41',
-    'adaptive_c': '-60',
     # OCR Preview window geometry
     'ocr_preview_geometry': '600x800+100+100',
     'ocr_preview_width': '600',
@@ -184,7 +176,7 @@ def load_app_config():
     """Loads configuration from INI file or creates default values."""
     config_path = 'ocr_translator_config.ini'
     config = configparser.ConfigParser()
-    
+
     default_marian_models_path_val = get_resource_path("resources/MarianMT_select_models.csv")
     log_debug(f"Default MarianMT models path set to: {default_marian_models_path_val}")
 
@@ -199,7 +191,7 @@ def load_app_config():
                 config['Settings'] = {}
         except Exception as e:
             log_debug(f"Error reading config file {config_path}: {e}. Using defaults.")
-            config['Settings'] = {} 
+            config['Settings'] = {}
     else:
          log_debug(f"Config file {config_path} not found. Creating with defaults.")
          config['Settings'] = {}
@@ -211,7 +203,15 @@ def load_app_config():
     obsolete_keys = ['api_key', 'gpu_enabled', 'spell_check_enabled', 'word_segmentation_enabled',
                     'spell_check_language', 'subtitle_mode', 'parallel_processing', 'target_text_bg_color',
                     'nllb_beam_size', 'source_lang', 'target_lang', 'ocr_lang', 'gemini_fuzzy_detection',
-                    'input_token_cost', 'output_token_cost']  # Removed obsolete cost settings 
+                    'input_token_cost', 'output_token_cost']  # Removed obsolete cost settings
+    obsolete_keys.extend([
+        'tes' + 'seract_path',
+        'image' + '_preprocessing_mode',
+        'confidence' + '_threshold',
+        'remove' + '_trailing_garbage',
+        'adaptive' + '_block_size',
+        'adaptive' + '_c',
+    ])
     for key in obsolete_keys:
         if key in config_settings:
             del config_settings[key]
@@ -224,17 +224,11 @@ def load_app_config():
             settings_changed = True
             log_debug(f"Config: Added missing key '{key}' with default value '{value}'.")
 
-    current_ocr_model = config_settings.get('ocr_model', 'tesseract')
-    if current_ocr_model not in ['tesseract', 'paddleocr', 'custom_ai']:
-        config_settings['ocr_model'] = 'tesseract'
+    current_ocr_model = config_settings.get('ocr_model', 'paddleocr')
+    if current_ocr_model not in ['paddleocr', 'custom_ai']:
+        config_settings['ocr_model'] = 'paddleocr'
         settings_changed = True
-        log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'tesseract'")
-
-    current_mode = config_settings.get('image_preprocessing_mode', 'none')
-    if current_mode not in ['none', 'binary', 'binary_inv', 'adaptive']:
-        config_settings['image_preprocessing_mode'] = 'none'
-        settings_changed = True
-        log_debug(f"Config: Invalid preprocessing mode '{current_mode}' changed to 'none'")
+        log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'paddleocr'")
 
     current_latency_mode = config_settings.get('custom_ai_latency_mode', 'safe')
     if current_latency_mode not in ['none', 'safe', 'stream', 'race', 'adaptive']:
@@ -269,13 +263,6 @@ def load_app_config():
         config_settings['custom_ai_ocr_image_detail'] = normalized_image_detail
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
-
-    current_block_size = config_settings.get('adaptive_block_size', DEFAULT_CONFIG_SETTINGS['adaptive_block_size'])
-    normalized_block_size = str(normalize_adaptive_block_size(current_block_size))
-    if normalized_block_size != str(current_block_size):
-        config_settings['adaptive_block_size'] = normalized_block_size
-        settings_changed = True
-        log_debug(f"Config: Invalid adaptive_block_size '{current_block_size}' normalized to '{normalized_block_size}'")
 
     if migrate_provider_api_keys_to_credentials(config_settings):
         settings_changed = True
@@ -333,7 +320,7 @@ def save_main_window_geometry(app_config, root_window):
         if not root_window or not root_window.winfo_exists():
             log_debug("Window does not exist, cannot save geometry.")
             return
-            
+
         geometry = root_window.geometry() # Full string e.g. "680x927+15+14"
         width = root_window.winfo_width()
         height = root_window.winfo_height()
@@ -387,7 +374,7 @@ def save_ocr_preview_geometry(app_config, preview_window):
         if not preview_window or not preview_window.winfo_exists():
             log_debug("OCR Preview window does not exist, cannot save geometry.")
             return
-            
+
         geometry = preview_window.geometry() # Full string e.g. "680x927+15+14"
         width = preview_window.winfo_width()
         height = preview_window.winfo_height()

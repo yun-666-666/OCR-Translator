@@ -23,13 +23,6 @@ def import_ocr_utils_for_tests():
         module = types.ModuleType("cv2")
         module.__spec__ = importlib.machinery.ModuleSpec("cv2", loader=None)
         sys.modules["cv2"] = module
-    if "tesserocr" not in sys.modules:
-        module = types.ModuleType("tesserocr")
-        module.__spec__ = importlib.machinery.ModuleSpec("tesserocr", loader=None)
-        module.PyTessBaseAPI = object
-        module.RIL = types.SimpleNamespace(WORD=0)
-        module.get_languages = lambda path=None: (path, ["eng"])
-        sys.modules["tesserocr"] = module
     return importlib.import_module("ocr_utils")
 
 
@@ -327,8 +320,8 @@ class LatencyOcrCacheTests(unittest.TestCase):
         cache = OCRFrameCache(max_size=2)
         key = build_ocr_frame_cache_key(
             image_hash="abc",
-            ocr_model="tesseract",
-            source_lang="eng",
+            ocr_model="paddleocr",
+            source_lang="en",
             preprocessing_mode="none",
             region_size=(300, 80),
         )
@@ -342,8 +335,8 @@ class LatencyOcrCacheTests(unittest.TestCase):
         cache = ocr_utils.OCRFrameCache(max_size=2)
         key = ocr_utils.build_ocr_frame_cache_key(
             image_hash="empty",
-            ocr_model="tesseract",
-            source_lang="eng",
+            ocr_model="paddleocr",
+            source_lang="en",
             preprocessing_mode="none",
             region_size=(300, 80),
         )
@@ -358,8 +351,8 @@ class LatencyOcrCacheTests(unittest.TestCase):
         keys = [
             ocr_utils.build_ocr_frame_cache_key(
                 image_hash=f"frame-{index}",
-                ocr_model="tesseract",
-                source_lang="eng",
+                ocr_model="paddleocr",
+                source_lang="en",
                 preprocessing_mode="none",
                 region_size=(300, 80),
             )
@@ -387,8 +380,8 @@ class LatencyOcrCacheTests(unittest.TestCase):
         keys = [
             ocr_utils.build_ocr_frame_cache_key(
                 image_hash=f"frame-{index}",
-                ocr_model="tesseract",
-                source_lang="eng",
+                ocr_model="paddleocr",
+                source_lang="en",
                 preprocessing_mode="none",
                 region_size=(300, 80),
             )
@@ -456,16 +449,16 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
         first = ocr_utils.build_ocr_frame_cache_key(
             image_hash="same",
-            ocr_model="tesseract",
-            source_lang="eng",
+            ocr_model="paddleocr",
+            source_lang="en",
             preprocessing_mode="none",
             region_size=(300, 80),
             region_origin=(10, 20),
         )
         second = ocr_utils.build_ocr_frame_cache_key(
             image_hash="same",
-            ocr_model="tesseract",
-            source_lang="eng",
+            ocr_model="paddleocr",
+            source_lang="en",
             preprocessing_mode="none",
             region_size=(300, 80),
             region_origin=(500, 600),
@@ -482,381 +475,6 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, third)
-
-
-class LatencyTesserocrTests(unittest.TestCase):
-    def test_tesseract_language_lookup_is_cached_until_cleared(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        class FakeTesserocr:
-            calls = 0
-
-            @staticmethod
-            def get_languages(path=None):
-                FakeTesserocr.calls += 1
-                return path, ["eng", "chi_sim"]
-
-        with patch.object(ocr_utils, "_tesserocr", return_value=FakeTesserocr):
-            ocr_utils.clear_tesseract_languages_cache()
-            first = ocr_utils.get_tesseract_languages(r"C:\Program Files\Tesseract-OCR\tessdata")
-            second = ocr_utils.get_tesseract_languages(r"C:\Program Files\Tesseract-OCR\tessdata")
-
-            self.assertEqual(first[1], ("chi_sim", "eng"))
-            self.assertEqual(second[1], ("chi_sim", "eng"))
-            self.assertEqual(FakeTesserocr.calls, 1)
-
-            ocr_utils.clear_tesseract_languages_cache()
-            third = ocr_utils.get_tesseract_languages(r"C:\Program Files\Tesseract-OCR\tessdata")
-
-            self.assertEqual(third[1], ("chi_sim", "eng"))
-            self.assertEqual(FakeTesserocr.calls, 2)
-
-    def test_tesseract_cache_mode_key_changes_when_ocr_settings_change(self):
-        worker_threads = import_worker_threads_for_tests()
-
-        app = types.SimpleNamespace(
-            preprocessing_mode_var=types.SimpleNamespace(get=lambda: "none"),
-            adaptive_block_size_var=types.SimpleNamespace(get=lambda: 41),
-            adaptive_c_var=types.SimpleNamespace(get=lambda: -60),
-            confidence_threshold=60,
-            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
-            remove_trailing_garbage_var=types.SimpleNamespace(get=lambda: False),
-        )
-
-        cache_key_builder = getattr(worker_threads, "_get_tesseract_ocr_cache_mode_key", None)
-        self.assertIsNotNone(cache_key_builder)
-
-        base_key = cache_key_builder(app)
-
-        app.keep_linebreaks_var = types.SimpleNamespace(get=lambda: True)
-        keep_linebreaks_key = cache_key_builder(app)
-
-        app.keep_linebreaks_var = types.SimpleNamespace(get=lambda: False)
-        app.confidence_threshold = 75
-        confidence_key = cache_key_builder(app)
-
-        app.confidence_threshold = 60
-        app.adaptive_block_size_var = types.SimpleNamespace(get=lambda: 51)
-        block_key = cache_key_builder(app)
-
-        self.assertNotEqual(base_key, keep_linebreaks_key)
-        self.assertNotEqual(base_key, confidence_key)
-        self.assertNotEqual(base_key, block_key)
-
-    def test_ocr_region_uses_injected_reusable_tesserocr_engine(self):
-        ocr_utils = import_ocr_utils_for_tests()
-        img = np.zeros((320, 320), dtype=np.uint8)
-
-        class FakeEngine:
-            def __init__(self):
-                self.calls = []
-
-            def recognize(self, pil_image, lang_code, ocr_config, confidence_threshold):
-                self.calls.append((pil_image.size, lang_code, ocr_config, confidence_threshold))
-                return "Reusable OCR text"
-
-        engine = FakeEngine()
-        config = {"psm": 6, "oem": 3, "variables": {}}
-
-        result = ocr_utils.ocr_region_with_confidence(
-            img,
-            (0, 0, 320, 320),
-            "eng",
-            config,
-            55,
-            ocr_engine=engine,
-        )
-
-        self.assertEqual(result, "Reusable OCR text")
-        self.assertEqual(len(engine.calls), 1)
-        self.assertEqual(engine.calls[0][1:], ("eng", config, 55))
-
-    def test_tesserocr_engine_fails_fast_when_requested_language_is_missing(self):
-        ocr_utils = import_ocr_utils_for_tests()
-        img = Image.new("L", (320, 320), 255)
-        created_apis = []
-
-        class FakeApi:
-            def __init__(self, **kwargs):
-                created_apis.append(kwargs)
-
-        fake_tesserocr = types.SimpleNamespace(
-            PyTessBaseAPI=FakeApi,
-            RIL=types.SimpleNamespace(WORD=1),
-            get_languages=lambda path=None: (path, ["eng"]),
-        )
-
-        engine = ocr_utils.TesseractOcrEngine(
-            tessdata_dir=r"C:\Program Files\Tesseract-OCR\tessdata",
-            tesserocr_module=fake_tesserocr,
-        )
-        config = {"psm": 6, "oem": 3, "variables": {}}
-
-        with self.assertRaises(ocr_utils.TesseractOcrUnavailableError):
-            engine.recognize(img, "fra", config, 50)
-
-        self.assertEqual(created_apis, [])
-
-    def test_tesseract_path_can_resolve_neighbor_tessdata_directory(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path(
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        )
-
-        self.assertEqual(resolved, r"C:\Program Files\Tesseract-OCR\tessdata")
-
-    def test_tesseract_path_uses_tessdata_prefix_when_path_setting_is_missing(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            tessdata_dir = Path(temp_dir) / "tessdata"
-            tessdata_dir.mkdir()
-
-            with patch.dict(os.environ, {"TESSDATA_PREFIX": temp_dir}, clear=False):
-                resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(resolved, str(tessdata_dir))
-
-    def test_tesseract_path_can_resolve_default_windows_install_when_setting_is_missing(self):
-        ocr_utils = import_ocr_utils_for_tests()
-        default_tessdata = Path(r"C:\Program Files\Tesseract-OCR\tessdata")
-        if not default_tessdata.is_dir():
-            self.skipTest("Default Windows Tesseract tessdata directory is not installed")
-
-        resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path(None)
-
-        self.assertEqual(resolved, str(default_tessdata))
-
-    def test_tesseract_path_resolution_uses_windows_registry_install_dir(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            install_dir = Path(temp_dir) / "Tesseract-OCR"
-            tessdata_dir = install_dir / "tessdata"
-            tessdata_dir.mkdir(parents=True)
-
-            ocr_utils.clear_tessdata_dir_cache()
-            with patch.object(
-                ocr_utils,
-                "_get_windows_tesseract_install_dirs",
-                return_value=(str(install_dir),),
-                create=True,
-            ):
-                resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(resolved, str(tessdata_dir))
-
-    def test_tesseract_path_resolution_uses_pyinstaller_meipass_tessdata(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            tessdata_dir = Path(temp_dir) / "tessdata"
-            tessdata_dir.mkdir()
-
-            ocr_utils.clear_tessdata_dir_cache()
-            fake_sys = types.SimpleNamespace(frozen=True, _MEIPASS=temp_dir)
-            with patch.object(ocr_utils, "sys", fake_sys, create=True):
-                resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(resolved, str(tessdata_dir))
-
-    def test_tesseract_path_resolution_uses_tesseract_executable_from_path(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            install_dir = Path(temp_dir) / "CustomTesseract"
-            tessdata_dir = install_dir / "tessdata"
-            tessdata_dir.mkdir(parents=True)
-            tesseract_exe = install_dir / "tesseract.exe"
-            tesseract_exe.write_text("", encoding="utf-8")
-
-            ocr_utils.clear_tessdata_dir_cache()
-            fake_shutil = types.SimpleNamespace(which=lambda _name: str(tesseract_exe))
-            with patch.object(ocr_utils, "shutil", fake_shutil, create=True):
-                resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(resolved, str(tessdata_dir))
-
-    def test_tesseract_path_resolution_uses_tesserocr_package_adjacent_tessdata(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            package_dir = Path(temp_dir) / "site-packages" / "tesserocr"
-            tessdata_dir = package_dir / "tessdata"
-            tessdata_dir.mkdir(parents=True)
-
-            ocr_utils.clear_tessdata_dir_cache()
-            with patch.object(ocr_utils, "_get_tesserocr_package_root", return_value=str(package_dir)):
-                resolved = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(resolved, str(tessdata_dir))
-
-    def test_tesseract_path_resolution_is_cached_until_cleared(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            install_dir = Path(temp_dir) / "Tesseract-OCR"
-            tessdata_dir = install_dir / "tessdata"
-            tessdata_dir.mkdir(parents=True)
-            tesseract_exe = install_dir / "tesseract.exe"
-
-            ocr_utils.clear_tessdata_dir_cache()
-            with patch.object(ocr_utils.os.path, "isdir", wraps=ocr_utils.os.path.isdir) as isdir_mock:
-                first = ocr_utils.resolve_tessdata_dir_from_tesseract_path(str(tesseract_exe))
-                second = ocr_utils.resolve_tessdata_dir_from_tesseract_path(str(tesseract_exe))
-
-            self.assertEqual(first, str(tessdata_dir))
-            self.assertEqual(second, str(tessdata_dir))
-            self.assertEqual(isdir_mock.call_count, 2)
-
-            ocr_utils.clear_tessdata_dir_cache()
-            with patch.object(ocr_utils.os.path, "isdir", wraps=ocr_utils.os.path.isdir) as isdir_after_clear:
-                refreshed = ocr_utils.resolve_tessdata_dir_from_tesseract_path(str(tesseract_exe))
-
-            self.assertEqual(refreshed, str(tessdata_dir))
-            self.assertEqual(isdir_after_clear.call_count, 2)
-
-    def test_tesseract_path_resolution_cache_key_includes_tessdata_prefix(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
-            first_tessdata = Path(first_dir) / "tessdata"
-            second_tessdata = Path(second_dir) / "tessdata"
-            first_tessdata.mkdir()
-            second_tessdata.mkdir()
-
-            ocr_utils.clear_tessdata_dir_cache()
-            with patch.dict(os.environ, {"TESSDATA_PREFIX": first_dir}, clear=False):
-                first = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-            with patch.dict(os.environ, {"TESSDATA_PREFIX": second_dir}, clear=False):
-                second = ocr_utils.resolve_tessdata_dir_from_tesseract_path("")
-
-        self.assertEqual(first, str(first_tessdata))
-        self.assertEqual(second, str(second_tessdata))
-
-    def test_tesseract_startup_does_not_require_tesseract_executable_path(self):
-        source = Path("app_logic.py").read_text(encoding="utf-8-sig").lower()
-
-        self.assertNotIn("tesseract path invalid", source)
-        self.assertNotIn("os.path.isfile(tesseract_exe_path)", source)
-
-    def test_tesserocr_engine_reuses_api_and_filters_low_confidence_words(self):
-        ocr_utils = import_ocr_utils_for_tests()
-
-        class FakeWord:
-            def __init__(self, text, confidence):
-                self.text = text
-                self.confidence = confidence
-
-            def GetUTF8Text(self, level):
-                return self.text
-
-            def Confidence(self, level):
-                return self.confidence
-
-        class FakeApi:
-            instances = []
-
-            def __init__(self, **kwargs):
-                self.kwargs = kwargs
-                self.variables = {}
-                self.images = []
-                FakeApi.instances.append(self)
-
-            def SetVariable(self, name, value):
-                self.variables[name] = value
-
-            def SetImage(self, image):
-                self.images.append(image)
-
-            def Recognize(self):
-                return True
-
-            def GetIterator(self):
-                return object()
-
-        fake_tesserocr = types.SimpleNamespace(
-            PyTessBaseAPI=FakeApi,
-            RIL=types.SimpleNamespace(WORD=1),
-            get_languages=lambda path=None: (path, ["eng"]),
-            iterate_level=lambda iterator, level: [
-                FakeWord("keep", 92),
-                FakeWord("drop", 12),
-                FakeWord("also", 88),
-            ],
-        )
-
-        engine = ocr_utils.TesseractOcrEngine(
-            tessdata_dir=r"C:\Program Files\Tesseract-OCR\tessdata",
-            tesserocr_module=fake_tesserocr,
-        )
-        config = {
-            "psm": 6,
-            "oem": 3,
-            "variables": {"preserve_interword_spaces": "1"},
-        }
-        image = Image.new("L", (320, 320), 255)
-
-        first = engine.recognize(image, "eng", config, 50)
-        second = engine.recognize(image, "eng", config, 50)
-
-        self.assertEqual(first, "keep also")
-        self.assertEqual(second, "keep also")
-        self.assertEqual(len(FakeApi.instances), 1)
-        self.assertEqual(FakeApi.instances[0].kwargs["lang"], "eng")
-        self.assertEqual(FakeApi.instances[0].kwargs["path"], r"C:\Program Files\Tesseract-OCR\tessdata")
-        self.assertEqual(FakeApi.instances[0].variables, {"preserve_interword_spaces": "1"})
-
-
-class LatencyOcrRuntimeRefreshTests(unittest.TestCase):
-    def test_tesseract_runtime_settings_refresh_after_interval_in_fast_loop(self):
-        worker_threads = import_worker_threads_for_tests()
-
-        class EmptyQueue:
-            maxsize = 1
-
-            def qsize(self):
-                return 0
-
-            def get(self, timeout=None):
-                raise worker_threads.queue.Empty
-
-        lang_calls = []
-
-        def get_tesseract_lang_code():
-            lang_calls.append("called")
-            return "eng"
-
-        app = types.SimpleNamespace(
-            is_running=True,
-            get_ocr_model_setting=lambda: "tesseract",
-            get_tesseract_lang_code=get_tesseract_lang_code,
-            tesseract_path_var=types.SimpleNamespace(get=lambda: ""),
-            confidence_threshold=50,
-            confidence_var=types.SimpleNamespace(get=lambda: 50),
-            is_api_based_ocr_model=lambda model: False,
-            ocr_queue=EmptyQueue(),
-        )
-
-        sleep_calls = []
-
-        def fake_sleep(_duration):
-            sleep_calls.append(_duration)
-            if len(sleep_calls) >= 3:
-                app.is_running = False
-
-        with patch.object(worker_threads.time, "monotonic", side_effect=[0.0, 1.0, 2.0, 6.1]):
-            with patch.object(worker_threads.time, "sleep", side_effect=fake_sleep):
-                with patch.object(
-                    worker_threads,
-                    "resolve_tessdata_dir_from_tesseract_path",
-                    return_value=r"C:\Program Files\Tesseract-OCR\tessdata",
-                ) as resolve_tessdata:
-                    worker_threads.run_ocr_thread(app)
-
-        self.assertEqual(len(lang_calls), 2)
-        self.assertEqual(resolve_tessdata.call_count, 2)
 
 
 class LatencyShutdownTests(unittest.TestCase):
@@ -943,7 +561,6 @@ class LatencyShutdownTests(unittest.TestCase):
         app.translation_handler = Mock()
         app.ocr_queue = queue.Queue()
         app.translation_queue = queue.Queue()
-        app.clear_tesseract_runtime_cache = Mock()
         app.clear_ocr_stability_gate = Mock()
         app.translation_text = DeadWidget()
         app.source_overlay = DeadWidget()
@@ -961,9 +578,6 @@ class LatencyShutdownTests(unittest.TestCase):
 
         app.translation_handler.request_end_ocr_session.assert_called_once()
         app.translation_handler.request_end_translation_session.assert_called_once()
-        app.clear_tesseract_runtime_cache.assert_called_once_with(
-            "translation stopped"
-        )
         app.clear_ocr_stability_gate.assert_called_once_with(
             "translation stopped"
         )
@@ -3365,7 +2979,6 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         import app_logic
 
         app = object.__new__(app_logic.GameChangingTranslator)
-        app.clear_tesseract_runtime_cache = Mock()
         app.is_running = False
         app.is_api_based_ocr_model = lambda: False
         app.ocr_preview_window = None
@@ -3406,7 +3019,7 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
             for token in forbidden_tokens:
                 self.assertNotIn(token, source, msg=f"{relative_path}: {token}")
 
-    def test_local_tesseract_path_uses_tesserocr_not_pytesseract(self):
+    def test_removed_local_ocr_backend_tokens_are_absent(self):
         files_to_check = [
             "app_logic.py",
             "worker_threads.py",
@@ -3417,12 +3030,15 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
             "setup.py",
         ]
 
+        removed_backend = "tess" + "eract"
+        removed_wrapper = "tess" + "erocr"
+        old_python_wrapper = "py" + removed_backend
+
         for relative_path in files_to_check:
             source = Path(relative_path).read_text(encoding="utf-8-sig").lower()
-            self.assertNotIn("pytesseract", source, msg=relative_path)
-
-        self.assertIn("tesserocr", Path("requirements.txt").read_text(encoding="utf-8-sig").lower())
-        self.assertIn("tesserocr", Path("setup.py").read_text(encoding="utf-8-sig").lower())
+            self.assertNotIn(removed_backend, source, msg=relative_path)
+            self.assertNotIn(removed_wrapper, source, msg=relative_path)
+            self.assertNotIn(old_python_wrapper, source, msg=relative_path)
 
 
 class AdaptiveScanLoggingTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-﻿key,value
+key,value
 main_tab_title,Home
 select_source_btn,Select Source Area (OCR)
 select_target_btn,Select Target Area (Translation)
@@ -26,7 +26,7 @@ settings_tab_title,Settings
 translation_model_label,Translation Model:
 translation_model_marianmt_offline,MarianMT (offline and free)
 ocr_model_label,OCR Model:
-ocr_model_tesseract,Tesseract (offline)
+ocr_model_paddleocr,PaddleOCR (offline)
 ocr_model_gemini,Gemini API (online)
 capture_backend_label,Capture Backend:
 capture_backend_auto,Auto (fastest available)
@@ -90,19 +90,13 @@ custom_ai_ocr_image_detail_low,Low
 custom_ai_ocr_image_detail_high,High
 models_file_label,MarianMT Model List:
 beam_size_label,Translation Beam Size (MarianMT):
-tesseract_path_label,Tesseract Path:
 scan_interval_label,Scan Interval (ms):
 clear_timeout_label,Clear Translation Timeout (s):
 stability_threshold_label,Text Stability Threshold:
-confidence_threshold_label,OCR Confidence Threshold:
-preprocessing_mode_label,Image Preprocessing Mode:
+paddleocr_min_score_label,PaddleOCR minimum score:
 ocr_debugging_label,OCR Debugging:
 show_debug_checkbox,Show debug images/text
 preview_btn,Preview
-adaptive_block_size_label,"Block Size (3-101, odd)":
-adaptive_c_label,"C Value (-75 to 75)":
-remove_trailing_label,Remove Trailing Garbage:
-remove_trailing_checkbox,Remove text after last punctuation
 source_color_label,Source Area Colour:
 target_color_label,Target Area Colour:
 target_text_color_label,Target Text Colour:
@@ -127,15 +121,11 @@ choose_color_btn,Choose Colour
 debug_tab_title,Debugging
 original_image_label,Original Image
 processed_image_label,Processed Image
-ocr_results_label,Tesseract OCR Results
-ocr_results_placeholder,OCR results will appear here when translation is running and Tesseract is selected as the OCR model.
+ocr_results_label,OCR Results
+ocr_results_placeholder,OCR results will appear here when translation is running and local OCR debugging is enabled.
 app_log_label,Application Log
 save_debug_images_btn,Save OCR Images
 refresh_log_btn,Refresh Log
-preprocessing_none,None
-preprocessing_binary,Binary
-preprocessing_binary_inv,Binary Inverted
-preprocessing_adaptive,Adaptive
 settings_saved,Status: Settings Saved
 no_image_captured,No image captured yet
 no_image_processed,No image processed yet
@@ -146,7 +136,6 @@ marian_download_note,"Models are downloaded on first use (requires Internet)."
 marian_unavailable_line1,"MarianMT is not available. To enable, install:"
 marian_unavailable_line2,pip install transformers torch sentencepiece
 browse_marian_models_title,Select MarianMT Models CSV File
-browse_tesseract_title,Select tesseract.exe
 choose_source_color_title,Choose Source Colour
 choose_target_color_title,Choose Target Colour
 choose_target_text_color_title,Choose Target Text Colour
@@ -181,7 +170,7 @@ gemini_reset_error_title,Error
 gemini_reset_error_msg,Could not access Gemini log file.
 gemini_reset_error_failed,Failed to reset Gemini API log:
 currency_usd, USD
-mb_progress_of, MB of 
+mb_progress_of, MB of
 mb_progress_format, MB ({0}%)
 file_type_csv,CSV files
 file_type_text,Text files
@@ -219,4 +208,5 @@ model_list_success,Fetched {0} models.
 model_list_failed_title,Model List Failed
 start_error_title,Start Error
 start_error_no_translation_profile,Add and select an AI model profile before starting.
-start_error_no_ocr_profile,Add and select an AI model profile for OCR before starting, or choose Tesseract OCR.
+start_error_no_ocr_profile,"Add and select an AI model profile for OCR before starting, or choose PaddleOCR."
+ocr_preview_local_only,OCR preview is available for PaddleOCR.

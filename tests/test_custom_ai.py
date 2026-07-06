@@ -5222,7 +5222,7 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
         self.assertEqual(second.mode, "stream")
         self.assertEqual(second.reason, "race_cooldown")
 
-    def test_adaptive_cooldown_without_healthy_alternative_resolves_to_safe(self):
+    def test_provider_cooldown_without_healthy_alternative_resolves_to_safe(self):
         advisor = self._make_advisor()
         for duration in (2.5, 3.0, 3.5):
             advisor.observe_request(duration, success=True)
@@ -6485,7 +6485,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertTrue(context[0][1].startswith("newest-result-"))
         handler.close()
 
-    def test_custom_ai_request_context_obeys_adaptive_character_budget(self):
+    def test_custom_ai_request_context_obeys_dynamic_character_budget(self):
         class App:
             custom_context_window_var = DummyVar(5)
 

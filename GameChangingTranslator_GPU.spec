@@ -53,7 +53,7 @@ a = Analysis(
         # Auto-update system modules
         'update_checker',  # GitHub API integration and download logic
         'update_applier',  # Startup update detection and application
-        
+
         # Handlers
         'handlers',
         'handlers.cache_manager',
@@ -64,7 +64,7 @@ a = Analysis(
         'handlers.statistics_handler',
         'handlers.translation_handler',
         'handlers.ui_interaction_handler',
-        
+
         # GUI
         'tkinter',
         'tkinter.ttk',
@@ -82,18 +82,17 @@ a = Analysis(
         # RTL text processing dependencies
         'python-bidi',
         'arabic-reshaper',
-        
+
         # Image processing
         'PIL',
         'PIL.Image',
         'PIL.ImageTk',
-        
+
         # Core dependencies
         'numpy',
         'cv2',
-        'tesserocr',
         'pyautogui',
-        
+
         # Optional
         'keyboard',
         'urllib.parse',
@@ -111,7 +110,7 @@ a = Analysis(
         'google.generativeai.client',
         'google.ai.generativelanguage',
         'deepl',
-        
+
         # NEW: Additional dependencies for google.genai
         'pydantic',
         'pydantic.types',
@@ -125,10 +124,10 @@ a = Analysis(
         'httpcore',
         'websockets',
         'tenacity',
-        
+
         # GPU monitoring (Windows)
         'nvidia_ml_py3',
-        
+
         # PyTorch (CPU + CUDA)
         'torch',
         'torch.nn',
@@ -144,7 +143,7 @@ a = Analysis(
         'torch.utils',
         'torch.utils.data',
         'torch._C',
-        
+
         # Transformers
         'transformers',
         'transformers.models',
@@ -163,7 +162,7 @@ a = Analysis(
         'transformers.file_utils',
         'transformers.generation',
         'transformers.generation.utils',
-        
+
         # Tokenization
         'tokenizers',
         'tokenizers.implementations',
@@ -171,14 +170,14 @@ a = Analysis(
         'tokenizers.pre_tokenizers',
         'tokenizers.processors',
         'sentencepiece',
-        
+
         # Hugging Face Hub
         'huggingface_hub',
         'huggingface_hub.file_download',
         'huggingface_hub.hf_api',
         'huggingface_hub.repository',
         'huggingface_hub.snapshot_download',
-        
+
         # Networking and utilities
         'requests',
         'requests.adapters',
@@ -188,7 +187,7 @@ a = Analysis(
         'urllib3',
         'tqdm',
         'tqdm.auto',
-        
+
         # File and data handling
         'pathlib',
         'tempfile',
@@ -197,12 +196,12 @@ a = Analysis(
         'yaml',
         'safetensors',
         'safetensors.torch',
-        
+
         # Text processing
         'regex',
         're',
         'unicodedata',
-        
+
         # System
         'threading',
         'concurrent.futures',

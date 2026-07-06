@@ -1,18 +1,15 @@
 # handlers/configuration_handler.py
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 import re # Not used directly here, but ui_interaction_handler uses it
 from logger import log_debug
 from config_manager import load_main_window_geometry, save_main_window_geometry # Correct imports
 from resource_handler import get_resource_path
-from ocr_utils import resolve_tessdata_dir_from_tesseract_path
-# LanguageManager is used by app_logic which calls this handler, no direct import needed here for get_tesseract_lang_code
 
 class ConfigurationHandler:
     def __init__(self, app):
         self.app = app
-        
+
     def load_window_geometry(self):
         load_main_window_geometry(self.app.config, self.app.root, self.app.root.minsize())
 
@@ -25,13 +22,11 @@ class ConfigurationHandler:
     def save_current_window_geometry(self):
         save_main_window_geometry(self.app.config, self.app.root)
 
-    # get_tesseract_lang_code is now a method in app_logic.py for direct access by worker_threads
-
     def load_marian_models(self, localize_names=True):
         models_dict = {}
         models_list = []
-        models_file = self.app.models_file_var.get() 
-        
+        models_file = self.app.models_file_var.get()
+
         if not models_file or not os.path.exists(models_file):
             models_file = get_resource_path("resources/MarianMT_select_models.csv")
             self.app.models_file_var.set(models_file)
@@ -87,7 +82,7 @@ class ConfigurationHandler:
         current_path = self.app.models_file_var.get()
         initial_dir = os.path.dirname(os.path.abspath(__file__)) # Script dir
         initial_dir = os.path.dirname(initial_dir) # Parent of handlers (main app dir)
-        
+
         if current_path and os.path.exists(os.path.dirname(current_path)):
             initial_dir = os.path.dirname(current_path)
 
@@ -111,21 +106,6 @@ class ConfigurationHandler:
                         self.app.marian_model_display_var.set(self.app.marian_models_list[0])
                 else: # List is empty
                     self.app.marian_model_display_var.set("")
-                self.app.on_marian_model_selection_changed() 
+                self.app.on_marian_model_selection_changed()
             else:
                 log_debug("MarianMT combobox not found during models file browse.")
-
-    def browse_tesseract(self):
-        current_path = self.app.tesseract_path_var.get()
-        initial_dir = os.path.dirname(current_path) if current_path and os.path.exists(os.path.dirname(current_path)) else "C:/"
-        path = filedialog.askopenfilename(initialdir=initial_dir, title=self.app.ui_lang.get_label("browse_tesseract_title", "Select tesseract.exe"), 
-                                          filetypes=[("Executable", "*.exe"), ("All Files", "*.*")])
-        if path:
-            path_norm = os.path.normpath(path)
-            if os.path.basename(path_norm).lower() == 'tesseract.exe':
-                self.app.tesseract_path_var.set(path_norm)
-            else:
-                messagebox.showwarning("Warning", f"Selected file '{os.path.basename(path_norm)}' does not appear to be 'tesseract.exe'. Please verify.", parent=self.app.root)
-                self.app.tesseract_path_var.set(path_norm)
-            log_debug(f"Tesseract path set to: {self.app.tesseract_path_var.get()}")
-            log_debug(f"Tesseract tessdata directory resolved to: {resolve_tessdata_dir_from_tesseract_path(self.app.tesseract_path_var.get())}")

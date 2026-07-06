@@ -39,9 +39,8 @@ def is_translation_error_result(value):
     return normalized.startswith(TRANSLATION_ERROR_PREFIXES)
 
 
-# Note: This function is retained for backward compatibility but should be replaced 
-# with the LanguageManager class for new code. Translation handlers should use
-# language_manager.get_tesseract_code() instead.
+# Note: This function is retained for backward compatibility with older
+# translation-language inputs. New code should use LanguageManager directly.
 def get_lang_code_for_translation_api(lang_code):
     """Converts various language codes to standard ISO 639-1 for translation APIs."""
     code_map = {
@@ -60,11 +59,11 @@ def get_lang_code_for_translation_api(lang_code):
 
 def post_process_translation_text(text):
     if not text: return text
-    
+
     # Fix spacing before punctuation marks
     text = re.sub(r'\s+\?', '?', text)
     text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
-    
+
     # PRESERVE dialog line breaks while cleaning up excessive spaces
     # Split by newlines, clean spaces within each line, then rejoin
     lines = text.split('\n')
@@ -73,8 +72,8 @@ def post_process_translation_text(text):
         # Clean up multiple spaces within each line, but preserve the line structure
         cleaned_line = re.sub(r'[ \t]{2,}', ' ', line)  # Only target spaces and tabs, not newlines
         cleaned_lines.append(cleaned_line)
-    
+
     # Rejoin with preserved newlines
     text = '\n'.join(cleaned_lines)
-    
+
     return text

@@ -323,7 +323,7 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
     def test_paddleocr_defaults_exist(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], "tesseract")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], "paddleocr")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_source_dir"], "PaddleOCR-3.7.0")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_ocr_version"], "PP-OCRv6")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_model_size"], "tiny")
@@ -343,7 +343,6 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
         self.assertEqual(
             gui_builder.build_ocr_model_display_options(app),
             [
-                "Tesseract (offline)",
                 "PaddleOCR PP-OCRv6 (offline)",
                 "Vision API",
             ],
@@ -546,12 +545,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             is_running=True,
             ocr_queue=queue.Queue(),
             get_ocr_model_setting=lambda: "paddleocr",
-            confidence_threshold=35,
-            confidence_var=self._var(35),
             is_api_based_ocr_model=lambda _model: False,
-            preprocessing_mode_var=self._var("binary"),
-            adaptive_block_size_var=self._var("41"),
-            adaptive_c_var=self._var("-60"),
             ocr_debugging_var=self._var(False),
             previous_text="",
             text_stability_counter=0,
@@ -581,7 +575,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
 
         self.assertEqual(submitted, ["Clear subtitle text."])
 
-    def test_process_local_ocr_frame_routes_paddleocr_without_tesseract(self):
+    def test_process_local_ocr_frame_routes_paddleocr(self):
         import worker_threads
 
         image = Image.new("RGB", (16, 10), "white")
@@ -604,22 +598,11 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             "recognize_subtitle_with_paddleocr",
             return_value=("Hello world", []),
         ) as recognize:
-            with patch.object(
-                worker_threads,
-                "ocr_region_with_confidence",
-                side_effect=AssertionError("Tesseract should not run"),
-            ):
-                text, processed_cv_img, engine_label = worker_threads.process_local_ocr_frame(
-                    app,
-                    image,
-                    "paddleocr",
-                    tess_langs=None,
-                    tessdata_dir=None,
-                    current_conf_thresh=50,
-                    prep_mode="binary",
-                    block_size=41,
-                    c_value=-60,
-                )
+            text, processed_cv_img, engine_label = worker_threads.process_local_ocr_frame(
+                app,
+                image,
+                "paddleocr",
+            )
 
         self.assertEqual(text, "Hello world")
         self.assertEqual(engine_label, "PaddleOCR")
@@ -653,12 +636,6 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
                 app,
                 image,
                 "paddleocr",
-                tess_langs=None,
-                tessdata_dir=None,
-                current_conf_thresh=50,
-                prep_mode="binary",
-                block_size=41,
-                c_value=-60,
             )
 
         self.assertEqual(text, "Fast subtitle")

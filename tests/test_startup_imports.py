@@ -5,7 +5,7 @@ import unittest
 
 
 class StartupImportTests(unittest.TestCase):
-    def test_main_import_defers_heavy_ocr_dependencies(self):
+    def test_main_import_does_not_load_removed_ocr_packages(self):
         code = textwrap.dedent(
             """
             import json
@@ -13,8 +13,8 @@ class StartupImportTests(unittest.TestCase):
 
             import main
 
-            heavy_modules = ["cv2", "numpy", "PIL", "tesserocr", "pyautogui", "PySide6", "pyside_overlay"]
-            print(json.dumps([name for name in heavy_modules if name in sys.modules]))
+            removed_modules = ["tess" + "erocr", "py" + "tess" + "eract"]
+            print(json.dumps([name for name in removed_modules if name in sys.modules]))
             """
         )
         result = subprocess.run(

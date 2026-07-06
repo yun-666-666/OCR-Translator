@@ -22,26 +22,25 @@ This guide addresses common issues you might encounter when using Game-Changing 
 
 ## OCR Issues
 
-### Tesseract not found
+### PaddleOCR unavailable
 
-**Symptoms:** Error message "Tesseract executable not found" or "RuntimeError: Tesseract not found".
+**Symptoms:** Local OCR returns an error or the preview cannot run PaddleOCR.
 
 **Solutions:**
-- Verify Tesseract is installed correctly
-- In the Settings tab, check the Tesseract path is correct (typically `C:\Program Files\Tesseract-OCR\tesseract.exe`)
-- If installed elsewhere, update the path to point to your tesseract.exe file
-- Make sure the directory containing tesseract.exe is in your system PATH
+- Verify the Python dependencies are installed with `pip install -r requirements.txt`
+- In the Settings tab, check the PaddleOCR source directory, language, model size, and device settings
+- If you use a local PaddleOCR source checkout, make sure the configured folder exists
+- Switch the OCR model to a Custom AI OCR profile if local PaddleOCR is unavailable on the machine
 
 ### Poor OCR accuracy
 
 **Symptoms:** Text is not recognized correctly or contains many errors.
 
 **Solutions:**
-- Try different preprocessing modes in the Settings tab
+- Adjust the PaddleOCR minimum score, model size, upscale, and detection settings in the Settings tab
 - Increase the size of the captured area to include more context
 - Set the correct source language in the Settings tab
-- Adjust the OCR confidence threshold
-- For non-Latin languages, ensure you've installed the appropriate language data during Tesseract installation
+- For non-Latin languages, set the correct PaddleOCR language in Settings
 - Use a clearer font or increase text size in the source application if possible
 - Adjust the stability threshold if text is flickering
 
@@ -54,7 +53,7 @@ This guide addresses common issues you might encounter when using Game-Changing 
 **Solutions:**
 - Make sure you've selected the correct source language for OCR
 - Verify the language pair is supported by your selected Custom AI profile or OpenAI-compatible endpoint
-- For non-Latin languages, ensure you've installed the appropriate Tesseract language data
+- For non-Latin languages, verify the selected PaddleOCR language or use a Custom AI OCR profile
 - Check that the CSV language files are properly installed in the application directory
 - If you have explicitly re-enabled a legacy MarianMT path, ensure the model exists for your language pair
 

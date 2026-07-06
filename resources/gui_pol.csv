@@ -1,4 +1,4 @@
-﻿key,value
+key,value
 main_tab_title,Start
 select_source_btn,Wybierz obszar źródłowy (OCR)
 select_target_btn,Wybierz obszar tłumaczenia
@@ -28,7 +28,7 @@ settings_tab_title,Ustawienia
 translation_model_label,Model tłumaczenia:
 translation_model_marianmt_offline,MarianMT (lokalny i bezpłatny)
 ocr_model_label,Model OCR:
-ocr_model_tesseract,Tesseract (lokalny)
+ocr_model_paddleocr,PaddleOCR (lokalny)
 ocr_model_gemini,Gemini API (online)
 capture_backend_label,Metoda przechwytywania:
 capture_backend_auto,Auto (najszybsza dostępna)
@@ -92,19 +92,13 @@ custom_ai_ocr_image_detail_low,Niska
 custom_ai_ocr_image_detail_high,Wysoka
 models_file_label,Lista modeli MarianMT:
 beam_size_label,Rozmiar wiązki tłumaczenia (MarianMT):
-tesseract_path_label,Ścieżka do Tesseract:
 scan_interval_label,Interwał skanowania (ms):
 clear_timeout_label,Czas wyświetlania tłumaczenia (s):
 stability_threshold_label,Próg stabilności tekstu:
-confidence_threshold_label,Próg pewności OCR:
-preprocessing_mode_label,Tryb przetwarzania obrazu:
+paddleocr_min_score_label,Minimalny wynik PaddleOCR:
 ocr_debugging_label,Debugowanie OCR:
 show_debug_checkbox,Pokaż wyniki OCR
 preview_btn,Podgląd
-adaptive_block_size_label,"Rozmiar bloku (3-101, nieparzysty)":
-adaptive_c_label,"Wartość C (-75 do 75)":
-remove_trailing_label,Usuń śmieci na końcu:
-remove_trailing_checkbox,Tłumacz do ostatniego znaku interpunkcyjnego
 source_color_label,Kolor obszaru źródłowego:
 target_color_label,Kolor obszaru tłumaczenia:
 target_text_color_label,Kolor tekstu tłumaczenia:
@@ -127,15 +121,11 @@ choose_color_btn,Wybierz kolor
 debug_tab_title,Debugowanie
 original_image_label,Obraz oryginalny
 processed_image_label,Obraz przetworzony
-ocr_results_label,Wyniki OCR programu Tesseract
-ocr_results_placeholder,Wyniki OCR pojawią się tutaj po włączeniu tłumaczenia i wybraniu Tesseract jako modelu OCR.
+ocr_results_label,Wyniki OCR
+ocr_results_placeholder,"Wyniki OCR pojawią się tutaj, gdy tłumaczenie działa i włączone jest lokalne debugowanie OCR."
 app_log_label,Dziennik aplikacji
 save_debug_images_btn,Zapisz obrazy OCR
 refresh_log_btn,Odśwież dziennik
-preprocessing_none,Brak
-preprocessing_binary,Binarny
-preprocessing_binary_inv,Binarny odwrócony
-preprocessing_adaptive,Adaptacyjny
 settings_saved,Status: Ustawienia zapisane
 no_image_captured,Nie przechwycono jeszcze obrazu
 no_image_processed,Nie przetworzono jeszcze obrazu
@@ -146,7 +136,6 @@ marian_download_note,"Modele są pobierane przy pierwszym użyciu (wymaga Intern
 marian_unavailable_line1,"MarianMT nie jest dostępny. Aby włączyć, zainstaluj:"
 marian_unavailable_line2,"pip install transformers torch sentencepiece"
 browse_marian_models_title,Wybierz plik CSV modeli MarianMT
-browse_tesseract_title,Wybierz plik tesseract.exe
 choose_source_color_title,Wybierz kolor obszaru źródłowego
 choose_target_color_title,Wybierz kolor obszaru tłumaczenia
 choose_target_text_color_title,Wybierz kolor tekstu tłumaczenia
@@ -181,7 +170,7 @@ gemini_reset_error_title,Błąd
 gemini_reset_error_msg,Nie można uzyskać dostępu do pliku dziennika Gemini.
 gemini_reset_error_failed,Nie udało się zresetować dziennika API Gemini:
 currency_usd, USD
-mb_progress_of, MB z 
+mb_progress_of, MB z
 mb_progress_format, MB ({0}%)
 file_type_csv,Pliki CSV
 file_type_text,Pliki tekstowe
@@ -219,4 +208,5 @@ model_list_success,Pobrano {0} modeli.
 model_list_failed_title,Nie udało się pobrać listy modeli
 start_error_title,Błąd uruchamiania
 start_error_no_translation_profile,Dodaj i wybierz profil modelu AI przed uruchomieniem.
-start_error_no_ocr_profile,Dodaj i wybierz profil modelu AI dla OCR przed uruchomieniem albo wybierz Tesseract OCR.
+start_error_no_ocr_profile,Przed uruchomieniem dodaj i wybierz profil modelu AI dla OCR albo wybierz PaddleOCR.
+ocr_preview_local_only,Podgląd OCR jest dostępny dla PaddleOCR.

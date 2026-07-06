@@ -14,13 +14,13 @@ def main_entry_point():
     root = tk.Tk()
     app_instance = None
     try:
-        # Tesseract is imported lazily when OCR starts to keep app startup light.
-        
+        # Heavy OCR/provider modules are imported lazily to keep app startup light.
+
         app_instance = GameChangingTranslator(root)
         root.mainloop()
     except Exception as e:
          log_msg = f"FATAL ERROR in main_entry_point: {type(e).__name__} - {e}"
-         print(log_msg) 
+         print(log_msg)
          log_debug(log_msg) # Ensure logger is working or this might fail
          tb_str = traceback.format_exc()
          log_debug("Traceback:\n" + tb_str)

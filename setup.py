@@ -20,7 +20,6 @@ setup(
     install_requires=[
         "numpy>=1.19.0",
         "opencv-python>=4.5.0",
-        "tesserocr>=2.10.0",
         "Pillow>=8.0.0",
         "pyautogui>=0.9.53",
         "requests>=2.25.0",

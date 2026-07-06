@@ -4,7 +4,7 @@ This guide provides information for developers who want to understand or modify 
 
 > **IMPORTANT NOTE**: This project is considered complete. I won't be accepting pull requests, feature enhancements, or implementing new features that someone else has coded. You are welcome to fork the repository and develop it further as your own project. The code is shared under the GPL licence for others to use, update, and modify as they wish, but I consider my work on it complete and won't be actively engaged in future development.
 
-> **Current runtime note**: This fork currently routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local Tesseract or Custom AI OCR. Legacy provider modules and CSV files for Gemini, OpenAI, DeepL, Google Translate, and MarianMT remain in the tree, but they should not be treated as the active UI/runtime translation path unless that code is explicitly re-enabled.
+> **Current runtime note**: This fork currently routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local PaddleOCR or Custom AI OCR. Legacy provider modules and CSV files for Gemini, OpenAI, DeepL, Google Translate, and MarianMT remain in the tree, but they should not be treated as the active UI/runtime translation path unless that code is explicitly re-enabled.
 
 ## Architecture Overview
 
@@ -55,7 +55,7 @@ Game-Changing Translator follows a modular design with the following key compone
    - `marian_mt_translator.py` - Neural machine translation implementation
    - `convert_marian.py` - HuggingFace conversion script for Tatoeba models (© 2020 The HuggingFace Team, Apache License 2.0)
    - `unified_translation_cache.py` - Unified LRU cache system for all translation providers
-   - `ocr_utils.py` - OCR utility functions with adaptive preprocessing
+   - `ocr_utils.py` - Screen capture, API image encoding, OCR cache, and shared utility functions
    - `translation_utils.py` - Translation utility functions
    - `rtl_text_processor.py` - Right-to-Left text processing for tkinter widgets (fallback RTL support)
    - `pyside_overlay.py` - PySide6-based RTL translation overlays with native Qt RTL support
@@ -437,7 +437,7 @@ def _get_active_llm_provider(self):
 #### Benefits of the New Architecture
 
 ✅ **Separation of Concerns**: Each provider focuses only on its specific implementation
-✅ **Code Reuse**: Common functionality is shared via inheritance 
+✅ **Code Reuse**: Common functionality is shared via inheritance
 ✅ **Maintainability**: Much easier to add new LLM providers or modify existing ones
 ✅ **Consistent Behavior**: All providers share identical session management, logging, and context handling
 ✅ **Backward Compatibility**: Public interface remains unchanged
@@ -462,7 +462,7 @@ The StatisticsHandler provides real-time monitoring and analysis of API usage:
 - **Real-time monitoring** of Gemini OCR and Translation API usage
 - **OpenAI OCR and Translation monitoring** (added with new OCR providers)
 - **Cost calculation** with proper currency formatting for different locales
-- **Export functionality** for statistics in CSV and TXT formats  
+- **Export functionality** for statistics in CSV and TXT formats
 - **Clipboard integration** for easy data sharing
 - **Multi-language support** with proper Polish number formatting
 
@@ -582,7 +582,7 @@ Gemini(LANG_PAIR,timestamp):original_text:==:translated_text
 
 **Format Components:**
 - **Provider**: "Gemini" identifier
-- **Language Pair**: Source-target codes (e.g., "CS-PL", "FR-EN")  
+- **Language Pair**: Source-target codes (e.g., "CS-PL", "FR-EN")
 - **Timestamp**: Cache entry creation time
 - **Delimiter**: ":==:" separates original from translated text
 
@@ -603,7 +603,7 @@ The UpdateChecker class provides GitHub API integration for checking and downloa
 **Core Features:**
 - **GitHub API Integration** - Queries the latest release information from GitHub API
 - **Version Comparison** - Uses semantic version comparison to detect newer versions
-- **Asset Download** - Downloads the main executable installer from GitHub releases  
+- **Asset Download** - Downloads the main executable installer from GitHub releases
 - **Progress Monitoring** - Provides download progress callbacks for UI updates
 - **Staging System** - Downloads updates to a staging directory for safe application
 
@@ -673,7 +673,7 @@ Gemini 2.5 Flash-Lite,gemini-2.5-flash-lite,0.1,0.4,yes,yes,MEDIUM
 
 **Integration Points:**
 - **GUI Dropdowns**: Translation and OCR model dropdowns are populated from CSV data
-- **Cost Updates**: Token costs in configuration are updated when models change  
+- **Cost Updates**: Token costs in configuration are updated when models change
 - **API Calls**: Translation and OCR operations use the appropriate selected model
 - **Settings Persistence**: Model selections are saved to configuration file
 
@@ -718,7 +718,7 @@ GPT 4.1 Nano,gpt-4.1-nano,0.15,0.6,yes,no
 
 **Integration Points:**
 - **GUI Dropdowns**: Translation and OCR model dropdowns are populated from CSV data
-- **Cost Updates**: Token costs in configuration are updated when models change  
+- **Cost Updates**: Token costs in configuration are updated when models change
 - **API Calls**: Translation and OCR operations use the appropriate selected model with context window support
 - **Settings Persistence**: Model selections are saved to configuration file
 
@@ -922,17 +922,17 @@ To add a new API-based OCR provider (e.g., Azure Computer Vision, Google Cloud V
    ```python
    # handlers/azure_ocr_provider.py
    from .ocr_provider_base import AbstractOCRProvider
-   
+
    class AzureOCRProvider(AbstractOCRProvider):
        def __init__(self, app):
            super().__init__(app, "azure_ocr")
-       
+
        def _get_api_key(self):
            return self.app.azure_api_key_var.get().strip()
-       
+
        def _check_provider_availability(self):
            return AZURE_AVAILABLE
-       
+
        # Implement other abstract methods...
    ```
 
@@ -953,7 +953,7 @@ To add a new API-based OCR provider (e.g., Azure Computer Vision, Google Cloud V
        'openai': OpenAIOCRProvider(app),
        'azure': AzureOCRProvider(app)  # Add new provider
    }
-   
+
    # Update _get_active_ocr_provider() method
    def _get_active_ocr_provider(self):
        selected_ocr_model = self.app.ocr_model_var.get()
@@ -984,17 +984,17 @@ To add a new LLM-based translation provider (e.g., Claude, Llama):
    ```python
    # handlers/claude_provider.py
    from .llm_provider_base import AbstractLLMProvider
-   
+
    class ClaudeProvider(AbstractLLMProvider):
        def __init__(self, app):
            super().__init__(app, "claude")
-       
+
        def _get_api_key(self):
            return self.app.claude_api_key_var.get().strip()
-       
+
        def _check_provider_availability(self):
            return CLAUDE_AVAILABLE
-       
+
        # Implement other abstract methods...
    ```
 
@@ -1018,7 +1018,7 @@ To add a new LLM-based translation provider (e.g., Claude, Llama):
        'openai': OpenAIProvider(app),
        'claude': ClaudeProvider(app)  # Add new provider
    }
-   
+
    # Update _get_active_llm_provider() method
    def _get_active_llm_provider(self):
        selected_model = self.app.translation_model_var.get()
@@ -1064,20 +1064,21 @@ For traditional translation services (like Google Translate, DeepL):
 
 4. **Update UI and configuration** as described above.
 
-### Adding New OCR Preprocessing Modes
+### Adding New Local OCR Tuning Controls
 
-1. Update `ocr_utils.py`:
-   - Add your preprocessing mode to the `preprocess_for_ocr` function
-   - Consider adding specialized OCR parameters for your mode
+1. Update `paddle_ocr_backend.py`:
+   - Extend `PaddleOCRSettings` and the engine/cache key when the new setting changes recognition output
+   - Normalize user-facing values before they reach the backend
 
-2. Add the mode to the UI in `gui_builder.py`:
-   - Add your mode to the preprocessing mode dropdown values
+2. Add the setting to the UI in `gui_builder.py`:
+   - Create a PaddleOCR-specific control and wire it through settings save/load
+   - Keep Custom AI OCR image request controls separate from local OCR controls
 
 ### Supporting New Languages
 
-1. Ensure Tesseract supports the language:
-   - Update language mapping in the `tesseract_to_iso` dictionary in `language_manager.py`
-   - Add language codes to `constants.py` if necessary
+1. Ensure PaddleOCR supports the language:
+   - Add or normalize the language value in PaddleOCR settings
+   - Add language codes to `constants.py` if the UI needs a new language constant
 
 2. For API-based translation services:
    - Update the appropriate language CSV files in `resources/` directory
@@ -1110,17 +1111,17 @@ The application can be packaged as a standalone executable:
    ```
 
 2. Use the appropriate spec file:
-   
+
    **For standard CPU-only builds:**
    ```
    pyinstaller GameChangingTranslator.spec
    ```
-   
+
    **For GPU/CUDA optimized builds:**
    ```
    pyinstaller GameChangingTranslator_GPU.spec
    ```
-   
+
    **Alternative compilation using batch script:**
    ```
    run_python_compiler.bat
@@ -1249,7 +1250,7 @@ When adding new functionality, be sure to:
 
 1. Test manually with different scenarios:
    - Different language pairs
-   - Various text complexities  
+   - Various text complexities
    - Different screen configurations
    - Edge cases (empty text, very long text, special characters)
 

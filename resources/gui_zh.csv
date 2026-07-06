@@ -1,4 +1,4 @@
-﻿key,value
+key,value
 main_tab_title,主页
 select_source_btn,选择源区域（OCR）
 select_target_btn,选择目标区域（翻译）
@@ -26,7 +26,7 @@ settings_tab_title,设置
 translation_model_label,翻译模型：
 translation_model_marianmt_offline,MarianMT（离线免费）
 ocr_model_label,OCR 模型：
-ocr_model_tesseract,Tesseract（离线）
+ocr_model_paddleocr,PaddleOCR（离线）
 ocr_model_gemini,Gemini API（在线）
 capture_backend_label,截图后端：
 capture_backend_auto,自动（可用最快）
@@ -90,19 +90,13 @@ custom_ai_ocr_image_detail_low,低
 custom_ai_ocr_image_detail_high,高
 models_file_label,MarianMT 模型列表：
 beam_size_label,翻译 Beam Size（MarianMT）：
-tesseract_path_label,Tesseract 路径：
 scan_interval_label,扫描间隔（毫秒）：
 clear_timeout_label,清空翻译超时（秒）：
 stability_threshold_label,文本稳定阈值：
-confidence_threshold_label,OCR 置信度阈值：
-preprocessing_mode_label,图像预处理模式：
+paddleocr_min_score_label,PaddleOCR 最低分：
 ocr_debugging_label,OCR 调试：
 show_debug_checkbox,显示调试图像/文本
 preview_btn,预览
-adaptive_block_size_label,块大小（3-101，奇数）：
-adaptive_c_label,C 值（-75 到 75）：
-remove_trailing_label,移除尾部杂质：
-remove_trailing_checkbox,移除最后一个标点之后的文本
 source_color_label,源区域颜色：
 target_color_label,目标区域颜色：
 target_text_color_label,目标文本颜色：
@@ -127,15 +121,11 @@ choose_color_btn,选择颜色
 debug_tab_title,调试
 original_image_label,原始图像
 processed_image_label,处理后图像
-ocr_results_label,Tesseract OCR 结果
-ocr_results_placeholder,翻译运行且 OCR 模型选择 Tesseract 时，OCR 结果会显示在这里。
+ocr_results_label,OCR 结果
+ocr_results_placeholder,翻译运行且启用本地 OCR 调试时，OCR 结果会显示在这里。
 app_log_label,应用日志
 save_debug_images_btn,保存 OCR 图像
 refresh_log_btn,刷新日志
-preprocessing_none,无
-preprocessing_binary,二值化
-preprocessing_binary_inv,反向二值化
-preprocessing_adaptive,自适应
 settings_saved,状态：设置已保存
 no_image_captured,尚未捕获图像
 no_image_processed,尚未处理图像
@@ -146,7 +136,6 @@ marian_download_note,模型会在首次使用时下载（需要网络）。
 marian_unavailable_line1,MarianMT 不可用。若要启用，请安装：
 marian_unavailable_line2,pip install transformers torch sentencepiece
 browse_marian_models_title,选择 MarianMT 模型 CSV 文件
-browse_tesseract_title,选择 tesseract.exe
 choose_source_color_title,选择源区域颜色
 choose_target_color_title,选择目标区域颜色
 choose_target_text_color_title,选择目标文本颜色
@@ -181,7 +170,7 @@ gemini_reset_error_title,错误
 gemini_reset_error_msg,无法访问 Gemini 日志文件。
 gemini_reset_error_failed,重置 Gemini API 日志失败：
 currency_usd, 美元
-mb_progress_of, MB / 
+mb_progress_of, MB /
 mb_progress_format, MB（{0}%）
 file_type_csv,CSV 文件
 file_type_text,文本文件
@@ -218,4 +207,5 @@ model_list_success,已获取 {0} 个模型。
 model_list_failed_title,获取模型列表失败
 start_error_title,启动错误
 start_error_no_translation_profile,启动前请先添加并选择一个 AI 模型预设。
-start_error_no_ocr_profile,启动前请为 OCR 添加并选择一个 AI 模型预设，或选择 Tesseract OCR。
+start_error_no_ocr_profile,启动前请为 OCR 添加并选择一个 AI 模型预设，或选择 PaddleOCR。
+ocr_preview_local_only,OCR 预览仅适用于 PaddleOCR。

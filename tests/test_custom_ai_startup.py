@@ -5,6 +5,7 @@ import sys
 import unittest
 import csv
 import configparser
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -47,6 +48,27 @@ class StartupOptimizationTests(unittest.TestCase):
             example_config["Settings"]["custom_ai_latency_mode"],
             DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"],
         )
+
+    def test_legacy_removed_ocr_model_config_migrates_to_paddleocr(self):
+        import config_manager
+
+        legacy_model = "tes" + "seract"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            previous_cwd = os.getcwd()
+            os.chdir(tmp_dir)
+            try:
+                Path("ocr_translator_config.ini").write_text(
+                    f"[Settings]\nocr_model = {legacy_model}\n",
+                    encoding="utf-8",
+                )
+
+                loaded_config = config_manager.load_app_config()
+                persisted_config = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+            finally:
+                os.chdir(previous_cwd)
+
+        self.assertEqual(loaded_config["Settings"]["ocr_model"], "paddleocr")
+        self.assertIn("ocr_model = paddleocr", persisted_config)
 
     def test_default_config_includes_custom_ai_submit_interval(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
@@ -92,6 +114,30 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertIn("custom_ai_submit_interval_label", labels, msg=path)
             self.assertTrue(labels["custom_ai_submit_interval_label"].strip(), msg=path)
 
+    def test_paddleocr_score_control_is_visible_and_legacy_threshold_controls_are_removed(self):
+        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        ui_handler_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
+        legacy_confidence_key = "confidence" + "_threshold_label"
+
+        self.assertIn("paddleocr_min_score_label", gui_builder_source)
+        self.assertIn("paddleocr_min_score_spinbox", gui_builder_source)
+        self.assertIn("paddleocr_min_score_var", gui_builder_source)
+        self.assertIn("paddleocr_min_score_label, show=is_paddleocr", ui_handler_source)
+        self.assertIn("paddleocr_min_score_spinbox, show=is_paddleocr", ui_handler_source)
+        self.assertNotIn("confidence_label", ui_handler_source)
+        self.assertNotIn(legacy_confidence_key, gui_builder_source)
+
+        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv", "resources/gui_pol.csv"):
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
+                labels = {
+                    row[0]: row[1]
+                    for row in csv.reader(f)
+                    if len(row) >= 2 and row[0]
+                }
+            self.assertIn("paddleocr_min_score_label", labels, msg=path)
+            self.assertTrue(labels["paddleocr_min_score_label"].strip(), msg=path)
+            self.assertNotIn(legacy_confidence_key, labels, msg=path)
+
     def test_new_custom_ai_controls_have_all_language_labels(self):
         required_keys = {
             "ai_profile_structured_output_label",
@@ -130,7 +176,7 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertEqual(empty_keys, set(), msg=path)
 
     def test_app_logic_import_does_not_import_removed_provider_sdks(self):
-        for optional_module in ("cv2", "pyautogui", "tesserocr"):
+        for optional_module in ("cv2", "pyautogui"):
             if importlib.util.find_spec(optional_module) is None:
                 module = types.ModuleType(optional_module)
                 sys.modules[optional_module] = module
@@ -230,48 +276,54 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertEqual(app_logic.DEFAULT_CUSTOM_PROMPT, expected_prompt)
         self.assertEqual(shipped_prompt, expected_prompt)
 
-    def test_tesseract_runtime_cache_is_cleared_when_ocr_parameters_change(self):
-        import app_logic
+    def test_removed_ocr_backend_tokens_are_absent_from_active_runtime_files(self):
+        files_to_check = [
+            "app_logic.py",
+            "config_manager.py",
+            "gui_builder.py",
+            "language_manager.py",
+            "ocr_utils.py",
+            "worker_threads.py",
+            "handlers/configuration_handler.py",
+            "handlers/display_manager.py",
+            "handlers/ui_interaction_handler.py",
+            "resources/gui_eng.csv",
+            "resources/gui_pol.csv",
+            "resources/gui_zh.csv",
+            "requirements.txt",
+            "setup.py",
+            "GameChangingTranslator.spec",
+            "GameChangingTranslator_GPU.spec",
+        ]
+        forbidden_tokens = (
+            "tes" + "seract",
+            "pytes" + "seract",
+            "tess" + "erocr",
+            "confidence" + "_threshold",
+            "image" + "_preprocessing_mode",
+            "adaptive" + "_block_size",
+            "adaptive" + "_c",
+            "remove" + "_trailing_garbage",
+        )
 
-        dummy_app = object.__new__(app_logic.GameChangingTranslator)
-        dummy_app.ocr_preview_window = None
-        dummy_app.get_ocr_model_setting = lambda: "tesseract"
+        for relative_path in files_to_check:
+            source = Path(relative_path).read_text(encoding="utf-8-sig").lower()
+            for token in forbidden_tokens:
+                self.assertNotIn(token.lower(), source, msg=f"{relative_path}: {token}")
 
-        with patch.object(app_logic, "clear_tessdata_dir_cache") as clear_tessdata:
-            with patch.object(app_logic, "clear_tesseract_languages_cache") as clear_languages:
-                with patch.object(app_logic, "clear_tesseract_ocr_engines") as clear_engines:
-                    dummy_app.on_ocr_parameter_change()
+    def test_settings_save_no_longer_writes_removed_ocr_keys(self):
+        save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
+        removed_keys = (
+            "tes" + "seract_path",
+            "confidence" + "_threshold",
+            "image" + "_preprocessing_mode",
+            "adaptive" + "_block_size",
+            "adaptive" + "_c",
+            "remove" + "_trailing_garbage",
+        )
 
-        clear_tessdata.assert_called_once()
-        clear_languages.assert_called_once()
-        clear_engines.assert_called_once()
-
-    def test_tesseract_runtime_cache_is_cleared_when_ocr_model_changes(self):
-        import app_logic
-
-        dummy_app = object.__new__(app_logic.GameChangingTranslator)
-        dummy_app.is_running = False
-        dummy_app.is_api_based_ocr_model = lambda *args, **kwargs: False
-        dummy_app.ocr_preview_window = None
-        dummy_app.ui_interaction_handler = None
-        dummy_app.update_adaptive_fields_visibility = lambda: None
-        dummy_app.ocr_model_var = types.SimpleNamespace(get=lambda: "tesseract")
-
-        with patch.object(app_logic, "clear_tessdata_dir_cache") as clear_tessdata:
-            with patch.object(app_logic, "clear_tesseract_languages_cache") as clear_languages:
-                with patch.object(app_logic, "clear_tesseract_ocr_engines") as clear_engines:
-                    dummy_app.on_ocr_model_change()
-
-        clear_tessdata.assert_called_once()
-        clear_languages.assert_called_once()
-        clear_engines.assert_called_once()
-
-    def test_tesseract_runtime_cache_clear_is_wired_into_start_and_stop_paths(self):
-        app_logic_source = Path("app_logic.py").read_text(encoding="utf-8-sig")
-
-        self.assertIn('clear_tesseract_runtime_cache("translation starting")', app_logic_source)
-        self.assertIn('clear_tesseract_runtime_cache("translation stopped")', app_logic_source)
-        self.assertIn('clear_tesseract_languages_cache()', app_logic_source)
+        for key in removed_keys:
+            self.assertNotIn(key, save_source)
 
 
 class ChineseUILanguageTests(unittest.TestCase):

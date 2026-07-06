@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pl">
 
 <head>
@@ -331,7 +331,7 @@
     Dzięki ruchomym oknom nakładek tłumaczenie można umieścić w dowolnym miejscu na ekranie, przez co aplikacja
     doskonale nadaje się do tłumaczenia gier, filmów, plików PDF lub dowolnych programów zawierających tekst, którego
     nie da się łatwo skopiować i wkleić.</p>
-  <p>Bieżąca ścieżka działania używa lokalnego Tesseract OCR albo Custom AI OCR, a następnie tłumaczy przez profile
+  <p>Bieżąca ścieżka działania używa lokalnego PaddleOCR albo Custom AI OCR, a następnie tłumaczy przez profile
     Custom AI wskazujące endpointy zgodne z OpenAI. Starsze sekcje Gemini, OpenAI, DeepL, Google Translate i MarianMT
     pozostają jako materiał referencyjny dla forków lub jawnie ponownie włączonych ścieżek kodu.</p>
   <h2 id="getting-started">Pierwsze kroki</h2>
@@ -340,8 +340,8 @@
     wymagania:</p>
   <ul>
     <li>System operacyjny Windows.</li>
-    <li>Zainstalowany program <a href="https://github.com/UB-Mannheim/tesseract/wiki">Tesseract OCR</a> (wymagany tylko
-      przy korzystaniu z Tesseract OCR, ale zalecany w standardowych scenariuszach z wyraźnymi napisami).</li>
+    <li>Zainstalowany program <a href="https://github.com/PaddlePaddle/PaddleOCR">PaddleOCR</a> (wymagany tylko
+      przy korzystaniu z PaddleOCR, ale zalecany w standardowych scenariuszach z wyraźnymi napisami).</li>
     <li>Niniejsza aplikacja zainstalowana zgodnie z <a href="installation_pl.html">instrukcją instalacji</a>.</li>
   </ul>
   <h3 id="first-run">Pierwsze uruchomienie</h3>
@@ -352,7 +352,7 @@
       będą ukryte.</li>
     <li>Przed rozpoczęciem tłumaczenia musisz:
       <ul>
-        <li>sprawdzić ścieżkę do programu Tesseract w zakładce <strong>Ustawienia</strong>,</li>
+        <li>sprawdzić ścieżkę do programu PaddleOCR w zakładce <strong>Ustawienia</strong>,</li>
         <li>wybrać obszary źródłowy i docelowy,</li>
         <li>skonfigurować preferowaną metodę tłumaczenia.</li>
       </ul>
@@ -414,11 +414,11 @@
       <strong>Model tłumaczenia</strong> – użyj profili Custom AI dla endpointów tłumaczenia zgodnych z OpenAI.
     </li>
     <li>
-      <strong>Model OCR</strong> – wybierz między <strong>Tesseract (lokalny)</strong> a <strong>Custom AI OCR
+      <strong>Model OCR</strong> – wybierz między <strong>PaddleOCR (lokalny)</strong> a <strong>Custom AI OCR
         (online)</strong>.
     </li>
     <li>
-      <strong>Język źródłowy</strong> – język OCR/tłumaczenia dla Tesseract lub Custom AI.
+      <strong>Język źródłowy</strong> – język OCR/tłumaczenia dla PaddleOCR lub Custom AI.
     </li>
     <li>
       <strong>Język docelowy</strong> – język docelowy tłumaczenia Custom AI.
@@ -436,7 +436,7 @@
       <strong>Opcje Custom AI</strong> – profile, opóźnienia, reasoning, format obrazu OCR i endpointy zgodne z OpenAI.
     </li>
     <li>
-      <strong>Ścieżka do Tesseract</strong> – ścieżka do pliku wykonywalnego Tesseract OCR (tylko Tesseract).
+      <strong>Ustawienia PaddleOCR</strong> – ścieżka do pliku wykonywalnego PaddleOCR (tylko PaddleOCR).
     </li>
     <li>
       <strong>Interwał skanowania (ms)</strong> – jak często ma być przechwytywany ekran.
@@ -447,23 +447,23 @@
     </li>
     <li>
       <strong>Próg stabilności tekstu</strong> – liczba identycznych odczytów wymaganych przed tłumaczeniem (tylko
-      Tesseract).
+      PaddleOCR).
     </li>
     <li>
-      <strong>Próg pewności OCR</strong> – minimalna pewność dla uwzględnienia tekstu wykrytego przez OCR (tylko
-      Tesseract).
+      <strong>Minimalny wynik PaddleOCR</strong> – minimalna pewność dla uwzględnienia tekstu wykrytego przez OCR (tylko
+      PaddleOCR).
     </li>
     <li>
-      <strong>Tryb przetwarzania obrazu</strong> – sposób przetwarzania obrazów przez OCR (tylko Tesseract).
+      <strong>Ustawienia detekcji PaddleOCR</strong> – sposób przetwarzania obrazów przez OCR (tylko PaddleOCR).
     </li>
     <li>
       <strong>Debugowanie OCR</strong> – opcja wyświetlania obrazów debugowania i tekstu na zakładce
-      <strong>Ustawienia</strong> (tylko Tesseract).
+      <strong>Ustawienia</strong> (tylko PaddleOCR).
     </li>
     <li>
-      Przycisk <strong>Podgląd</strong> – otwiera okno podglądu OCR (tylko Tesseract).</li>
+      Przycisk <strong>Podgląd</strong> – otwiera okno podglądu OCR (tylko PaddleOCR).</li>
     <li>
-      <strong>Usuń śmieci na końcu</strong> – opcja usuwania tekstu po ostatnim znaku interpunkcyjnym (tylko Tesseract).
+      <strong>Minimalny wynik PaddleOCR</strong> - odfiltrowuje wykrycia OCR o niskim wyniku (tylko PaddleOCR).
     </li>
     <li>
       <strong>Opcje wyglądu</strong> – kolory i rozmiary czcionek dla nakładek.
@@ -472,12 +472,12 @@
       <strong>Opcje buforowania do plików</strong> – ustawienia włączania/wyłączania buforowania w przypadku usług API.
     </li>
   </ol>
-  <h3 id="ocr-preview">Podgląd OCR (tylko Tesseract)</h3>
+  <h3 id="ocr-preview">Podgląd OCR (tylko PaddleOCR)</h3>
   <p>
     <img src="screenshots/OCR_Preview_pl.png" alt="Okno podglądu OCR" />
   </p>
   <p>Kliknięcie przycisku <strong>Podgląd</strong> w zakładce <strong>Ustawienia</strong> otwiera osobne okno
-    <strong>Podgląd OCR</strong> podczas korzystania z Tesseract OCR. To okno wyświetla:
+    <strong>Podgląd OCR</strong> podczas korzystania z PaddleOCR. To okno wyświetla:
   </p>
   <ol>
     <li>
@@ -677,7 +677,7 @@
       <p>
         <strong>Model OCR</strong>:
       </p>
-      <p>Wybierz między Custom AI OCR, lokalnym Tesseract i pozostawionymi starszymi dostawcami OCR:</p>
+      <p>Wybierz między Custom AI OCR, lokalnym PaddleOCR i pozostawionymi starszymi dostawcami OCR:</p>
       <ul>
         <li>
           <strong>Profile Custom AI OCR</strong> – OCR online zgodny z OpenAI, z opcjami obrazów WebP, PNG i JPEG.
@@ -687,7 +687,7 @@
           ponownie włączonych forków.
         </li>
         <li>
-          <strong>Tesseract (lokalny)</strong> – tradycyjne narzędzie OCR, bezpłatne i działa offline. Zalecane dla
+          <strong>PaddleOCR (lokalny)</strong> – tradycyjne narzędzie OCR, bezpłatne i działa offline. Zalecane dla
           wyraźnych napisów o dobrym kontraście.
         </li>
         <li>Podczas korzystania z Custom AI OCR wybierz profil OCR i format obrazu w ustawieniach Custom AI.</li>
@@ -695,18 +695,18 @@
     </li>
     <li>
       <p>
-        <strong>Ścieżka do Tesseract (tylko Tesseract)</strong>:
+        <strong>Ustawienia PaddleOCR (tylko PaddleOCR)</strong>:
       </p>
       <ul>
-        <li>Powinna wskazywać miejsce instalacji programu Tesseract (np.
-          <code>C:\Program Files\Tesseract-OCR\tesseract.exe</code>).
+        <li>Domyślnie używa lokalnego katalogu źródłowego PaddleOCR (np.
+          <code>PaddleOCR-3.7.0</code>).
         </li>
         <li>Użyj przycisku <strong>Wskaż</strong>, aby wskazać lokalizację.</li>
       </ul>
     </li>
     <li>
       <p>
-        <strong>Tryb przetwarzania obrazu (tylko Tesseract)</strong>:
+        <strong>Ustawienia detekcji PaddleOCR (tylko PaddleOCR)</strong>:
       </p>
       <ul>
         <li>
@@ -725,7 +725,7 @@
     </li>
     <li>
       <p>
-        <strong>Tryb adaptacyjny (tylko Tesseract)</strong>:
+        <strong>Dostrajanie detekcji PaddleOCR (tylko PaddleOCR)</strong>:
       </p>
       <p>Po wybraniu trybu przetwarzania <strong>Adaptacyjny</strong> system odblokowuje zaawansowane możliwości
         progowania adaptacyjnego, które doskonale sprawdzają się w trudnych środowiskach graficznych. Ten tryb jest
@@ -755,7 +755,7 @@
     </li>
     <li>
       <p>
-        <strong>Próg pewności OCR (tylko Tesseract)</strong>:
+        <strong>Minimalny wynik PaddleOCR (tylko PaddleOCR)</strong>:
       </p>
       <ul>
         <li>Wyższe wartości (np. 80) dają mniej wyników, ale są bardziej dokładne.</li>
@@ -764,7 +764,7 @@
     </li>
     <li>
       <p>
-        <strong>Próg stabilności tekstu (tylko Tesseract)</strong>:
+        <strong>Próg stabilności tekstu (tylko PaddleOCR)</strong>:
       </p>
       <ul>
         <li>Określa, ile identycznych odczytów OCR jest potrzebnych przed rozpoczęciem tłumaczenia.</li>
@@ -774,7 +774,7 @@
     </li>
     <li>
       <p>
-        <strong>Debugowanie OCR (tylko Tesseract)</strong>:
+        <strong>Debugowanie OCR (tylko PaddleOCR)</strong>:
       </p>
       <ul>
         <li>Po włączeniu pokazuje przechwycone obrazy i wyniki OCR w zakładce <strong>Debugowanie</strong>.</li>
@@ -783,13 +783,12 @@
     </li>
     <li>
       <p>
-        <strong>Usuń śmieci na końcu (tylko Tesseract)</strong>:
+        <strong>Minimalny wynik PaddleOCR (tylko PaddleOCR)</strong>:
       </p>
       <ul>
-        <li>Po włączeniu usuwa tekst występujący po ostatnim znaku interpunkcyjnym (kropce, wykrzykniku lub znaku
-          zapytania).</li>
-        <li>Przydatna funkcja do usuwania błędów OCR, które często pojawiają się na końcu rozpoznanego tekstu.</li>
-        <li>Poprawia jakość tłumaczenia poprzez usunięcie przypadkowych znaków lub fragmentów słów.</li>
+        <li>Filtruje wykrycia PaddleOCR o niskim wyniku przed przekazaniem tekstu do tlumaczenia.</li>
+        <li>Nizsze wartosci przechwytuja wiecej tekstu; wyzsze ograniczaja szum OCR.</li>
+        <li>Uzyj podgladu OCR i zakladki debugowania, aby dobrac praktyczny wynik dla zrodla.</li>
       </ul>
     </li>
   </ol>
@@ -894,7 +893,7 @@
   <h3 id="gemini-ocr-premium-text-recognition">Starszy Gemini OCR – zaawansowane rozpoznawanie tekstu</h2>
 
     <p>Gemini OCR to zaawansowane rozpoznawanie tekstu z wykorzystaniem sztucznej inteligencji. Doskonale rozpoznaje
-      mało czytelny tekst, z którym tradycyjne programy OCR, takie jak Tesseract, sobie nie radzą. Ta zaawansowana
+      mało czytelny tekst, z którym tradycyjne programy OCR, takie jak PaddleOCR, sobie nie radzą. Ta zaawansowana
       funkcja wykorzystuje modele Gemini firmy Google, gwarantując doskonałe rozpoznawanie tekstu i elastyczny wybór
       modeli pod kątem optymalnej wydajności i ceny.</p>
 
@@ -928,18 +927,18 @@
       <li>rozmycia ruchu lub artefaktów kompresji w filmach.</li>
     </ul>
 
-    <p><strong>Porównanie Tesseract i Gemini pod kątem jakości OCR</strong></p>
+    <p><strong>Porównanie PaddleOCR i Gemini pod kątem jakości OCR</strong></p>
     <p>
       <img src="screenshots/ocr_1.png" alt="Przykład trudnego napisu 1" />
     </p>
-    <p><strong>Wynik Tesseract OCR:</strong> <code>~ Trust me, OD tite WE loca mS</code><br>
+    <p><strong>Wynik PaddleOCR:</strong> <code>~ Trust me, OD tite WE loca mS</code><br>
       <strong>Wynik Gemini OCR:</strong>
       <code>Trust me, Oakmonters know a newcomer when they see one. We locals can tell.</code>
     </p>
     <p>
       <img src="screenshots/ocr_2.png" alt="Przykład trudnego napisu 2" />
     </p>
-    <p><strong>Wynik Tesseract OCR:</strong>
+    <p><strong>Wynik PaddleOCR:</strong>
       <code>' Paulie: Driv: show, Tom. Next stop's Bi the motel. 7 jj ie</code><br>
       <strong>Wynik Gemini OCR:</strong>
       <code>Paulie: Drive before the cops show, Tom. Next stop's Bill at the motel.</code>
@@ -985,7 +984,7 @@
     <h4>Doskonały stosunek jakości do ceny</h4>
 
     <p>Dostępne modele Gemini zapewniają wyjątkowo szybkie i dokładne rozpoznawanie tekstu, które znacznie przewyższa
-      Tesseract czy Paddle OCR. Dzięki inteligentnemu wyborowi modeli można zoptymalizować stosunek jakości do ceny dla
+      PaddleOCR czy Paddle OCR. Dzięki inteligentnemu wyborowi modeli można zoptymalizować stosunek jakości do ceny dla
       konkretnego zastosowania przy zachowaniu doskonałej wydajności w porównaniu z bezpłatnymi i płatnymi rozwiązaniami
       OCR.</p>
 
@@ -1553,7 +1552,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
 
     <p><strong>Tłumaczenie z uwzględnieniem kontekstu</strong></p>
     <p>Tłumaczenie DeepL obsługuje obecnie uwzględnianie kontekstu przez możliwość dołączenia do każdego żądania
-      tłumaczenia nawet 3 poprzednich napisów. Funkcja ta znacząco poprawia jakość poprzez:</p>
+        <li>Uzyj podgladu OCR i zakladki debugowania, aby dobrac praktyczny wynik dla zrodla.</li>
     <ul>
       <li>utrzymanie zgodności gramatycznej w kolejnych napisach;</li>
       <li>poprawę doboru zaimków i spójności wypowiedzi postaci;</li>
@@ -1561,7 +1560,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li>generowanie bardziej naturalnych, idiomatycznych tłumaczeń.</li>
     </ul>
     <p><strong>Ważne:</strong> korzystanie z kontekstu w DeepL <em>nie</em> jest wliczane do limitu zużycia znaków.
-      Kontekst można przesyłać bezpłatnie, dzięki czemu funkcja ta nie zużywa limitów, a poprawia jakość tłumaczenia.
+        <li>Uzyj podgladu OCR i zakladki debugowania, aby dobrac praktyczny wynik dla zrodla.</li>
     </p>
     <p>Wykorzystanie kontekstu jest automatycznie rejestrowane w pliku <code>DeepL_Translation_Long_Log.txt</code>,
       który zapisuje pełne okno kontekstu wysyłane z każdym żądaniem tłumaczenia. Ten szczegółowy dziennik pomaga
@@ -1653,7 +1652,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
           </li>
           <li>Dostosuj progi pewności i stabilności.</li>
           <li>Sprawdź, czy wybrany język źródłowy jest prawidłowy.</li>
-          <li>Włącz <strong>Usuń śmieci na końcu</strong>, aby wyeliminować błędy OCR.</li>
+          <li>Włącz <strong>Filtrowanie wyników PaddleOCR</strong>, aby wyeliminować błędy OCR.</li>
           <li>Precyzyjnie ustaw parametry <strong>trybu adaptacyjnego</strong>, jeśli tło tekstu zmienia się lub jest
             niejednolite.</li>
         </ul>
@@ -1671,7 +1670,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         teł.</li>
       <li>Dostosuj rozmiar obszaru przechwytywania tak, aby obejmował tekst ciasno, ale w całości.</li>
       <li>Użyj większego obszaru źródłowego dla szerszego kontekstu, jeśli OCR ma problemy.</li>
-      <li>Włącz <strong>Usuń śmieci na końcu</strong>, aby wyeliminować artefakty rozpoznawania.</li>
+      <li>Włącz <strong>Filtrowanie wyników PaddleOCR</strong>, aby wyeliminować artefakty rozpoznawania.</li>
       <li>Dostosuj próg pewności, aby zrównoważyć przechwytywanie całego tekstu (niższe wartości) i ograniczanie błędów
         (wyższe wartości).</li>
       <li>Dla małych napisów na zmieniających się tłach eksperymentuj z parametrami <strong>Rozmiar bloku</strong> i
@@ -1685,7 +1684,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li>Zwiększ <strong>Interwał skanowania (ms)</strong> w zakładce <strong>Ustawienia</strong>, aby zmniejszyć
         obciążenie procesora.</li>
       <li>Wyłącz <strong>Debugowanie OCR</strong> w zakładce <strong>Ustawienia</strong>.</li>
-      <li>Ustaw <strong>Tryb przetwarzania obrazu</strong> na <strong>Brak</strong> w zakładce
+      <li>Ustaw <strong>Ustawienia detekcji PaddleOCR</strong> na <strong>Brak</strong> w zakładce
         <strong>Ustawienia</strong>.
       </li>
       <li>W przypadku modelu MarianMT:
@@ -1718,7 +1717,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
           <li>Umieść okno tłumaczenia w miejscu, w którym nie przeszkadza.</li>
           <li>Użyj opcji <strong>Czas wyświetlania tłumaczenia (s)</strong>, aby tłumaczenia pozostawały widoczne tak
             długo, jak tekst jest obecny na ekranie.</li>
-          <li>Włącz <strong>Usuń śmieci na końcu</strong>, aby wyeliminować błędy OCR typowe dla tekstu w grach.</li>
+          <li>Włącz <strong>Filtrowanie wyników PaddleOCR</strong>, aby wyeliminować błędy OCR typowe dla tekstu w grach.</li>
           <li>Dla gier z trudnymi tłami napisów eksperymentuj z ustawieniami <strong>trybu adaptacyjnego</strong>.</li>
         </ul>
       </li>

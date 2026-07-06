@@ -31,7 +31,7 @@ class CustomAILanguageTests(unittest.TestCase):
 
 class StartupOptimizationTests(unittest.TestCase):
     def test_app_logic_import_does_not_import_removed_provider_sdks(self):
-        for optional_module in ("cv2", "pyautogui", "tesserocr"):
+        for optional_module in ("cv2", "pyautogui"):
             if importlib.util.find_spec(optional_module) is None:
                 module = types.ModuleType(optional_module)
                 sys.modules[optional_module] = module

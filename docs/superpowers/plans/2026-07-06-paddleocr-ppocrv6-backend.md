@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a selectable offline PaddleOCR 3.7 + PP-OCRv6 OCR backend while keeping Tesseract as a fallback.
+**Goal:** Add a selectable offline PaddleOCR 3.7 + PP-OCRv6 OCR backend while keeping legacy local OCR as a fallback.
 
 **Architecture:** Create a focused `paddle_ocr_backend.py` wrapper that lazy-loads PaddleOCR from an installed package or the local `PaddleOCR-3.7.0` source directory, caches engines by settings, and returns plain text plus line confidence data. Wire `ocr_model == "paddleocr"` into config migration, the OCR model combobox, model-specific UI visibility, realtime OCR routing, cache keys, and OCR preview.
 
@@ -88,7 +88,7 @@ Add tests that assert:
 from config_manager import DEFAULT_CONFIG_SETTINGS
 
 def test_paddleocr_defaults_exist():
-    assert DEFAULT_CONFIG_SETTINGS["ocr_model"] == "tesseract"
+    assert DEFAULT_CONFIG_SETTINGS["ocr_model"] == "legacy_local_ocr"
     assert DEFAULT_CONFIG_SETTINGS["paddleocr_ocr_version"] == "PP-OCRv6"
     assert DEFAULT_CONFIG_SETTINGS["paddleocr_model_size"] == "small"
     assert DEFAULT_CONFIG_SETTINGS["paddleocr_min_score"] == "0.35"
@@ -98,7 +98,7 @@ Expected: FAIL because PaddleOCR defaults do not exist.
 
 - [ ] **Step 2: Add defaults and model normalization**
 
-Allow `ocr_model` values `tesseract`, `custom_ai`, and `paddleocr`. Add PaddleOCR settings defaults to `DEFAULT_CONFIG_SETTINGS`, app `tk.Variable` initialization, trace callbacks, and display-name initialization.
+Allow `ocr_model` values `legacy_local_ocr`, `custom_ai`, and `paddleocr`. Add PaddleOCR settings defaults to `DEFAULT_CONFIG_SETTINGS`, app `tk.Variable` initialization, trace callbacks, and display-name initialization.
 
 - [ ] **Step 3: Run tests**
 
@@ -122,7 +122,7 @@ Add `PaddleOCR PP-OCRv6 (offline)` to the OCR combobox before Custom AI profile 
 
 - [ ] **Step 3: Update visibility**
 
-When PaddleOCR is selected, hide Tesseract path/preprocessing/remove-trailing-garbage controls, show stability and OCR debug preview, and hide Custom AI image request controls.
+When PaddleOCR is selected, hide legacy local OCR path/preprocessing/remove-trailing-garbage controls, show stability and OCR debug preview, and hide Custom AI image request controls.
 
 - [ ] **Step 4: Run tests**
 
@@ -138,11 +138,11 @@ Expected: PASS.
 
 - [ ] **Step 1: Write failing routing tests**
 
-Add tests that patch `worker_threads.recognize_with_paddleocr` and verify local `ocr_model == "paddleocr"` routes there, not to Tesseract.
+Add tests that patch `worker_threads.recognize_with_paddleocr` and verify local `ocr_model == "paddleocr"` routes there, not to legacy local OCR.
 
 - [ ] **Step 2: Implement worker routing**
 
-Add `_get_paddleocr_settings(app)` and `_get_paddleocr_ocr_cache_mode_key(app)`. In `run_ocr_thread`, route PaddleOCR before Tesseract, pass PIL screenshots to `recognize_with_paddleocr`, apply linebreak handling, cache results under PaddleOCR-specific settings, and keep the shared stability/translation path.
+Add `_get_paddleocr_settings(app)` and `_get_paddleocr_ocr_cache_mode_key(app)`. In `run_ocr_thread`, route PaddleOCR before legacy local OCR, pass PIL screenshots to `recognize_with_paddleocr`, apply linebreak handling, cache results under PaddleOCR-specific settings, and keep the shared stability/translation path.
 
 - [ ] **Step 3: Implement preview routing**
 

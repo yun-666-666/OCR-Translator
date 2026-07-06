@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Support for multiple OpenAI models: GPT-4.1 Mini, GPT-4.1 Nano, and GPT-5 Nano
   - Comprehensive API call logging with detailed token usage and cost tracking
   - Dynamic model configuration through CSV-based management system
-  
+
 ### Changed
 - **Enhanced Translation and OCR Provider Architecture**: Expanded translation and OCR workflows to support OpenAI alongside existing Gemini, DeepL, Google Translate, and MarianMT providers
 
@@ -115,11 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Improved Subtitle Display for Dialogs**: Enhanced formatting of conversational subtitles with proper line breaks
-  - Previous format: `   - How are you? - Fine.    `  
+  - Previous format: `   - How are you? - Fine.    `
   - New format with proper line separation:
     ```
         - How are you?
-        - Fine.                 
+        - Fine.
     ```
   - Better readability for dialog-heavy content like games and movies
 
@@ -244,11 +244,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Resolved issue where successful OCR results were discarded due to timeout limits
   - Implemented automatic Gemini client initialization for OCR operations using the same proven pattern as translation
   - Ensures reliable OCR-to-translation pipeline for all Gemini OCR operations
-- **Tesseract Path Validation Error with Gemini OCR**: Fixed application startup and translation errors when Gemini OCR is selected
-  - Resolved "Tesseract path invalid!" error that occurred even when Tesseract was not needed
-  - Implemented conditional Tesseract path validation only when Tesseract OCR is actually selected
-  - Eliminates unnecessary Tesseract dependency checks during Gemini OCR operations
-  - Improves application performance by avoiding redundant Tesseract operations when using Gemini OCR
+- **legacy local OCR Path Validation Error with Gemini OCR**: Fixed application startup and translation errors when Gemini OCR is selected
+  - Resolved "legacy local OCR path invalid!" error that occurred even when legacy local OCR was not needed
+  - Implemented conditional legacy local OCR path validation only when legacy local OCR is actually selected
+  - Eliminates unnecessary legacy local OCR dependency checks during Gemini OCR operations
+  - Improves application performance by avoiding redundant legacy local OCR operations when using Gemini OCR
 
 ### Changed
 - N/A
@@ -330,7 +330,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Better pronoun resolution and character voice consistency
 
 ### Changed
-- Enhanced OCR model selection with Gemini API as premium option alongside traditional Tesseract OCR
+- Enhanced OCR model selection with Gemini API as premium option alongside traditional legacy local OCR
 - Improved translation context awareness with configurable sliding window (0-5 previous subtitles)
 - Updated user interface to accommodate new Gemini OCR configuration options and API usage monitoring
 
