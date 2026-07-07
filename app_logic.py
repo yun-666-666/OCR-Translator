@@ -30,7 +30,13 @@ from overlay_manager import (
 )
 from language_manager import LanguageManager
 from language_ui import UILanguageManager
-from modern_ui import apply_white_clean_theme, style_tk_canvas, style_tk_text_widget
+from modern_ui import (
+    apply_white_clean_theme,
+    style_tk_canvas,
+    style_tk_text_widget,
+    start_pipeline_pulse,
+    cancel_pipeline_pulse,
+)
 from runtime_metrics import RuntimeMetrics
 from custom_ai import (
     CustomAIProfileManager,
@@ -2110,7 +2116,7 @@ class GameChangingTranslator:
             try: self.target_overlay.hide()
             except tk.TclError: log_debug("Error hiding target overlay on stop (likely closed).")
 
-        self.start_stop_btn.config(state=tk.NORMAL)
+        self.start_stop_btn.config(state=tk.NORMAL, style="Primary.TButton")
         status_text_stopped = "Status: " + self.ui_lang.get_label("status_stopped", "Stopped (Press ~ to Start)")
         self.status_label.config(text=status_text_stopped)
         log_debug("Translation process stopped.")
@@ -2133,7 +2139,11 @@ class GameChangingTranslator:
             # DO NOT request session ends here. This will be done in _finalize_shutdown.
             # Context clearing is now handled automatically after session end logging in llm_provider_base.py
 
-            self.start_stop_btn.config(text="Start", state=tk.DISABLED)
+            # Cancel amber pulse immediately when user requests stop
+            _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+            _palette = getattr(self, "_pipeline_pulse_palette", None)
+            cancel_pipeline_pulse(self, _dot_canvases, _palette)
+            self.start_stop_btn.config(text="Start", state=tk.DISABLED, style="Primary.TButton")
             self.status_label.config(text="Status: Stopping...")
             self.root.update_idletasks()
 
@@ -2247,10 +2257,15 @@ class GameChangingTranslator:
                         self.translation_handler.start_ocr_session()
                     self.translation_handler.start_translation_session()
 
-                self.start_stop_btn.config(text="Stop", state=tk.NORMAL)
+                self.start_stop_btn.config(text="Stop", state=tk.NORMAL, style="StartRunning.TButton")
                 status_text_running = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
                 self.status_label.config(text=status_text_running)
                 self.root.update_idletasks()
+                # Start amber pipeline pulse — tied to self.is_running being True
+                _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+                _palette = getattr(self, "_pipeline_pulse_palette", None)
+                if _dot_canvases and _palette:
+                    start_pipeline_pulse(self, _dot_canvases, _palette)
 
                 from worker_threads import run_capture_thread, run_ocr_thread, run_translation_thread
 
@@ -2442,7 +2457,15 @@ class GameChangingTranslator:
 
             if self.is_running:
                 status_text = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
-                self.start_stop_btn.config(text=self.ui_lang.get_label("stop_btn"))
+                self.start_stop_btn.config(
+                    text=self.ui_lang.get_label("stop_btn"),
+                    style="StartRunning.TButton",
+                )
+                # Restart pulse animation after tab rebuild
+                _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+                _palette = getattr(self, "_pipeline_pulse_palette", None)
+                if _dot_canvases and _palette:
+                    start_pipeline_pulse(self, _dot_canvases, _palette)
             else:
                 status_text = "Status: " + self.ui_lang.get_label("status_stopped", "Stopped (Press ~ to Start)")
                 if not self.KEYBOARD_AVAILABLE:
@@ -2522,6 +2545,10 @@ class GameChangingTranslator:
     def on_closing(self):
         log_debug("Main window close requested. Initiating shutdown...")
         self._app_is_closing = True
+        # Cancel any running amber pulse immediately
+        _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+        _palette = getattr(self, "_pipeline_pulse_palette", None)
+        cancel_pipeline_pulse(self, _dot_canvases, _palette)
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)

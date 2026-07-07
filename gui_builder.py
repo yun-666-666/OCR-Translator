@@ -402,29 +402,73 @@ def get_system_fonts():
 
 
 def create_status_track(app, parent):
-    track = ttk.Frame(parent, style="StatusTrack.TFrame", padding=(12, 8))
-    track.columnconfigure((0, 2, 4), weight=1, uniform="workflow")
+    """Build the OCR > Translate > Overlay pipeline bar with amber pulse dots.
+
+    Each step gets a small tk.Canvas dot.  The dot canvases are stored on
+    ``app._pipeline_dot_canvases`` so the pulse helpers in modern_ui can
+    recolour them.  The palette is read from ``app.root.white_clean_palette``
+    (set by apply_white_clean_theme) or falls back to the module default.
+    """
+    palette = getattr(app.root, "white_clean_palette", None)
+    if palette is None:
+        from modern_ui import WHITE_CLEAN_PALETTE
+        palette = WHITE_CLEAN_PALETTE
+
+    idle_color = palette.get("surface_variant", "#e4e9ee")
+
+    track = ttk.Frame(parent, style="StatusTrack.TFrame", padding=(10, 6))
+    # 5 columns: dot+label, arrow, dot+label, arrow, dot+label
+    for col in (0, 2, 4):
+        track.columnconfigure(col, weight=1, uniform="workflow")
 
     steps = [
         app.ui_lang.get_label("status_track_ocr", "OCR"),
         app.ui_lang.get_label("status_track_translate", "Translate"),
         app.ui_lang.get_label("status_track_overlay", "Overlay"),
     ]
+
+    dot_canvases = []
     for index, label_text in enumerate(steps):
         column = index * 2
+
+        # Step cell: dot + label side by side in a small inner frame
+        cell = ttk.Frame(track, style="StatusTrack.TFrame")
+        cell.grid(row=0, column=column, sticky="ew", padx=2)
+        cell.columnconfigure(1, weight=1)
+
+        # 8×8 dot canvas
+        dot = tk.Canvas(
+            cell,
+            width=8, height=8,
+            bg=idle_color,
+            highlightthickness=0,
+            bd=0,
+        )
+        dot.grid(row=0, column=0, padx=(0, 4))
+        # Draw a filled oval tagged "dot" for easy recolouring
+        dot.create_oval(1, 1, 7, 7, fill=idle_color, outline=idle_color, tags="dot")
+        dot_canvases.append(dot)
+
         ttk.Label(
-            track,
+            cell,
             text=label_text,
             style="StatusTrackStep.TLabel",
-            anchor="center",
-        ).grid(row=0, column=column, sticky="ew")
+            anchor="w",
+        ).grid(row=0, column=1, sticky="ew")
+
         if index < len(steps) - 1:
             ttk.Label(
                 track,
-                text=">",
+                text="›",
                 style="StatusTrackArrow.TLabel",
                 anchor="center",
-            ).grid(row=0, column=column + 1, padx=6)
+            ).grid(row=0, column=column + 1, padx=4)
+
+    # Store dot canvases so app_logic can drive the pulse
+    app._pipeline_dot_canvases = dot_canvases
+    app._pipeline_pulse_palette = palette
+    app._pipeline_pulse_id = None
+
     return track
 
 
@@ -441,13 +485,22 @@ def _pack_command_button(parent, text, command, style=None):
 
 
 def _settings_group_heading(parent, text, row):
+    """Settings section heading: 3 px amber left-accent bar + label + separator."""
+    palette = getattr(getattr(parent, "master", None), "white_clean_palette", None)
+    amber = palette.get("primary", "#d4700c") if palette else "#d4700c"
+
     heading = ttk.Frame(parent, style="Surface.TFrame")
-    heading.grid(row=row, column=0, columnspan=3, padx=5, pady=(10, 4), sticky="ew")
-    heading.columnconfigure(1, weight=1)
+    heading.grid(row=row, column=0, columnspan=3, padx=5, pady=(14, 4), sticky="ew")
+    heading.columnconfigure(2, weight=1)
+
+    # 3 px amber accent bar
+    bar = tk.Frame(heading, width=3, bg=amber)
+    bar.grid(row=0, column=0, sticky="ns", padx=(0, 6))
+
     ttk.Label(heading, text=text, style="SettingsGroup.TLabel").grid(
-        row=0, column=0, padx=(0, 10), sticky="w"
+        row=0, column=1, padx=(0, 8), sticky="w"
     )
-    ttk.Separator(heading, orient=tk.HORIZONTAL).grid(row=0, column=1, sticky="ew")
+    ttk.Separator(heading, orient=tk.HORIZONTAL).grid(row=0, column=2, sticky="ew")
     return heading
 
 
@@ -522,15 +575,18 @@ def create_main_tab(app):
 
     run_frame = _create_section(frame, app.ui_lang.get_label("runtime_controls_title", "Run controls"))
     run_frame.grid(row=2, column=1, padx=(6, 0), pady=(0, 10), sticky="nsew")
-    app.start_stop_btn = _pack_command_button(
+
+    # START button: larger vertical padding so it reads as the primary action
+    app.start_stop_btn = ttk.Button(
         run_frame,
-        app.ui_lang.get_label("start_btn"),
-        app.toggle_translation,
+        text=app.ui_lang.get_label("start_btn"),
+        command=app.toggle_translation,
         style="Primary.TButton",
     )
+    app.start_stop_btn.pack(fill=tk.X, pady=(0, 8), ipady=6)
 
-    # Remove individual tab bindings and add a general binding in app_logic.py after tabs are created
-    app.main_tab_start_button = app.start_stop_btn  # Store reference for the tab changed handler in app_logic.py
+    # Store reference for the tab changed handler in app_logic.py
+    app.main_tab_start_button = app.start_stop_btn
 
     ttk.Label(
         run_frame,
@@ -552,12 +608,16 @@ def create_main_tab(app):
     if app.KEYBOARD_AVAILABLE:
         shortcuts_frame = _create_section(frame, app.ui_lang.get_label("keyboard_shortcuts_title"))
         shortcuts_frame.grid(row=3, column=0, columnspan=2, padx=0, pady=(0, 10), sticky="ew")
-        ttk.Label(shortcuts_frame, text="~ : " + app.ui_lang.get_label("shortcut_start_stop", "Start/Stop Translation"), style="SectionMuted.TLabel").grid(row=0, column=0, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+1 : " + app.ui_lang.get_label("shortcut_toggle_source", "Toggle Source Window Visibility"), style="SectionMuted.TLabel").grid(row=1, column=0, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+2 : " + app.ui_lang.get_label("shortcut_toggle_target", "Toggle Translation Window Visibility"), style="SectionMuted.TLabel").grid(row=2, column=0, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+S : " + app.ui_lang.get_label("shortcut_save_settings", "Save Settings"), style="SectionMuted.TLabel").grid(row=3, column=0, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+C : " + app.ui_lang.get_label("shortcut_clear_cache", "Clear Cache"), style="SectionMuted.TLabel").grid(row=4, column=0, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+L : " + app.ui_lang.get_label("shortcut_clear_log", "Clear Debug Log"), style="SectionMuted.TLabel").grid(row=5, column=0, padx=2, pady=(2, 0), sticky="w")
+        shortcuts_frame.columnconfigure(0, weight=1)
+        shortcuts_frame.columnconfigure(1, weight=1)
+        # Left column
+        ttk.Label(shortcuts_frame, text="~  —  " + app.ui_lang.get_label("shortcut_start_stop", "Start/Stop Translation"), style="SectionMuted.TLabel").grid(row=0, column=0, padx=(2, 8), pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+1  —  " + app.ui_lang.get_label("shortcut_toggle_source", "Toggle Source Window"), style="SectionMuted.TLabel").grid(row=1, column=0, padx=(2, 8), pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+2  —  " + app.ui_lang.get_label("shortcut_toggle_target", "Toggle Target Window"), style="SectionMuted.TLabel").grid(row=2, column=0, padx=(2, 8), pady=2, sticky="w")
+        # Right column
+        ttk.Label(shortcuts_frame, text="Alt+S  —  " + app.ui_lang.get_label("shortcut_save_settings", "Save Settings"), style="SectionMuted.TLabel").grid(row=0, column=1, padx=2, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+C  —  " + app.ui_lang.get_label("shortcut_clear_cache", "Clear Cache"), style="SectionMuted.TLabel").grid(row=1, column=1, padx=2, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+L  —  " + app.ui_lang.get_label("shortcut_clear_log", "Clear Debug Log"), style="SectionMuted.TLabel").grid(row=2, column=1, padx=2, pady=2, sticky="w")
         status_row = 4
         app.status_label = ttk.Label(frame, text=app.ui_lang.get_label("status_ready_hotkey"))
     else:
