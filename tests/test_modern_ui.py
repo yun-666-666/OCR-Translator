@@ -6,7 +6,9 @@ removed; this file is the canonical source of truth for the new tokens.
 """
 import unittest
 import tkinter as tk
+import inspect
 
+import app_logic
 import modern_ui
 
 
@@ -46,6 +48,16 @@ class ModernUiThemeTests(unittest.TestCase):
     def test_pulse_helpers_are_exported(self):
         self.assertTrue(callable(modern_ui.start_pipeline_pulse))
         self.assertTrue(callable(modern_ui.cancel_pipeline_pulse))
+
+    def test_language_rebuild_cancels_pipeline_pulse_before_tab_teardown(self):
+        source = inspect.getsource(app_logic.GameChangingTranslator.update_ui_language)
+
+        cancel_index = source.find("cancel_pipeline_pulse")
+        teardown_index = source.find("self.tab_control.forget")
+
+        self.assertNotEqual(cancel_index, -1)
+        self.assertNotEqual(teardown_index, -1)
+        self.assertLess(cancel_index, teardown_index)
 
     # ------------------------------------------------------------------
     # Live Tk tests (skipped when no display is available)

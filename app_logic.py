@@ -2402,6 +2402,10 @@ class GameChangingTranslator:
         """Rebuild visible UI tabs after the UI language changes."""
         try:
             self.start_ui_update()
+            # Stop any pulse tied to widgets that are about to be rebuilt.
+            _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+            _palette = getattr(self, "_pipeline_pulse_palette", None)
+            cancel_pipeline_pulse(self, _dot_canvases, _palette)
             self.update_translation_model_names()
             selected_index = 0
             try:
