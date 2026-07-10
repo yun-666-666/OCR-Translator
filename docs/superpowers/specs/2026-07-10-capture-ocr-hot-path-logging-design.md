@@ -2,10 +2,10 @@
 
 ## Evidence
 
-The real 2026-07-10 15:28-15:29 UI session emitted 812 capture/OCR hot-path
+The real 2026-07-10 15:28-15:29 UI session emitted 858 capture/OCR hot-path
 lines in roughly 30 seconds:
 
-- 344 successful MSS capture lines;
+- 346 successful capture lines (344 MSS plus 2 pyautogui benchmark lines);
 - 342 per-frame capture timing lines;
 - 44 PaddleOCR routing lines;
 - 44 PaddleOCR recognized-text lines;
@@ -82,10 +82,9 @@ slow threshold, normal interval, and slow interval. It:
 
 ## Expected Effect
 
-If the same 812-event session has no sustained slow-path condition, the seven
-categories should produce roughly 42 periodic lines instead of 812, a
-reduction near 95 percent. Slow or changing conditions remain more visible by
-design.
+An offline replay of the exact 858-event session produces 49 emitted lines and
+suppresses 809 repeated events, a 94.3 percent reduction. Slow or changing
+conditions remain more visible by design.
 
 ## Verification
 
