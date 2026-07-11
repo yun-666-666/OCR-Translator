@@ -5,6 +5,23 @@ All notable changes to the Game-Changing Translator project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.1] - 2026-07-11
+
+### Added
+- Route-scoped Custom AI latency and prompt-cache adaptation with bounded state and immutable request ownership.
+- Atomic, transactional Custom AI profile persistence with versioned credential rotation and stale temporary-file cleanup.
+- Regression coverage for live profile switching, session resets, hot-path log compression, cache behavior, and single-pass PySide rendering.
+
+### Changed
+- Integrated the Amber Signal desktop UI updates from 3.10.0 with the latest translation-pipeline optimizations.
+- Reduced repeated capture, OCR, cache, display, and translation logging while preserving slow-path and error diagnostics.
+- Release metadata now matches the published application version.
+
+### Fixed
+- Profile changes no longer expose uncommitted state to concurrent translation workers or lose credentials on failed saves.
+- Adaptive latency and cached-token observations no longer leak across endpoints, credentials, wire APIs, or models.
+- Phase 2 screenshot verification now raises a deterministic test window before desktop capture.
+
 ## [3.9.7] - 2026-07-05
 
 ### Fixed
