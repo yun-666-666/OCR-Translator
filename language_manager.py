@@ -40,8 +40,8 @@ class LanguageManager:
         # Generic name to ISO code mapping (for MarianMT display name parsing)
         self.generic_name_to_iso_code = {} # e.g., {'english': 'en', 'polish': 'pl'}
 
-        # Language display names for localization
-        self.language_display_names = []  # List of dicts with code, provider, english_name, polish_name
+        # Language display names for provider dropdowns
+        self.language_display_names = []  # List of dicts with code, provider, english_name, legacy_name
 
         self.load_language_lists()
         self.load_generic_name_map()
@@ -201,17 +201,17 @@ class LanguageManager:
                     reader = csv.reader(f)
                     next(reader, None)  # Skip header row
                     for row in reader:
-                        if len(row) >= 4:  # Need code, provider, english_name, polish_name
+                        if len(row) >= 4:  # Need code, provider, english_name, legacy localized name
                             code = row[0].strip()
                             provider = row[1].strip()
                             english_name = row[2].strip()
-                            polish_name = row[3].strip()
-                            if code and provider and english_name and polish_name:
+                            legacy_name = row[3].strip()
+                            if code and provider and english_name and legacy_name:
                                 self.language_display_names.append({
                                     'code': code,
                                     'provider': provider,
                                     'english_name': english_name,
-                                    'polish_name': polish_name
+                                    'legacy_name': legacy_name
                                 })
                 log_debug(f"Loaded {len(self.language_display_names)} language display name mappings.")
             except Exception as e:
@@ -224,11 +224,7 @@ class LanguageManager:
         try:
             for entry in self.language_display_names:
                 if entry['code'] == code and entry['provider'] == provider:
-                    # Check for Polish UI language variants
-                    if ui_language.lower() in ['polish', 'polski', 'pol']:
-                        return entry['polish_name']
-                    else:
-                        return entry['english_name']
+                    return entry['english_name']
             # Fallback to original code if not found
             return code
         except Exception as e:
@@ -247,15 +243,9 @@ class LanguageManager:
 
             for entry in self.language_display_names:
                 if entry['provider'].lower() == provider_normalized or entry['provider'] == provider:
-                    # Check for Polish UI language variants
-                    if ui_language.lower() in ['polish', 'polski', 'pol']:
-                        if entry['polish_name'] == localized_name:
-                            log_debug(f"Found match (Polish): {localized_name} -> {entry['code']}")
-                            return entry['code']
-                    else:
-                        if entry['english_name'] == localized_name:
-                            log_debug(f"Found match (English): {localized_name} -> {entry['code']}")
-                            return entry['code']
+                    if entry['english_name'] == localized_name:
+                        log_debug(f"Found match (English): {localized_name} -> {entry['code']}")
+                        return entry['code']
 
             log_debug(f"No direct match found, trying fallback...")
 
@@ -285,10 +275,7 @@ class LanguageManager:
             available_names = []
             for entry in self.language_display_names:
                 if entry['provider'].lower() == provider_normalized or entry['provider'] == provider:
-                    if ui_language.lower() in ['polish', 'polski', 'pol']:
-                        available_names.append(entry['polish_name'])
-                    else:
-                        available_names.append(entry['english_name'])
+                    available_names.append(entry['english_name'])
 
             log_debug(f"Available {ui_language} names for {provider}: {sorted(available_names)[:10]}...")  # Show first 10
 
@@ -297,59 +284,13 @@ class LanguageManager:
             log_debug(f"Error getting code from localized name: {e}")
             return None
 
-    def _polish_sort_key(self, text):
-        """
-        Generate a sort key for Polish text that respects Polish alphabetical order.
-        Polish alphabet: a, ą, b, c, ć, d, e, ę, f, g, h, i, j, k, l, ł, m, n, ń, o, ó, p, q, r, s, ś, t, u, v, w, x, y, z, ź, ż
-        """
-        # Polish alphabet mapping to ensure correct sorting order
-        polish_order = {
-            'a': '01', 'ą': '02', 'b': '03', 'c': '04', 'ć': '05', 'd': '06',
-            'e': '07', 'ę': '08', 'f': '09', 'g': '10', 'h': '11', 'i': '12',
-            'j': '13', 'k': '14', 'l': '15', 'ł': '16', 'm': '17', 'n': '18',
-            'ń': '19', 'o': '20', 'ó': '21', 'p': '22', 'q': '23', 'r': '24',
-            's': '25', 'ś': '26', 't': '27', 'u': '28', 'v': '29', 'w': '30',
-            'x': '31', 'y': '32', 'z': '33', 'ź': '34', 'ż': '35'
-        }
-
-        result = []
-        for char in text.lower():
-            if char in polish_order:
-                result.append(polish_order[char])
-            else:
-                # For non-Polish characters, use Unicode value with high prefix to sort after Polish chars
-                result.append(f"99{ord(char):04d}")
-
-        return ''.join(result)
-
-    def sort_polish_names(self, names_list):
-        """Sort a list of names using Polish alphabetical order."""
-        try:
-            return sorted(names_list, key=self._polish_sort_key)
-        except Exception as e:
-            log_debug(f"Error in Polish sorting, falling back to default: {e}")
-            return sorted(names_list)  # Fallback to default sorting
-        """Get English name from Polish name (for MarianMT reverse lookup)."""
-        try:
-            for entry in self.language_display_names:
-                if entry['provider'] == 'marianmt' and entry['polish_name'] == polish_name:
-                    return entry['english_name']
-            return None
-        except Exception as e:
-            log_debug(f"Error getting English name from Polish: {e}")
-            return None
-
     def get_localized_language_name_by_english_name(self, english_name, ui_language='english'):
         """Get localized name by English name (for MarianMT)."""
         try:
             # Look up by English name regardless of provider (for MarianMT)
             for entry in self.language_display_names:
                 if entry['english_name'] == english_name and entry['provider'] == 'marianmt':
-                    # Check for Polish UI language variants
-                    if ui_language.lower() in ['polish', 'polski', 'pol']:
-                        return entry['polish_name']
-                    else:
-                        return entry['english_name']
+                    return entry['english_name']
             # Fallback to original name
             return english_name
         except Exception as e:
@@ -358,31 +299,9 @@ class LanguageManager:
 
     def get_localized_marian_display_name(self, english_display_name, ui_language='english'):
         """
-        Convert MarianMT display name to localized version.
-        Example: "French to English" -> "francuski -> angielski"
+        Return the MarianMT display name for the current UI language.
         """
         try:
-            # Check for Polish UI language variants
-            if ui_language.lower() in ['polish', 'polski', 'pol']:
-                if " to " in english_display_name:
-                    parts = english_display_name.split(" to ")
-                    if len(parts) == 2:
-                        source_lang = parts[0].strip()
-                        target_lang = parts[1].strip()
-
-                        # Look up each language using MarianMT provider
-                        source_lang_localized = self.get_localized_language_name_by_english_name(
-                            source_lang, 'polish'
-                        )
-                        target_lang_localized = self.get_localized_language_name_by_english_name(
-                            target_lang, 'polish'
-                        )
-
-                        if source_lang_localized and target_lang_localized:
-                            # Use "->" instead of "na" for better readability
-                            return f"{source_lang_localized} -> {target_lang_localized}"
-
-            # Fallback to original English name
             return english_display_name
         except Exception as e:
             log_debug(f"Error getting localized MarianMT display name: {e}")

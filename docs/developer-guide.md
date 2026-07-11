@@ -148,7 +148,7 @@ ocr-translator/
     ├── MarianMT_models_short_list.csv # Preferred/recommended MarianMT models
     ├── language_display_names.csv # Localized language display names
     ├── gui_eng.csv                # English UI translations
-    └── gui_pol.csv                # Polish UI translations
+    └── gui_zh.csv                 # Chinese UI translations
 ```
 
 ### Cache and Data Files
@@ -464,7 +464,7 @@ The StatisticsHandler provides real-time monitoring and analysis of API usage:
 - **Cost calculation** with proper currency formatting for different locales
 - **Export functionality** for statistics in CSV and TXT formats
 - **Clipboard integration** for easy data sharing
-- **Multi-language support** with proper Polish number formatting
+- **Multi-language support** for English and Chinese UI/report text
 
 **API Usage Tab Integration:**
 The GUI includes a dedicated "API Usage" tab that displays:
@@ -490,7 +490,7 @@ The system maintains multiple log levels for different use cases:
 
 #### Export and Sharing Features
 - **CSV Export**: Structured data export with proper localization
-- **Text Export**: Human-readable summary reports in English/Polish
+- **Text Export**: Human-readable summary reports in English/Chinese
 - **Clipboard Copy**: Quick sharing with proper formatting for each language
 - **Automatic Currency Formatting**: Proper decimal separators and currency symbols for different locales
 
@@ -737,9 +737,9 @@ GPT 4.1 Nano,gpt-4.1-nano,0.15,0.6,yes,no
 
 ### Multi-Language UI Support
 
-The application supports multiple UI languages through:
+The application UI supports English and Chinese through:
 - `language_ui.py` - UILanguageManager class that loads translations
-- CSV files in `resources/` directory containing UI text translations
+- `resources/gui_eng.csv` and `resources/gui_zh.csv` containing UI text translations
 - Dynamic UI rebuilding when language changes
 
 ### RTL Text Processing System

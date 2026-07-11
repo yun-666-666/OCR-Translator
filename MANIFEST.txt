@@ -140,9 +140,7 @@ docs\gallery\62_eng-to-heb_gemini_ocr.jpg
 docs\gallery\63_eng-to-ara_gemini_ocr.jpg
 docs\gallery\64_eng-to-lux_deepl_trans_gemini_ocr.jpg
 docs\gallery\64_eng-to-lux_deepl_trans_gemini_ocr_small.jpg
-docs\gallery_pl.html
 docs\installation.html
-docs\installation_pl.html
 docs\OCR Test\0162.png
 docs\OCR Test\Czech4.png
 docs\OCR Test\OCR_Gemini_Test.html
@@ -178,7 +176,6 @@ docs\screenshots\Settings_pl.png
 docs\screenshots\united-kingdom-flag-icon.svg
 docs\troubleshooting.md
 docs\user-manual.html
-docs\user-manual_pl.html
 Game_Changing_Translator_Structure.md
 GameChangingTranslator.spec
 GameChangingTranslator_GPU.spec
@@ -267,7 +264,6 @@ resources\gemini_trans_target.csv
 resources\google_trans_source.csv
 resources\google_trans_target.csv
 resources\gui_eng.csv
-resources\gui_pol.csv
 resources\gui_zh.csv
 resources\lang_codes.csv
 resources\language_display_names.csv

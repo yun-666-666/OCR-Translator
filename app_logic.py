@@ -30,7 +30,13 @@ from overlay_manager import (
 )
 from language_manager import LanguageManager
 from language_ui import UILanguageManager
-from modern_ui import apply_white_clean_theme, style_tk_canvas, style_tk_text_widget
+from modern_ui import (
+    apply_white_clean_theme,
+    style_tk_canvas,
+    style_tk_text_widget,
+    start_pipeline_pulse,
+    cancel_pipeline_pulse,
+)
 from runtime_metrics import RuntimeMetrics
 from custom_ai import (
     CustomAIProfileManager,
@@ -1545,50 +1551,15 @@ class GameChangingTranslator:
     def format_currency_for_display(self, amount, unit_suffix=""):
         """Format currency amount according to current UI language."""
         try:
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: "0,04941340 USD/min"
-                amount_str = f"{amount:.8f}"
-                amount_str = amount_str.replace('.', ',')  # Replace decimal point with comma
-
-                # Add thousand separators (space) for large numbers
-                parts = amount_str.split(',')
-                integer_part = parts[0]
-                decimal_part = parts[1] if len(parts) > 1 else ""
-
-                # Add space thousand separators to integer part
-                if len(integer_part) > 3:
-                    formatted_integer = ""
-                    for i, digit in enumerate(reversed(integer_part)):
-                        if i > 0 and i % 3 == 0:
-                            formatted_integer = " " + formatted_integer
-                        formatted_integer = digit + formatted_integer
-                    integer_part = formatted_integer
-
-                if decimal_part:
-                    amount_str = f"{integer_part},{decimal_part}"
-                else:
-                    amount_str = integer_part
-
-                # Translate unit suffixes for Polish
-                if unit_suffix == "/min":
-                    unit_suffix = " USD/min"
-                elif unit_suffix == "/hr":
-                    unit_suffix = " USD/godz."
-                elif unit_suffix == "":
-                    unit_suffix = " USD"
-
-                return f"{amount_str}{unit_suffix}"
-            else:
-                # English format: "$0.04941340/min"
-                prefix = "$" if not unit_suffix else "$"
-                return f"{prefix}{amount:.8f}{unit_suffix}"
+            prefix = "$" if not unit_suffix else "$"
+            return f"{prefix}{amount:.8f}{unit_suffix}"
         except Exception as e:
             log_debug(f"Error formatting currency: {e}")
-            return f"${amount:.8f}{unit_suffix}"  # Fallback to English format
+            return f"${amount:.8f}{unit_suffix}"
 
     def format_cost_for_display(self, cost_value):
-        """Format cost value according to current UI language (legacy method)."""
-        return self.format_currency_for_display(cost_value, " USD" if self.ui_lang.current_lang == 'pol' else "")
+        """Format cost value for display."""
+        return self.format_currency_for_display(cost_value, "")
 
     def format_number_with_separators(self, number):
         """Format integer numbers with thousand separators according to current UI language."""
@@ -1596,21 +1567,7 @@ class GameChangingTranslator:
             # Convert to integer to avoid decimal formatting issues
             num = int(number)
 
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: use space as thousand separator
-                num_str = str(num)
-                if len(num_str) > 3:
-                    formatted = ""
-                    for i, digit in enumerate(reversed(num_str)):
-                        if i > 0 and i % 3 == 0:
-                            formatted = " " + formatted
-                        formatted = digit + formatted
-                    return formatted
-                else:
-                    return num_str
-            else:
-                # English format: use comma as thousand separator
-                return f"{num:,}"
+            return f"{num:,}"
         except Exception as e:
             log_debug(f"Error formatting number with separators: {e}")
             return str(number)  # Fallback to string representation
@@ -2180,7 +2137,7 @@ class GameChangingTranslator:
             try: self.target_overlay.hide()
             except tk.TclError: log_debug("Error hiding target overlay on stop (likely closed).")
 
-        self.start_stop_btn.config(state=tk.NORMAL)
+        self.start_stop_btn.config(state=tk.NORMAL, style="Primary.TButton")
         status_text_stopped = "Status: " + self.ui_lang.get_label("status_stopped", "Stopped (Press ~ to Start)")
         self.status_label.config(text=status_text_stopped)
         log_debug("Translation process stopped.")
@@ -2203,7 +2160,11 @@ class GameChangingTranslator:
             # DO NOT request session ends here. This will be done in _finalize_shutdown.
             # Context clearing is now handled automatically after session end logging in llm_provider_base.py
 
-            self.start_stop_btn.config(text="Start", state=tk.DISABLED)
+            # Cancel amber pulse immediately when user requests stop
+            _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+            _palette = getattr(self, "_pipeline_pulse_palette", None)
+            cancel_pipeline_pulse(self, _dot_canvases, _palette)
+            self.start_stop_btn.config(text="Start", state=tk.DISABLED, style="Primary.TButton")
             self.status_label.config(text="Status: Stopping...")
             self.root.update_idletasks()
 
@@ -2318,10 +2279,15 @@ class GameChangingTranslator:
                         self.translation_handler.start_ocr_session()
                     self.translation_handler.start_translation_session()
 
-                self.start_stop_btn.config(text="Stop", state=tk.NORMAL)
+                self.start_stop_btn.config(text="Stop", state=tk.NORMAL, style="StartRunning.TButton")
                 status_text_running = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
                 self.status_label.config(text=status_text_running)
                 self.root.update_idletasks()
+                # Start amber pipeline pulse — tied to self.is_running being True
+                _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+                _palette = getattr(self, "_pipeline_pulse_palette", None)
+                if _dot_canvases and _palette:
+                    start_pipeline_pulse(self, _dot_canvases, _palette)
 
                 from worker_threads import run_capture_thread, run_ocr_thread, run_translation_thread
 
@@ -2458,6 +2424,10 @@ class GameChangingTranslator:
         """Rebuild visible UI tabs after the UI language changes."""
         try:
             self.start_ui_update()
+            # Stop any pulse tied to widgets that are about to be rebuilt.
+            _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+            _palette = getattr(self, "_pipeline_pulse_palette", None)
+            cancel_pipeline_pulse(self, _dot_canvases, _palette)
             self.update_translation_model_names()
             selected_index = 0
             try:
@@ -2513,7 +2483,15 @@ class GameChangingTranslator:
 
             if self.is_running:
                 status_text = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
-                self.start_stop_btn.config(text=self.ui_lang.get_label("stop_btn"))
+                self.start_stop_btn.config(
+                    text=self.ui_lang.get_label("stop_btn"),
+                    style="StartRunning.TButton",
+                )
+                # Restart pulse animation after tab rebuild
+                _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+                _palette = getattr(self, "_pipeline_pulse_palette", None)
+                if _dot_canvases and _palette:
+                    start_pipeline_pulse(self, _dot_canvases, _palette)
             else:
                 status_text = "Status: " + self.ui_lang.get_label("status_stopped", "Stopped (Press ~ to Start)")
                 if not self.KEYBOARD_AVAILABLE:
@@ -2593,6 +2571,10 @@ class GameChangingTranslator:
     def on_closing(self):
         log_debug("Main window close requested. Initiating shutdown...")
         self._app_is_closing = True
+        # Cancel any running amber pulse immediately
+        _dot_canvases = getattr(self, "_pipeline_dot_canvases", None)
+        _palette = getattr(self, "_pipeline_pulse_palette", None)
+        cancel_pipeline_pulse(self, _dot_canvases, _palette)
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)

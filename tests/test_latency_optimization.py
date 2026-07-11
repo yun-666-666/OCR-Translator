@@ -3899,7 +3899,6 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
             "requirements.txt",
             "ocr_translator_config.example.ini",
             "resources/gui_eng.csv",
-            "resources/gui_pol.csv",
             "resources/gui_zh.csv",
         ]
 

@@ -8681,10 +8681,13 @@ class UILanguageManagerTests(unittest.TestCase):
     def test_chinese_display_name_is_not_mojibake_and_legacy_name_still_loads(self):
         manager = UILanguageManager()
 
+        self.assertEqual(set(manager.get_available_languages()), {"eng", "zh"})
         self.assertEqual(manager.get_available_languages()["zh"], "\u4e2d\u6587")
         self.assertEqual(manager.get_language_code_from_name("\u4e2d\u6587"), "zh")
         self.assertEqual(manager.get_language_code_from_name("\u6d93\ue15f\u6783"), "zh")
         self.assertEqual(manager.normalize_display_name("\u6d93\ue15f\u6783"), "\u4e2d\u6587")
+        self.assertEqual(manager.get_language_code_from_name("polski"), "eng")
+        self.assertEqual(manager.normalize_display_name("Polish"), "English")
 
 
 class ProfileNetworkTaskTests(unittest.TestCase):
