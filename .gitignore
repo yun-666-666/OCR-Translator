@@ -103,6 +103,7 @@ sync_to_github_fixed.bat
 ocr_translator_config.ini
 !ocr_translator_config.example.ini
 custom_ai_profiles.json
+.custom_ai_profiles.json.*.tmp
 custom_ai_translation_cache.json
 custom_ai_translation_cache.json.tmp
 custom_ai_translation_cache.sqlite3

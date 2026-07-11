@@ -292,6 +292,129 @@ class PaddleOCRBackendTests(unittest.TestCase):
         self.assertIsInstance(call_kwargs["input"], list)
         self.assertEqual(len(call_kwargs["input"]), 2)
 
+    def test_subtitle_fast_path_success_log_is_coalesced_and_content_free(self):
+        import paddle_ocr_backend
+
+        image = Image.new("RGB", (720, 120), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((180, 36, 540, 54), fill="white")
+        draw.rectangle((170, 76, 550, 94), fill="white")
+        fake_engine = Mock()
+        fake_engine.predict.return_value = [
+            {"rec_text": "First line", "rec_score": 0.97},
+            {"rec_text": "Second line", "rec_score": 0.96},
+        ]
+
+        line_images = [
+            Image.new("RGB", (100, 20), "white"),
+            Image.new("RGB", (100, 20), "white"),
+        ]
+        with patch.object(
+            paddle_ocr_backend,
+            "prepare_paddleocr_subtitle_line_images",
+            return_value=line_images,
+        ):
+            with patch.object(
+                paddle_ocr_backend,
+                "get_paddleocr_text_recognition_engine",
+                return_value=fake_engine,
+            ):
+                with patch.object(
+                    paddle_ocr_backend,
+                    "log_debug_coalesced",
+                ) as log_coalesced:
+                    text, lines = (
+                        paddle_ocr_backend.recognize_subtitle_with_paddleocr(
+                            image,
+                            paddle_ocr_backend.PaddleOCRSettings(
+                                upscale=1.0,
+                                min_score=0.35,
+                            ),
+                            keep_linebreaks=True,
+                        )
+                    )
+
+        self.assertEqual(text, "First line\nSecond line")
+        self.assertEqual(len(lines), 2)
+        log_coalesced.assert_called_once_with(
+            "paddle-subtitle-fast-path-success",
+            "PaddleOCR subtitle fast path recognized lines=2 chars=22",
+            interval_seconds=5.0,
+        )
+        logged_message = log_coalesced.call_args.args[1]
+        self.assertNotIn("First line", logged_message)
+        self.assertNotIn("Second line", logged_message)
+
+    def test_subtitle_filter_log_is_coalesced_and_content_free(self):
+        import paddle_ocr_backend
+
+        with patch.object(paddle_ocr_backend, "log_debug") as direct_log:
+            with patch.object(
+                paddle_ocr_backend,
+                "log_debug_coalesced",
+            ) as log_coalesced:
+                text, lines = (
+                    paddle_ocr_backend.flatten_paddleocr_text_recognition_result(
+                        [{
+                            "rec_text": "subtitle-secret",
+                            "rec_score": 0.1,
+                        }],
+                        min_score=0.35,
+                    )
+                )
+
+        self.assertEqual(text, "")
+        self.assertEqual(lines, [])
+        direct_log.assert_not_called()
+        log_coalesced.assert_called_once_with(
+            "paddle-subtitle-fast-path-low-confidence",
+            "PaddleOCR subtitle fast path filtered low-confidence line "
+            "chars=15 lines=1 confidence=0.100",
+            interval_seconds=5.0,
+        )
+        self.assertNotIn(
+            "subtitle-secret",
+            log_coalesced.call_args.args[1],
+        )
+
+    def test_subtitle_no_line_crop_log_is_coalesced(self):
+        import paddle_ocr_backend
+
+        image = Image.new("RGB", (320, 80), "black")
+        with patch.object(
+            paddle_ocr_backend,
+            "prepare_paddleocr_subtitle_line_images",
+            return_value=[],
+        ):
+            with patch.object(
+                paddle_ocr_backend,
+                "recognize_with_paddleocr",
+                return_value=("Fallback text", []),
+            ):
+                with patch.object(
+                    paddle_ocr_backend,
+                    "log_debug",
+                ) as direct_log:
+                    with patch.object(
+                        paddle_ocr_backend,
+                        "log_debug_coalesced",
+                    ) as log_coalesced:
+                        text, _lines = (
+                            paddle_ocr_backend.recognize_subtitle_with_paddleocr(
+                                image,
+                                paddle_ocr_backend.PaddleOCRSettings(),
+                            )
+                        )
+
+        self.assertEqual(text, "Fallback text")
+        direct_log.assert_not_called()
+        log_coalesced.assert_called_once_with(
+            "paddle-subtitle-fast-path-no-line-crop",
+            "PaddleOCR subtitle fast path found no line crop; "
+            "falling back to full OCR",
+            interval_seconds=5.0,
+        )
+
     def test_subtitle_recognition_falls_back_to_full_ocr_without_line_crop(self):
         from paddle_ocr_backend import PaddleOCRSettings, recognize_subtitle_with_paddleocr
 
@@ -317,6 +440,52 @@ class PaddleOCRBackendTests(unittest.TestCase):
                 )
 
         self.assertEqual(text, "Fallback text")
+
+    def test_subtitle_fast_path_error_log_has_sanitized_bounded_reason(self):
+        import paddle_ocr_backend
+
+        image = Image.new("RGB", (720, 96), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((230, 32, 490, 60), fill="white")
+        private_reason = (
+            "CUDA kernel unavailable for 'subtitle-secret'\n"
+            + ("diagnostic " * 40)
+        )
+
+        with patch.object(
+            paddle_ocr_backend,
+            "get_paddleocr_text_recognition_engine",
+            side_effect=RuntimeError(private_reason),
+        ):
+            with patch.object(
+                paddle_ocr_backend,
+                "recognize_with_paddleocr",
+                return_value=("Fallback text", []),
+            ):
+                with patch.object(
+                    paddle_ocr_backend,
+                    "log_debug_coalesced",
+                ) as log_coalesced:
+                    text, _lines = (
+                        paddle_ocr_backend.recognize_subtitle_with_paddleocr(
+                            image,
+                            paddle_ocr_backend.PaddleOCRSettings(),
+                        )
+                    )
+
+        self.assertEqual(text, "Fallback text")
+        error_calls = [
+            call
+            for call in log_coalesced.call_args_list
+            if call.args[0] == "paddle-subtitle-fast-path-error"
+        ]
+        self.assertEqual(len(error_calls), 1)
+        message = error_calls[0].args[1]
+        self.assertIn("CUDA kernel unavailable", message)
+        self.assertIn("<redacted>", message)
+        self.assertNotIn("subtitle-secret", message)
+        self.assertNotIn("\n", message)
+        self.assertLessEqual(len(message), 220)
 
 
 class PaddleOCRConfigAndUITests(unittest.TestCase):

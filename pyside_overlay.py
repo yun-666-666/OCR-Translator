@@ -134,8 +134,53 @@ if PYSIDE6_AVAILABLE:
                 }
             """)
 
-        def set_rtl_text(self, text: str, language_code: str = None, bg_color: str = "#2c3e50", text_color: str = "#ecf0f1", font_size: int = 14):
+        def _apply_font_if_changed(self, font_family=None, font_size=None):
+            """Apply a font only when its effective family or size changed."""
+            current_font = self.font()
+            target_family = current_font.family()
+            has_explicit_family = (
+                font_family is not None and bool(str(font_family).strip())
+            )
+            if has_explicit_family:
+                target_family = str(font_family).strip()
+
+            try:
+                target_size = int(font_size)
+            except (TypeError, ValueError):
+                target_size = current_font.pointSize()
+            if target_size <= 0:
+                target_size = current_font.pointSize()
+
+            family_changed = (
+                has_explicit_family and current_font.family() != target_family
+            )
+            size_changed = current_font.pointSize() != target_size
+            if not family_changed and not size_changed:
+                return False
+
+            updated_font = QFont(current_font)
+            if family_changed:
+                updated_font.setFamily(target_family)
+            if size_changed:
+                updated_font.setPointSize(target_size)
+            self.setFont(updated_font)
+            log_debug(
+                f"PySide RTLTextDisplay: Updated font to {target_family} {target_size}"
+            )
+            return True
+
+        def set_rtl_text(
+            self,
+            text: str,
+            language_code: str = None,
+            bg_color: str = "#2c3e50",
+            text_color: str = "#ecf0f1",
+            font_size: int = 14,
+            font_family=None,
+        ):
             """Set text content while respecting RTL/LTR and applying inline HTML."""
+            self._apply_font_if_changed(font_family, font_size)
+
             # Store current state for color updates
             self._current_text = text
             self._current_language = language_code
@@ -173,12 +218,12 @@ if PYSIDE6_AVAILABLE:
 
             if is_rtl:
                 self.setLayoutDirection(Qt.RightToLeft)
-                html_text = f"""<div style="text-align: right; direction: rtl; font-family: '{self.font().family()}'; font-size: {font_size}pt; color: {self._fg_color};">
+                html_text = f"""<div style="text-align: right; direction: rtl; font-family: '{self.font().family()}'; font-size: {self.font().pointSize()}pt; color: {self._fg_color};">
                 {html_processed}
                 </div>"""
             else:
                 self.setLayoutDirection(Qt.LeftToRight)
-                html_text = f"""<div style="text-align: left; direction: ltr; font-family: '{self.font().family()}'; font-size: {font_size}pt; color: {self._fg_color};">
+                html_text = f"""<div style="text-align: left; direction: ltr; font-family: '{self.font().family()}'; font-size: {self.font().pointSize()}pt; color: {self._fg_color};">
                 {html_processed}
                 </div>"""
 
@@ -279,20 +324,20 @@ if PYSIDE6_AVAILABLE:
                         font_family = font_spec[0]
                         font_size = int(font_spec[1])
                         
-                        # Update the widget font
-                        qfont = QFont(font_family, font_size)
-                        self.setFont(qfont)
-                        
-                        # Re-render current text with new font if text exists
-                        if hasattr(self, '_current_text') and hasattr(self, '_current_language'):
+                        font_changed = self._apply_font_if_changed(
+                            font_family, font_size
+                        )
+
+                        # Re-render current text only after a real font change.
+                        if font_changed and hasattr(self, '_current_text') and hasattr(self, '_current_language'):
                             self.set_rtl_text(
                                 self._current_text, 
                                 self._current_language, 
                                 getattr(self, '_bg_color', '#2c3e50'), 
                                 getattr(self, '_fg_color', '#ecf0f1'), 
-                                font_size
+                                font_size,
+                                font_family=font_family,
                             )
-                        log_debug(f"PySide RTLTextDisplay: Updated font to {font_family} {font_size}")
                     else:
                         log_debug(f"Unsupported font specification format: {font_spec}")
                 except Exception as e:

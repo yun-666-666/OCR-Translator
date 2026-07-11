@@ -94,6 +94,147 @@ class LatencyCaptureBackendTests(unittest.TestCase):
         pyautogui_module.screenshot.assert_called_once_with(region=(5, 6, 7, 8))
 
 
+class CaptureOcrHotPathLoggingTests(unittest.TestCase):
+    def test_capture_success_uses_coalesced_backend_geometry_key(self):
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class FakeShot:
+            size = (1, 1)
+            bgra = bytes([30, 20, 10, 255])
+
+        class FakeMss:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def grab(self, _monitor):
+                return FakeShot()
+
+        with patch.object(
+            ocr_utils,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            image = ocr_utils.capture_screen_region(
+                (10, 20, 30, 40),
+                backend="mss",
+                mss_factory=FakeMss,
+                allow_fallback=False,
+            )
+
+        self.assertEqual(image.size, (1, 1))
+        log_coalesced.assert_called_once_with(
+            ("capture-success", "mss", 30, 40),
+            "CAPTURE: mss captured 30x40",
+            interval_seconds=5.0,
+        )
+
+    def test_capture_fallback_remains_immediate_while_success_is_coalesced(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        fallback_image = Image.new("RGB", (2, 2), (1, 2, 3))
+        pyautogui_module = types.SimpleNamespace(
+            screenshot=Mock(return_value=fallback_image)
+        )
+
+        with patch.object(ocr_utils, "log_debug") as immediate_log:
+            with patch.object(
+                ocr_utils,
+                "log_debug_coalesced",
+            ) as log_coalesced:
+                result = ocr_utils.capture_screen_region(
+                    (5, 6, 7, 8),
+                    backend="auto",
+                    mss_factory=lambda: (_ for _ in ()).throw(
+                        RuntimeError("mss unavailable")
+                    ),
+                    pyautogui_module=pyautogui_module,
+                )
+
+        self.assertIs(result, fallback_image)
+        self.assertTrue(
+            any(
+                "falling back to pyautogui" in call.args[0]
+                for call in immediate_log.call_args_list
+            )
+        )
+        log_coalesced.assert_called_once_with(
+            ("capture-success", "pyautogui", 7, 8),
+            "CAPTURE: pyautogui captured 7x8",
+            interval_seconds=5.0,
+        )
+
+    def test_ocr_frame_cache_hit_uses_coalesced_log_without_changing_value(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        cache = ocr_utils.OCRFrameCache(max_size=2)
+        key = ("frame", "paddleocr", "en")
+        cache.put(key, "recognized subtitle")
+
+        with patch.object(
+            ocr_utils,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            result = cache.get(key)
+
+        self.assertEqual(result, "recognized subtitle")
+        log_coalesced.assert_called_once_with(
+            "ocr-frame-cache-hit",
+            "OCR CACHE: frame hit",
+            interval_seconds=5.0,
+        )
+
+    def test_worker_timing_routes_normal_and_slow_events_independently(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        with patch.object(
+            worker_threads,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            worker_threads._log_hot_path_timing(
+                "capture-mss",
+                "capture took 0.010s",
+                duration_seconds=0.010,
+                slow_threshold_seconds=0.050,
+            )
+            worker_threads._log_hot_path_timing(
+                "capture-mss",
+                "capture took 0.050s",
+                duration_seconds=0.050,
+                slow_threshold_seconds=0.050,
+            )
+
+        self.assertEqual(
+            log_coalesced.call_args_list,
+            [
+                unittest.mock.call(
+                    ("capture-mss", "normal"),
+                    "capture took 0.010s",
+                    interval_seconds=5.0,
+                ),
+                unittest.mock.call(
+                    ("capture-mss", "slow"),
+                    "SLOW: capture took 0.050s",
+                    interval_seconds=1.0,
+                ),
+            ],
+        )
+
+    def test_paddle_routing_uses_stable_coalesced_log(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        with patch.object(
+            worker_threads,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            worker_threads._log_paddle_ocr_route()
+
+        log_coalesced.assert_called_once_with(
+            "ocr-routing-paddle",
+            "WT: OCR routing to PaddleOCR PP-OCRv6",
+            interval_seconds=5.0,
+        )
+
+
 class LatencyCaptureBackendSelectorTests(unittest.TestCase):
     def _make_selector(self, capture_func, monotonic_times=None, sample_count=2):
         ocr_utils = import_ocr_utils_for_tests()
@@ -228,6 +369,39 @@ class LatencyCaptureBackendSelectorTests(unittest.TestCase):
 
 
 class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
+    def test_local_capture_signature_allows_one_duplicate_before_skipping(self):
+        worker_threads = import_worker_threads_for_tests()
+        first_signature = ("frame-a", 10, 20, 300, 80, "mss")
+        changed_signature = ("frame-b", 10, 20, 300, 80, "mss")
+
+        last, repeats, enqueue = worker_threads._advance_local_capture_signature(
+            None,
+            0,
+            first_signature,
+        )
+        self.assertEqual((last, repeats, enqueue), (first_signature, 0, True))
+
+        last, repeats, enqueue = worker_threads._advance_local_capture_signature(
+            last,
+            repeats,
+            first_signature,
+        )
+        self.assertEqual((repeats, enqueue), (1, True))
+
+        last, repeats, enqueue = worker_threads._advance_local_capture_signature(
+            last,
+            repeats,
+            first_signature,
+        )
+        self.assertEqual((repeats, enqueue), (2, False))
+
+        last, repeats, enqueue = worker_threads._advance_local_capture_signature(
+            last,
+            repeats,
+            changed_signature,
+        )
+        self.assertEqual((last, repeats, enqueue), (changed_signature, 0, True))
+
     def test_unknown_capture_backend_config_uses_auto_selector(self):
         worker_threads = import_worker_threads_for_tests()
 
@@ -571,6 +745,19 @@ class LatencyShutdownTests(unittest.TestCase):
             get_label=lambda _key, default=None: default or _key
         )
         app.toggle_in_progress = True
+        app.pending_translation_request = {
+            "text": "old subtitle",
+            "ocr_sequence_number": 0,
+            "requested_at_monotonic": 10.0,
+        }
+        app.pending_translation_flush_scheduled = True
+        app.pending_translation_flush_deadline_monotonic = 70.0
+        app.pending_translation_flush_generation = 2
+        app.latest_translation_candidate = dict(app.pending_translation_request)
+        app.translation_profile_refresh_generation = 5
+        app.last_translation_submit_monotonic = 12.0
+        app.active_translation_inflight_keys = {"old-request"}
+        app.active_translation_started_monotonic = {4: 12.0}
 
         with patch.object(app_logic, "log_debug"):
             app._finalize_shutdown()
@@ -581,6 +768,12 @@ class LatencyShutdownTests(unittest.TestCase):
         app.clear_ocr_stability_gate.assert_called_once_with(
             "translation stopped"
         )
+        self.assertIsNone(app.pending_translation_request)
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertIsNone(app.latest_translation_candidate)
+        self.assertEqual(app.pending_translation_flush_generation, 3)
+        self.assertEqual(app.translation_profile_refresh_generation, 6)
+        self.assertEqual(app.last_translation_submit_monotonic, 0.0)
         self.assertFalse(app.toggle_in_progress)
 
     def test_graceful_shutdown_waits_for_active_custom_ai_sets(self):
@@ -626,6 +819,104 @@ class LatencyShutdownTests(unittest.TestCase):
         app._finalize_shutdown.assert_not_called()
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(scheduled[0][0], 100)
+
+
+class TranslationSessionBoundaryTests(unittest.TestCase):
+    def test_scheduler_session_reset_invalidates_previous_session_state(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            pending_translation_request={
+                "text": "old subtitle",
+                "ocr_sequence_number": 0,
+                "requested_at_monotonic": 10.0,
+            },
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=70.0,
+            pending_translation_flush_generation=7,
+            latest_translation_candidate={
+                "text": "old subtitle",
+                "ocr_sequence_number": 0,
+                "requested_at_monotonic": 10.0,
+            },
+            translation_profile_refresh_generation=3,
+            last_translation_submit_monotonic=12.0,
+            active_translation_inflight_keys={"old-request"},
+            active_translation_started_monotonic={4: 12.0},
+            translation_sequence_counter=9,
+            latest_translation_sequence_started=8,
+            last_displayed_translation_sequence=4,
+            update_translation_text=Mock(),
+        )
+
+        worker_threads.reset_translation_scheduler_session_state(
+            app,
+            "new session",
+        )
+
+        self.assertIsNone(app.pending_translation_request)
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_deadline_monotonic, 0.0)
+        self.assertEqual(app.pending_translation_flush_generation, 8)
+        self.assertIsNone(app.latest_translation_candidate)
+        self.assertEqual(app.translation_profile_refresh_generation, 4)
+        self.assertEqual(app.last_translation_submit_monotonic, 0.0)
+        self.assertEqual(app.active_translation_inflight_keys, set())
+        self.assertEqual(app.active_translation_started_monotonic, {})
+        self.assertEqual(app.last_displayed_translation_sequence, 9)
+
+        worker_threads.process_translation_response(
+            app,
+            "old session result",
+            translation_sequence=9,
+            original_text="old subtitle",
+            ocr_sequence_number=0,
+        )
+        app.update_translation_text.assert_not_called()
+
+    def test_scheduler_session_reset_preserves_timed_out_active_request_ownership(self):
+        worker_threads = import_worker_threads_for_tests()
+        inflight_key = ("custom_ai", "still running", "request-snapshot")
+        app = types.SimpleNamespace(
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=2,
+            latest_translation_candidate=None,
+            translation_profile_refresh_generation=4,
+            last_translation_submit_monotonic=22.0,
+            active_translation_calls={7},
+            active_translation_inflight_keys={inflight_key},
+            active_translation_started_monotonic={7: 20.0, 6: 10.0},
+            translation_sequence_counter=7,
+            latest_translation_sequence_started=7,
+            last_displayed_translation_sequence=5,
+        )
+
+        worker_threads.reset_translation_scheduler_session_state(
+            app,
+            "shutdown timeout",
+        )
+
+        self.assertEqual(app.active_translation_calls, {7})
+        self.assertEqual(app.active_translation_inflight_keys, {inflight_key})
+        self.assertEqual(app.active_translation_started_monotonic, {7: 20.0})
+        self.assertEqual(app.last_displayed_translation_sequence, 7)
+
+    def test_app_delegates_translation_scheduler_session_reset(self):
+        import app_logic
+
+        worker_threads = import_worker_threads_for_tests()
+        app = object.__new__(app_logic.GameChangingTranslator)
+
+        with patch.object(
+            worker_threads,
+            "reset_translation_scheduler_session_state",
+        ) as reset_state:
+            app._reset_translation_scheduler_session_state(
+                "translation starting"
+            )
+
+        reset_state.assert_called_once_with(app, "translation starting")
 
 
 class ApiOcrImagePayloadEncodingTests(unittest.TestCase):
@@ -735,6 +1026,252 @@ class ApiOcrImagePayloadEncodingTests(unittest.TestCase):
         self.assertEqual(ocr_utils.normalize_api_ocr_image_format("png"), "png")
         self.assertEqual(ocr_utils.normalize_api_ocr_image_format("jpg"), "jpeg")
         self.assertEqual(ocr_utils.normalize_api_ocr_image_format("bad"), "webp")
+
+
+class TranslationInactivityClearTests(unittest.TestCase):
+    def _make_app(self):
+        scheduled = []
+        displayed = []
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+        app = types.SimpleNamespace(
+            is_running=True,
+            previous_text="",
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            translation_queue=queue.Queue(),
+            ocr_stability_gate=types.SimpleNamespace(
+                has_pending=lambda: False,
+            ),
+            last_successful_translation_time=95.0,
+            last_displayed_translation_sequence=7,
+            last_local_ocr_submitted_text="Same subtitle",
+            last_local_ocr_submitted_norm="same subtitle",
+            last_local_ocr_submitted_scope=("scope",),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+            ),
+            display_manager=types.SimpleNamespace(
+                _update_translation_text_on_main_thread=displayed.append,
+            ),
+            update_translation_text=displayed.append,
+            runtime_metrics=metrics,
+        )
+        return app, scheduled, displayed, metrics
+
+    def test_active_and_pending_work_block_inactivity_clear_scheduling(self):
+        worker_threads = import_worker_threads_for_tests()
+        cases = {
+            "stopped app": lambda app: setattr(app, "is_running", False),
+            "source text": lambda app: setattr(app, "previous_text", "Text"),
+            "active call": lambda app: app.active_translation_calls.add(1),
+            "inflight identity": lambda app: app.active_translation_inflight_keys.add(
+                ("custom_ai", "Text")
+            ),
+            "pending request": lambda app: setattr(
+                app,
+                "pending_translation_request",
+                {"text": "Text"},
+            ),
+            "pending flush": lambda app: setattr(
+                app,
+                "pending_translation_flush_scheduled",
+                True,
+            ),
+            "legacy queue": lambda app: app.translation_queue.put("Text"),
+            "OCR stability": lambda app: setattr(
+                app,
+                "ocr_stability_gate",
+                types.SimpleNamespace(has_pending=lambda: True),
+            ),
+        }
+
+        for name, configure in cases.items():
+            with self.subTest(name=name):
+                app, scheduled, displayed, _metrics = self._make_app()
+                configure(app)
+
+                result = worker_threads._schedule_inactive_translation_clear(
+                    app,
+                    inactive_duration=5.0,
+                    timeout_seconds=2.0,
+                )
+
+                self.assertFalse(result)
+                self.assertEqual(scheduled, [])
+                self.assertEqual(displayed, [])
+
+    def test_inactivity_clear_runs_once_and_resets_local_resubmit_state(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, scheduled, displayed, metrics = self._make_app()
+        expected_epoch = (95.0, 7)
+
+        self.assertTrue(
+            worker_threads._should_skip_local_ocr_resubmit(
+                app,
+                "Same subtitle",
+            )
+        )
+        self.assertTrue(
+            worker_threads._schedule_inactive_translation_clear(
+                app,
+                inactive_duration=5.0,
+                timeout_seconds=2.0,
+            )
+        )
+        self.assertFalse(
+            worker_threads._schedule_inactive_translation_clear(
+                app,
+                inactive_duration=5.1,
+                timeout_seconds=2.0,
+            )
+        )
+        self.assertEqual(len(scheduled), 1)
+
+        _delay, callback, args = scheduled[0]
+        callback(*args)
+
+        self.assertEqual(displayed, [""])
+        self.assertEqual(
+            app.translation_inactivity_cleared_epoch,
+            expected_epoch,
+        )
+        self.assertIsNone(app.last_local_ocr_submitted_text)
+        self.assertIsNone(app.last_local_ocr_submitted_norm)
+        self.assertIsNone(app.last_local_ocr_submitted_scope)
+        self.assertFalse(
+            worker_threads._should_skip_local_ocr_resubmit(
+                app,
+                "Same subtitle",
+            )
+        )
+        self.assertEqual(
+            metrics.snapshot()["counters"]["translation_inactivity_clear"],
+            1,
+        )
+        self.assertFalse(
+            worker_threads._schedule_inactive_translation_clear(
+                app,
+                inactive_duration=6.0,
+                timeout_seconds=2.0,
+            )
+        )
+        self.assertEqual(len(scheduled), 1)
+
+    def test_display_activity_observation_advances_for_success_and_errors(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, _scheduled, _displayed, _metrics = self._make_app()
+
+        last_time, last_sequence = (
+            worker_threads._advance_translation_display_activity(
+                app,
+                now=100.0,
+                last_display_time=90.0,
+                last_display_sequence=7,
+            )
+        )
+        self.assertEqual((last_time, last_sequence), (95.0, 7))
+
+        app.last_displayed_translation_sequence = 8
+        last_time, last_sequence = (
+            worker_threads._advance_translation_display_activity(
+                app,
+                now=101.0,
+                last_display_time=last_time,
+                last_display_sequence=last_sequence,
+            )
+        )
+        self.assertEqual((last_time, last_sequence), (101.0, 8))
+
+    def test_newer_display_epoch_invalidates_scheduled_clear(self):
+        worker_threads = import_worker_threads_for_tests()
+        mutations = {
+            "success time": lambda app: setattr(
+                app,
+                "last_successful_translation_time",
+                96.0,
+            ),
+            "display sequence": lambda app: setattr(
+                app,
+                "last_displayed_translation_sequence",
+                8,
+            ),
+        }
+
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                app, scheduled, displayed, metrics = self._make_app()
+                self.assertTrue(
+                    worker_threads._schedule_inactive_translation_clear(
+                        app,
+                        inactive_duration=5.0,
+                        timeout_seconds=2.0,
+                    )
+                )
+                mutate(app)
+
+                _delay, callback, args = scheduled[0]
+                callback(*args)
+
+                self.assertEqual(displayed, [])
+                self.assertIsNone(
+                    getattr(
+                        app,
+                        "translation_inactivity_clear_scheduled_epoch",
+                        None,
+                    )
+                )
+                self.assertIsNone(
+                    getattr(
+                        app,
+                        "translation_inactivity_cleared_epoch",
+                        None,
+                    )
+                )
+                self.assertEqual(
+                    metrics.snapshot()["counters"].get(
+                        "translation_inactivity_clear",
+                        0,
+                    ),
+                    0,
+                )
+
+    def test_pending_work_appearing_before_ui_callback_cancels_clear(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, scheduled, displayed, metrics = self._make_app()
+        self.assertTrue(
+            worker_threads._schedule_inactive_translation_clear(
+                app,
+                inactive_duration=5.0,
+                timeout_seconds=2.0,
+            )
+        )
+        app.active_translation_calls.add(42)
+
+        _delay, callback, args = scheduled[0]
+        callback(*args)
+
+        self.assertEqual(displayed, [])
+        self.assertIsNone(
+            getattr(
+                app,
+                "translation_inactivity_clear_scheduled_epoch",
+                None,
+            )
+        )
+        self.assertIsNone(
+            getattr(app, "translation_inactivity_cleared_epoch", None)
+        )
+        self.assertEqual(
+            metrics.snapshot()["counters"].get(
+                "translation_inactivity_clear",
+                0,
+            ),
+            0,
+        )
 
 
 class LatencyTranslationCacheTests(unittest.TestCase):
@@ -1513,6 +2050,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 self.committed_modes = []
                 self.cooldown_modes = []
                 self.translate_modes = []
+                self.translate_snapshots = []
 
             def get_cached_translation_for_display(self, text):
                 return None
@@ -1530,6 +2068,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                     "inflight_key": ("custom_ai", text, "resolved-stream"),
                     "latency_mode": "stream",
                     "reason": "p90_high",
+                    "profile": {"id": "relay", "model": "original"},
+                    "cache_params": {"model": "original"},
                 }
 
             def commit_custom_ai_latency_mode_snapshot(self, snapshot):
@@ -1550,8 +2090,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 stream_callback=None,
                 translation_sequence=None,
                 latency_mode=None,
+                request_snapshot=None,
             ):
                 self.translate_modes.append(latency_mode)
+                self.translate_snapshots.append(request_snapshot)
                 if stream_callback:
                     stream_callback("translated")
                 return "translated"
@@ -1598,6 +2140,14 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         fn(*args)
 
         self.assertEqual(handler.translate_modes, ["stream"])
+        self.assertIsNotNone(
+            handler.translate_snapshots[0],
+            "the resolved request snapshot must reach the worker handler",
+        )
+        self.assertEqual(
+            handler.translate_snapshots[0]["profile"]["model"],
+            "original",
+        )
         self.assertEqual(app.active_translation_inflight_keys, set())
 
     def test_start_async_translation_queues_latest_request_during_submit_cooldown(self):
@@ -1923,6 +2473,99 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(app.pending_translation_request["text"], "Latest")
         self.assertEqual(app.pending_translation_flush_generation, 2)
         self.assertEqual(app.pending_translation_flush_deadline_monotonic, 102.0)
+
+    def test_matching_pending_translation_is_coalesced_before_cache_lookup(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+        cache_lookup = Mock(return_value=None)
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda *args: scheduled.append(args),
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            translation_handler=types.SimpleNamespace(
+                get_cached_translation_for_display=cache_lookup,
+                get_translation_provider_cooldown_seconds=lambda **kwargs: 10.0,
+                get_translation_submit_interval_seconds=lambda text: 0.3,
+                get_translation_concurrency_limit=lambda: 1,
+            ),
+            pending_translation_request={
+                "text": "Same",
+                "ocr_sequence_number": 8,
+                "requested_at_monotonic": 99.5,
+            },
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=110.0,
+            pending_translation_flush_generation=4,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            last_translation_submit_monotonic=0.0,
+            runtime_metrics=metrics,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads.start_async_translation(app, "Same", 9)
+
+        self.assertEqual(app.pending_translation_request["ocr_sequence_number"], 9)
+        self.assertEqual(
+            app.pending_translation_request["requested_at_monotonic"],
+            99.5,
+        )
+        cache_lookup.assert_not_called()
+        self.assertEqual(scheduled, [])
+        self.assertEqual(
+            metrics.snapshot()["counters"]["pending_translation_coalesced"],
+            1,
+        )
+
+    def test_unscheduled_matching_pending_translation_reenters_queue_path(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+        cache_lookup = Mock(return_value=None)
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda *args: scheduled.append(args),
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            translation_handler=types.SimpleNamespace(
+                get_cached_translation_for_display=cache_lookup,
+                get_translation_provider_cooldown_seconds=lambda **kwargs: 10.0,
+                get_translation_submit_interval_seconds=lambda text: 0.3,
+                get_translation_concurrency_limit=lambda: 1,
+            ),
+            pending_translation_request={
+                "text": "Same",
+                "ocr_sequence_number": 8,
+                "requested_at_monotonic": 99.5,
+            },
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=4,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            last_translation_submit_monotonic=0.0,
+            runtime_metrics=metrics,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads.start_async_translation(app, "Same", 9)
+
+        cache_lookup.assert_called_once_with("Same")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(app.pending_translation_request["ocr_sequence_number"], 9)
+        self.assertEqual(
+            metrics.snapshot()["counters"].get(
+                "pending_translation_coalesced",
+                0,
+            ),
+            0,
+        )
 
     def test_pending_translation_preserves_request_arrival_time_until_submit(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2794,6 +3437,25 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         self.assertEqual(submitted, ["The treasure door is open."])
         self.assertEqual(scheduled, [])
 
+    def test_pending_local_ocr_candidate_does_not_probe_translation_cache(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            get_cached_translation_for_display = Mock(return_value=None)
+
+        app = self._make_app(scheduled, handler=Handler())
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            result = worker_threads._route_local_ocr_candidate_for_translation(
+                app,
+                "The treas",
+                now=100.0,
+            )
+
+        self.assertEqual(result, "pending")
+        app.translation_handler.get_cached_translation_for_display.assert_not_called()
+        start_translation.assert_not_called()
+
     def test_truncated_ocr_candidate_waits_for_more_complete_text(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []
@@ -2990,6 +3652,243 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         app.ocr_stability_gate.clear.assert_called()
 
 
+class RuntimeLogCoalescingTests(unittest.TestCase):
+    def test_pending_queue_uses_content_free_coalesced_log(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            runtime_metrics=metrics,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            with patch.object(
+                worker_threads,
+                "log_debug_coalesced",
+            ) as log_coalesced:
+                worker_threads._queue_pending_translation_request(
+                    app,
+                    "secret queued subtitle",
+                    7,
+                    0.5,
+                    "active calls 2/2",
+                )
+
+        log_coalesced.assert_called_once_with(
+            "translation-pending-queue",
+            "LATENCY: queued latest translation request for OCR batch 7 "
+            "delay=0.500s reason=active calls 2/2",
+            interval_seconds=5.0,
+        )
+        self.assertEqual(
+            app.pending_translation_request["text"],
+            "secret queued subtitle",
+        )
+        self.assertEqual(
+            metrics.snapshot()["counters"]["pending_translation_queued"],
+            1,
+        )
+        self.assertEqual(len(scheduled), 1)
+
+    def test_duplicate_inflight_skip_uses_content_free_coalesced_log(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+        inflight_key = ("custom_ai", "secret duplicate subtitle", "scope")
+        app = types.SimpleNamespace(
+            initialize_async_translation_infrastructure=lambda: None,
+            translation_handler=types.SimpleNamespace(
+                get_cached_translation_for_display=lambda text: None,
+                get_inflight_translation_key=lambda text: inflight_key,
+            ),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=lambda: False
+            ),
+            active_translation_calls={1},
+            active_translation_inflight_keys={inflight_key},
+            translation_thread_pool=Mock(),
+            runtime_metrics=metrics,
+        )
+
+        with patch.object(
+            worker_threads,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            worker_threads.start_async_translation(
+                app,
+                "secret duplicate subtitle",
+                9,
+            )
+
+        log_coalesced.assert_called_once_with(
+            "translation-duplicate-inflight",
+            "LATENCY: duplicate in-flight translation skipped for OCR batch 9",
+            interval_seconds=5.0,
+        )
+        self.assertEqual(
+            metrics.snapshot()["counters"]["duplicate_inflight_skip"],
+            1,
+        )
+        app.translation_thread_pool.submit.assert_not_called()
+
+    def test_stale_pending_timer_uses_coalesced_log_without_consuming_request(self):
+        worker_threads = import_worker_threads_for_tests()
+        pending = {
+            "text": "latest subtitle",
+            "ocr_sequence_number": 4,
+            "requested_at_monotonic": 99.0,
+        }
+        app = types.SimpleNamespace(
+            pending_translation_flush_generation=6,
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=105.0,
+            pending_translation_request=pending,
+            is_running=True,
+        )
+
+        with patch.object(
+            worker_threads,
+            "log_debug_coalesced",
+        ) as log_coalesced:
+            worker_threads._flush_pending_translation_request(
+                app,
+                flush_generation=5,
+            )
+
+        log_coalesced.assert_called_once_with(
+            "translation-stale-pending-timer",
+            "LATENCY: ignored stale pending translation timer "
+            "generation=5 current=6",
+            interval_seconds=5.0,
+        )
+        self.assertIs(app.pending_translation_request, pending)
+        self.assertTrue(app.pending_translation_flush_scheduled)
+
+
+class RuntimeContentFreeTranslationLogTests(unittest.TestCase):
+    def test_translation_submission_log_excludes_source_content(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            translation_thread_pool=types.SimpleNamespace(submit=Mock()),
+        )
+
+        with patch.object(worker_threads, "log_debug") as debug_log:
+            worker_threads._submit_async_translation_request(
+                app,
+                "source-secret",
+                7,
+                ("request",),
+                requested_at_monotonic=100.0,
+            )
+
+        messages = "\n".join(
+            str(call.args[0]) for call in debug_log.call_args_list
+        )
+        self.assertNotIn("source-secret", messages)
+        self.assertIn("chars=13 lines=1", messages)
+        self.assertIn("translation 1", messages.lower())
+
+    def test_translation_completion_response_and_display_logs_exclude_content(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            def translate_text_with_timeout(self, _text, **_kwargs):
+                return "result-secret"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            active_translation_calls={3},
+            active_translation_inflight_keys={("request",)},
+            active_translation_started_monotonic={3: 100.0},
+            pending_translation_request=None,
+            max_concurrent_translation_calls=1,
+            is_running=True,
+            last_displayed_translation_sequence=0,
+            latest_translation_sequence_started=3,
+            update_translation_text=Mock(),
+            last_successful_translation_time=0.0,
+        )
+
+        with patch.object(worker_threads, "log_debug") as debug_log:
+            worker_threads.process_translation_async(
+                app,
+                "source-secret",
+                translation_sequence=3,
+                ocr_sequence_number=0,
+                inflight_key=("request",),
+            )
+            _delay, callback, args = scheduled.pop(0)
+            callback(*args)
+
+        messages = "\n".join(
+            str(call.args[0]) for call in debug_log.call_args_list
+        )
+        self.assertNotIn("source-secret", messages)
+        self.assertNotIn("result-secret", messages)
+        self.assertIn("chars=13 lines=1", messages)
+        self.assertIn("sequence 3", messages.lower())
+        app.update_translation_text.assert_called_once_with("result-secret")
+
+    def test_api_ocr_to_translation_logs_exclude_recognized_content(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            def perform_ocr(self, _image, _source_lang, **_kwargs):
+                return "recognized-secret"
+
+        app = types.SimpleNamespace(
+            batch_sequence_counter=3,
+            active_ocr_calls={3},
+            translation_handler=Handler(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle=None,
+            reset_clear_timeout=Mock(),
+        )
+
+        with patch.object(worker_threads, "log_debug") as debug_log:
+            with patch.object(worker_threads, "start_async_translation") as start:
+                worker_threads.process_api_ocr_async(
+                    app,
+                    b"image",
+                    "en",
+                    3,
+                    "custom_ai",
+                )
+                _delay, callback, args = scheduled.pop(0)
+                callback(*args)
+
+        messages = "\n".join(
+            str(call.args[0]) for call in debug_log.call_args_list
+        )
+        self.assertNotIn("recognized-secret", messages)
+        self.assertIn("chars=17 lines=1", messages)
+        start.assert_called_once_with(app, "recognized-secret", 3)
+
+
 class LatencyLegacyOcrRemovalTests(unittest.TestCase):
     def test_platform_ocr_support_is_removed_from_project_files(self):
         files_to_check = [
@@ -3094,6 +3993,605 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
 
         self.assertEqual(debug_log.call_count, 2)
         self.assertIn("overload detected", debug_log.call_args.args[0].lower())
+
+
+class LiveCustomAIModelSwitchTests(unittest.TestCase):
+    def test_profile_model_selection_reports_persistence_error(self):
+        import gui_builder
+
+        profile = {"id": "relay", "name": "Relay", "model": "old"}
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return profile
+
+            def update_profile(self, profile_id, **updates):
+                raise RuntimeError("disk unavailable")
+
+        app = types.SimpleNamespace(
+            ai_profile_selected_id="relay",
+            ai_profile_model_var=types.SimpleNamespace(get=lambda: "new"),
+            custom_ai_profiles=Profiles(),
+            ui_lang=types.SimpleNamespace(
+                get_label=lambda key, fallback: fallback
+            ),
+            root=object(),
+        )
+
+        with patch.object(gui_builder.messagebox, "showerror") as showerror:
+            try:
+                changed = gui_builder.apply_custom_ai_profile_model_selection(
+                    app
+                )
+            except RuntimeError as error:
+                self.fail(f"Tk callback leaked persistence error: {error}")
+
+        self.assertFalse(changed)
+        showerror.assert_called_once()
+
+    def test_active_profile_model_selection_persists_and_refreshes_translation(self):
+        import gui_builder
+
+        self.assertTrue(
+            hasattr(gui_builder, "apply_custom_ai_profile_model_selection"),
+            "profile model selections need an immediate apply helper",
+        )
+
+        profile = {
+            "id": "relay",
+            "name": "Relay",
+            "model": "gpt-5.6-sol",
+        }
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return profile if profile_id == "relay" else None
+
+            def get_active_profile(self, kind):
+                return profile if kind == "translation" else None
+
+            def update_profile(self, profile_id, **updates):
+                self.updated = (profile_id, updates)
+                profile.update(updates)
+                return profile
+
+        profiles = Profiles()
+        app = types.SimpleNamespace(
+            ai_profile_selected_id="relay",
+            ai_profile_model_var=types.SimpleNamespace(
+                get=lambda: "gpt-5.5-sol"
+            ),
+            custom_ai_profiles=profiles,
+            translation_handler=types.SimpleNamespace(
+                _clear_active_context=Mock()
+            ),
+            is_running=True,
+        )
+
+        with patch(
+            "worker_threads.refresh_translation_after_profile_change",
+            create=True,
+        ) as refresh:
+            changed = gui_builder.apply_custom_ai_profile_model_selection(app)
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            profiles.updated,
+            ("relay", {"model": "gpt-5.5-sol"}),
+        )
+        app.translation_handler._clear_active_context.assert_called_once_with()
+        refresh.assert_called_once_with(
+            app,
+            reason="active profile model changed",
+        )
+
+    def test_inactive_profile_model_selection_does_not_refresh_translation(self):
+        import gui_builder
+
+        self.assertTrue(
+            hasattr(gui_builder, "apply_custom_ai_profile_model_selection"),
+            "profile model selections need an immediate apply helper",
+        )
+
+        edited = {"id": "other", "name": "Other", "model": "old"}
+        active = {"id": "active", "name": "Active", "model": "live"}
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return edited if profile_id == "other" else active
+
+            def get_active_profile(self, kind):
+                return active
+
+            def update_profile(self, profile_id, **updates):
+                edited.update(updates)
+                return edited
+
+        app = types.SimpleNamespace(
+            ai_profile_selected_id="other",
+            ai_profile_model_var=types.SimpleNamespace(get=lambda: "new"),
+            custom_ai_profiles=Profiles(),
+            translation_handler=types.SimpleNamespace(
+                _clear_active_context=Mock()
+            ),
+            is_running=True,
+        )
+
+        with patch(
+            "worker_threads.refresh_translation_after_profile_change",
+            create=True,
+        ) as refresh:
+            changed = gui_builder.apply_custom_ai_profile_model_selection(app)
+
+        self.assertTrue(changed)
+        self.assertEqual(edited["model"], "new")
+        app.translation_handler._clear_active_context.assert_not_called()
+        refresh.assert_not_called()
+
+    def test_profile_change_invalidates_cooldown_timer_and_wakes_latest_subtitle(self):
+        worker_threads = import_worker_threads_for_tests()
+        self.assertTrue(
+            hasattr(
+                worker_threads,
+                "refresh_translation_after_profile_change",
+            ),
+            "profile changes need a scheduler refresh entry point",
+        )
+        scheduled = []
+        pending = {
+            "text": "latest subtitle",
+            "ocr_sequence_number": 8,
+            "requested_at_monotonic": 99.0,
+        }
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            pending_translation_request=pending,
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=160.0,
+            pending_translation_flush_generation=4,
+        )
+
+        refreshed = worker_threads.refresh_translation_after_profile_change(
+            app,
+            reason="active profile model changed",
+        )
+
+        self.assertTrue(refreshed)
+        self.assertIsNone(app.pending_translation_request)
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_generation, 5)
+        self.assertEqual(len(scheduled), 1)
+        delay, callback, args = scheduled[0]
+        self.assertEqual(delay, 0)
+        self.assertIs(
+            callback,
+            worker_threads._apply_translation_profile_refresh,
+        )
+        self.assertIs(args[0], app)
+        self.assertEqual(args[1], 1)
+        self.assertEqual(args[2], pending)
+        self.assertEqual(args[3], "active profile model changed")
+
+    def test_profile_refresh_schedule_failure_preserves_pending_request(self):
+        worker_threads = import_worker_threads_for_tests()
+        pending = {
+            "text": "latest subtitle",
+            "ocr_sequence_number": 8,
+            "requested_at_monotonic": 99.0,
+        }
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=Mock(side_effect=RuntimeError("Tk closing"))
+            ),
+            pending_translation_request=pending,
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=160.0,
+            pending_translation_flush_generation=4,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Tk closing"):
+            worker_threads.refresh_translation_after_profile_change(app)
+
+        self.assertIs(app.pending_translation_request, pending)
+        self.assertTrue(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_deadline_monotonic, 160.0)
+        self.assertEqual(app.pending_translation_flush_generation, 4)
+
+    def test_profile_refresh_callback_uses_newer_translation_candidate(self):
+        worker_threads = import_worker_threads_for_tests()
+        self.assertTrue(
+            hasattr(
+                worker_threads,
+                "_apply_translation_profile_refresh",
+            ),
+            "profile refresh needs a generation-checked callback",
+        )
+        scheduled = []
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            latest_translation_candidate={
+                "text": "older subtitle",
+                "ocr_sequence_number": 3,
+                "requested_at_monotonic": 50.0,
+            },
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=2,
+        )
+
+        self.assertTrue(
+            worker_threads.refresh_translation_after_profile_change(app)
+        )
+        app.latest_translation_candidate = {
+            "text": "newer subtitle",
+            "ocr_sequence_number": 4,
+            "requested_at_monotonic": 51.0,
+        }
+        _delay, callback, args = scheduled[0]
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+        ) as start_translation:
+            callback(*args)
+
+        start_translation.assert_called_once_with(
+            app,
+            "newer subtitle",
+            4,
+            requested_at_monotonic=51.0,
+            configuration_refresh=True,
+        )
+
+    def test_profile_change_can_use_bounded_overflow_without_age_wait(self):
+        import inspect
+
+        worker_threads = import_worker_threads_for_tests()
+        self.assertIn(
+            "configuration_refresh",
+            inspect.signature(worker_threads.start_async_translation).parameters,
+            "configuration refreshes need an explicit bounded-priority flag",
+        )
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+            ):
+                return {
+                    "inflight_key": ("custom_ai", text, "new-model"),
+                    "latency_mode": "safe",
+                }
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 5.0
+
+            def get_translation_provider_cooldown_seconds(self, latency_mode=None):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={
+                ("custom_ai", "old subtitle", "old-model")
+            },
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=lambda: False
+            ),
+            root=types.SimpleNamespace(after=Mock()),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.1):
+            worker_threads.start_async_translation(
+                app,
+                "latest subtitle",
+                9,
+                requested_at_monotonic=100.0,
+                configuration_refresh=True,
+            )
+
+        app.translation_thread_pool.submit.assert_called_once()
+        self.assertEqual(app.translation_sequence_counter, 2)
+        self.assertEqual(app.active_translation_calls, {1, 2})
+        self.assertIsNone(app.pending_translation_request)
+
+    def test_profile_change_overflow_handles_missing_active_start_time(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+            ):
+                return {
+                    "inflight_key": ("custom_ai", text, "new-model"),
+                    "latency_mode": "safe",
+                }
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, latency_mode=None):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={
+                ("custom_ai", "old subtitle", "old-model")
+            },
+            active_translation_started_monotonic={},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=lambda: False
+            ),
+            root=types.SimpleNamespace(after=Mock()),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.1):
+            worker_threads.start_async_translation(
+                app,
+                "latest subtitle",
+                9,
+                requested_at_monotonic=100.0,
+                configuration_refresh=True,
+            )
+
+        app.translation_thread_pool.submit.assert_called_once()
+
+
+class LiveCustomAIProfileSwitchTests(unittest.TestCase):
+    class Value:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self):
+            return self.value
+
+        def set(self, value):
+            self.value = value
+
+    class Profiles:
+        def __init__(self, active_id="failed", fail=False):
+            self.profiles = [
+                {"id": "failed", "name": "Failed", "model": "gpt-5.6"},
+                {"id": "working", "name": "Working", "model": "grok-fast"},
+            ]
+            self.active_id = active_id
+            self.fail = fail
+            self.set_calls = []
+
+        def list_profiles(self, enabled_only=False):
+            return list(self.profiles)
+
+        def get_active_profile(self, kind):
+            if kind != "translation":
+                return None
+            return next(
+                profile
+                for profile in self.profiles
+                if profile["id"] == self.active_id
+            )
+
+        def set_active_profile(self, kind, profile_id):
+            self.set_calls.append((kind, profile_id))
+            if self.fail:
+                raise RuntimeError("profile store unavailable")
+            self.active_id = profile_id
+            return self.get_active_profile(kind)
+
+    @classmethod
+    def _make_app(cls, profiles, running=True):
+        return types.SimpleNamespace(
+            custom_ai_profiles=profiles,
+            translation_model_var=cls.Value("custom_ai"),
+            translation_handler=types.SimpleNamespace(
+                _clear_active_context=Mock()
+            ),
+            is_running=running,
+            ui_lang=types.SimpleNamespace(
+                get_label=lambda _key, default=None: default or _key
+            ),
+            root=object(),
+        )
+
+    def test_running_profile_switch_clears_context_and_wakes_latest_subtitle(self):
+        import gui_builder
+
+        profiles = self.Profiles()
+        app = self._make_app(profiles, running=True)
+
+        with patch(
+            "worker_threads.refresh_translation_after_profile_change",
+        ) as refresh:
+            changed = (
+                gui_builder.apply_custom_ai_translation_profile_selection(
+                    app,
+                    "Working",
+                )
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(profiles.active_id, "working")
+        self.assertEqual(app.translation_model_var.value, "custom_ai")
+        app.translation_handler._clear_active_context.assert_called_once_with()
+        refresh.assert_called_once_with(
+            app,
+            reason="active translation profile changed",
+        )
+
+    def test_same_profile_selection_is_a_noop(self):
+        import gui_builder
+
+        profiles = self.Profiles(active_id="working")
+        app = self._make_app(profiles, running=True)
+
+        with patch(
+            "worker_threads.refresh_translation_after_profile_change",
+        ) as refresh:
+            changed = (
+                gui_builder.apply_custom_ai_translation_profile_selection(
+                    app,
+                    "Working",
+                )
+            )
+
+        self.assertFalse(changed)
+        self.assertEqual(profiles.set_calls, [])
+        app.translation_handler._clear_active_context.assert_not_called()
+        refresh.assert_not_called()
+
+    def test_stopped_profile_switch_persists_without_scheduling_work(self):
+        import gui_builder
+
+        profiles = self.Profiles()
+        app = self._make_app(profiles, running=False)
+
+        with patch(
+            "worker_threads.refresh_translation_after_profile_change",
+        ) as refresh:
+            changed = (
+                gui_builder.apply_custom_ai_translation_profile_selection(
+                    app,
+                    "Working",
+                )
+            )
+
+        self.assertTrue(changed)
+        self.assertEqual(profiles.active_id, "working")
+        app.translation_handler._clear_active_context.assert_called_once_with()
+        refresh.assert_not_called()
+
+    def test_profile_switch_persistence_error_is_reported(self):
+        import gui_builder
+
+        profiles = self.Profiles(fail=True)
+        app = self._make_app(profiles, running=True)
+
+        with patch.object(gui_builder.messagebox, "showerror") as show_error:
+            changed = (
+                gui_builder.apply_custom_ai_translation_profile_selection(
+                    app,
+                    "Working",
+                )
+            )
+
+        self.assertFalse(changed)
+        show_error.assert_called_once()
+        app.translation_handler._clear_active_context.assert_not_called()
+
+    def test_primary_profile_selection_handler_uses_live_apply_helper(self):
+        import gui_builder
+
+        events = []
+        app = types.SimpleNamespace(
+            on_translation_model_selection_changed=lambda **kwargs: events.append(
+                ("changed", kwargs)
+            )
+        )
+
+        with patch.object(
+            gui_builder,
+            "apply_custom_ai_translation_profile_selection",
+            create=True,
+            side_effect=lambda _app, selected: events.append(
+                ("applied", selected)
+            ) or True,
+        ) as apply_profile:
+            changed = gui_builder.handle_translation_profile_selection(
+                app,
+                "Working",
+                event="event",
+            )
+
+        self.assertTrue(changed)
+        apply_profile.assert_called_once_with(app, "Working")
+        self.assertEqual(
+            events,
+            [
+                ("applied", "Working"),
+                (
+                    "changed",
+                    {
+                        "event": None,
+                        "initial_setup": False,
+                        "synchronize_ui_only": True,
+                    },
+                ),
+            ],
+        )
+
+    def test_ui_only_profile_sync_skips_session_lifecycle_and_settings_save(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.is_running = True
+        app._fully_initialized = True
+        app.translation_model_var = self.Value("custom_ai")
+        app.translation_handler = types.SimpleNamespace(
+            request_end_translation_session=Mock(),
+            start_translation_session=Mock(),
+        )
+        app.ui_interaction_handler = types.SimpleNamespace(
+            on_translation_model_selection_changed=Mock()
+        )
+        app.save_settings = Mock()
+
+        app.on_translation_model_selection_changed(
+            event=None,
+            initial_setup=False,
+            synchronize_ui_only=True,
+        )
+
+        app.translation_handler.request_end_translation_session.assert_not_called()
+        app.translation_handler.start_translation_session.assert_not_called()
+        app.ui_interaction_handler.on_translation_model_selection_changed.assert_called_once_with(
+            None,
+            False,
+        )
+        app.save_settings.assert_not_called()
 
 
 if __name__ == "__main__":

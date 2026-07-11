@@ -5,12 +5,20 @@ import gc
 import sys
 import time
 import html
+import hashlib
 import traceback
 import threading
 import concurrent.futures
+from collections import OrderedDict
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit, urlunsplit
 
-from logger import append_rotating_text, log_debug
+from logger import (
+    append_rotating_text,
+    log_debug,
+    log_debug_coalesced,
+    summarize_text_for_log,
+)
 from unified_translation_cache import UnifiedTranslationCache
 from translation_utils import is_translation_error_result
 from custom_ai import (
@@ -35,6 +43,8 @@ CUSTOM_PROMPT_CACHE_LOW_RATIO = 0.20
 CUSTOM_PROMPT_CACHE_WEAK_RATIO = 0.45
 CUSTOM_PROMPT_CACHE_LONG_INPUT_TOKENS = 3500
 CUSTOM_PROMPT_CACHE_VERY_LONG_INPUT_TOKENS = 6000
+CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
+_CUSTOM_AI_PROFILE_UNSET = object()
 
 
 class TranslationHandler:
@@ -59,11 +69,12 @@ class TranslationHandler:
             thread_name_prefix="CustomAIShortLog",
         )
         self._custom_session_started = set()
-        self._custom_prompt_cache_metrics_lock = threading.Lock()
-        self._custom_prompt_cache_sample_count = 0
-        self._custom_cached_input_ratio_ema = None
-        self._custom_input_tokens_ema = None
-        self._custom_latency_advisor = CustomAILatencyModeAdvisor()
+        self._custom_route_state_lock = threading.RLock()
+        self._custom_latency_advisors = OrderedDict()
+        self._custom_prompt_cache_metrics = OrderedDict()
+        # Retain the legacy attribute as the sparse-profile compatibility
+        # advisor. Real configured routes use their own bounded advisor.
+        self._custom_latency_advisor = self._get_custom_latency_advisor()
         self._custom_race_state_lock = threading.Lock()
         self._custom_race_inflight_profiles = set()
         
@@ -91,6 +102,109 @@ class TranslationHandler:
                 setter(name, value)
             except Exception:
                 pass
+
+    def _custom_ai_route_state_key(self, profile):
+        """Return a non-secret identity for adaptive state ownership."""
+        if not isinstance(profile, dict) or not str(
+            profile.get("base_url") or ""
+        ).strip():
+            return ("custom-ai-default-route",)
+        try:
+            raw_parts = urlsplit(str(profile.get("base_url") or "").strip())
+            host = str(raw_parts.hostname or "").lower()
+            if not raw_parts.scheme or not host:
+                return ("custom-ai-default-route",)
+            if ":" in host:
+                host = f"[{host}]"
+            port = raw_parts.port
+            default_port = (
+                (raw_parts.scheme.lower() == "https" and port == 443)
+                or (raw_parts.scheme.lower() == "http" and port == 80)
+            )
+            port_suffix = (
+                f":{port}"
+                if port is not None and not default_port
+                else ""
+            )
+            safe_profile = dict(profile)
+            safe_profile["base_url"] = urlunsplit(
+                (
+                    raw_parts.scheme.lower(),
+                    f"{host}{port_suffix}",
+                    raw_parts.path,
+                    "",
+                    "",
+                )
+            )
+            endpoint = self._canonical_custom_ai_profile_endpoint(
+                safe_profile
+            )
+            endpoint_parts = urlsplit(endpoint)
+            endpoint = urlunsplit(
+                (
+                    endpoint_parts.scheme,
+                    endpoint_parts.netloc,
+                    endpoint_parts.path,
+                    "",
+                    "",
+                )
+            )
+            route_options_fingerprint = hashlib.sha256(
+                repr(
+                    (
+                        raw_parts.username or "",
+                        raw_parts.password or "",
+                        raw_parts.query or "",
+                        raw_parts.fragment or "",
+                    )
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            credential_scope = self.custom_ai_provider._credential_scope_key(
+                profile
+            )
+            wire_api = normalize_custom_ai_wire_api(
+                profile.get("wire_api")
+            )
+            model = str(profile.get("model") or "").strip()
+            return (
+                endpoint,
+                route_options_fingerprint,
+                credential_scope,
+                wire_api,
+                model,
+            )
+        except Exception:
+            return ("custom-ai-default-route",)
+
+    def _get_bounded_custom_ai_route_state(self, state_map, route_key, factory):
+        with self._custom_route_state_lock:
+            state = state_map.pop(route_key, None)
+            if state is None:
+                state = factory()
+            state_map[route_key] = state
+            while len(state_map) > CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES:
+                state_map.popitem(last=False)
+            return state
+
+    def _get_custom_latency_advisor(self, profile=None, route_key=None):
+        route_key = route_key or self._custom_ai_route_state_key(profile)
+        return self._get_bounded_custom_ai_route_state(
+            self._custom_latency_advisors,
+            route_key,
+            CustomAILatencyModeAdvisor,
+        )
+
+    def _get_custom_prompt_cache_metrics(self, profile=None, route_key=None):
+        route_key = route_key or self._custom_ai_route_state_key(profile)
+        return self._get_bounded_custom_ai_route_state(
+            self._custom_prompt_cache_metrics,
+            route_key,
+            lambda: {
+                "sample_count": 0,
+                "cached_input_ratio_ema": None,
+                "input_tokens_ema": None,
+            },
+        )
 
     def _note_custom_ai_race_winner(self, profile):
         profile = profile if isinstance(profile, dict) else {}
@@ -395,6 +509,7 @@ Call Duration: {call_duration:.3f} seconds
         stream_callback=None,
         translation_sequence=None,
         latency_mode=None,
+        request_snapshot=None,
     ):
         # Translation already runs inside the background translation worker pool.
         # Avoid spawning an extra daemon thread here, otherwise the outer worker
@@ -407,19 +522,24 @@ Call Duration: {call_duration:.3f} seconds
                 translation_sequence=translation_sequence,
                 latency_mode=latency_mode,
                 timeout_seconds=timeout_seconds,
+                request_snapshot=request_snapshot,
             )
         except Exception as e:
             log_debug(f"Translation exception: {e}")
             return f"Translation error: {str(e)}"
 
-    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None, timeout_seconds=None):
+    def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None, timeout_seconds=None, request_snapshot=None):
         cleaned_text_main = text_content_main.strip() if text_content_main else ""
         if not cleaned_text_main or self.is_placeholder_text(cleaned_text_main):
             return None
 
         translation_start_monotonic = time.monotonic()
         selected_model = self.app.translation_model_var.get()
-        log_debug(f"Translate request for \"{cleaned_text_main}\" using {selected_model}")
+        log_debug(
+            "Translate request "
+            f"{summarize_text_for_log(cleaned_text_main)} "
+            f"using {selected_model}"
+        )
 
         if selected_model != 'custom_ai':
             log_debug(f"Legacy translation model '{selected_model}' is disabled; using custom_ai route")
@@ -432,6 +552,7 @@ Call Duration: {call_duration:.3f} seconds
             translation_sequence=translation_sequence,
             latency_mode=latency_mode,
             timeout_seconds=timeout_seconds,
+            request_snapshot=request_snapshot,
         )
 
     def get_cached_translation_for_display(self, text_content):
@@ -463,10 +584,15 @@ Call Duration: {call_duration:.3f} seconds
         self,
         current_source=None,
         latency_mode=None,
+        profile=_CUSTOM_AI_PROFILE_UNSET,
     ):
-        profile = self.app.custom_ai_profiles.get_active_profile("translation")
+        if profile is _CUSTOM_AI_PROFILE_UNSET:
+            profile = self.app.custom_ai_profiles.get_active_profile(
+                "translation"
+            )
         if not profile:
             return None, None, None, None
+        profile = dict(profile)
 
         source_lang = getattr(self.app, 'custom_source_lang', None) or self.app.source_lang_var.get()
         target_lang = getattr(self.app, 'custom_target_lang', None) or self.app.target_lang_var.get()
@@ -533,15 +659,24 @@ Call Duration: {call_duration:.3f} seconds
             return None
 
         configured_latency_mode = self._get_custom_ai_latency_mode()
+        try:
+            active_profile = self.app.custom_ai_profiles.get_active_profile(
+                "translation"
+            )
+        except Exception:
+            active_profile = None
+        active_profile = dict(active_profile) if active_profile else None
         decision = self._resolve_custom_ai_latency_mode_for_request(
             current_source=cleaned_text,
             configured_mode=configured_latency_mode,
             commit=commit,
+            profile=active_profile,
         )
         latency_mode = decision.mode
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text,
             latency_mode=latency_mode,
+            profile=active_profile,
         )
         if not profile:
             inflight_key = ("custom_ai", cleaned_text, "missing_profile")
@@ -554,6 +689,8 @@ Call Duration: {call_duration:.3f} seconds
                 latency_mode,
             )
 
+        with self._custom_context_lock:
+            context_generation = self._custom_context_generation
         return {
             "inflight_key": inflight_key,
             "latency_mode": latency_mode,
@@ -561,6 +698,11 @@ Call Duration: {call_duration:.3f} seconds
             "reason": decision.reason,
             "p90_seconds": decision.p90_seconds,
             "sample_count": decision.sample_count,
+            "profile": dict(profile) if profile else None,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "cache_params": dict(cache_params) if cache_params else None,
+            "context_generation": context_generation,
         }
 
     def commit_custom_ai_latency_mode_snapshot(self, snapshot):
@@ -572,6 +714,7 @@ Call Duration: {call_duration:.3f} seconds
             snapshot.get("reason", ""),
             snapshot.get("p90_seconds", 0.0),
             snapshot.get("sample_count", 0),
+            profile=snapshot.get("profile"),
         )
 
     def _commit_custom_ai_latency_mode(
@@ -581,12 +724,16 @@ Call Duration: {call_duration:.3f} seconds
         reason,
         p90_seconds=0.0,
         sample_count=0,
+        profile=None,
     ):
         configured_mode = normalize_custom_ai_latency_mode(configured_mode)
         resolved_mode = normalize_custom_ai_latency_mode(resolved_mode)
         if configured_mode != CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
             return
-        self._custom_latency_advisor.commit_mode(resolved_mode)
+        with self._custom_route_state_lock:
+            self._get_custom_latency_advisor(profile=profile).commit_mode(
+                resolved_mode
+            )
         log_debug(
             "LATENCY: adaptive_latency_mode "
             f"resolved={resolved_mode} "
@@ -637,34 +784,42 @@ Call Duration: {call_duration:.3f} seconds
         current_source=None,
         configured_mode=None,
         commit=False,
+        profile=_CUSTOM_AI_PROFILE_UNSET,
     ):
         configured_mode = normalize_custom_ai_latency_mode(
             configured_mode
             if configured_mode is not None
             else self._get_custom_ai_latency_mode()
         )
+        if profile is _CUSTOM_AI_PROFILE_UNSET:
+            try:
+                profile = self.app.custom_ai_profiles.get_active_profile(
+                    "translation"
+                )
+            except Exception:
+                profile = None
+        profile = dict(profile) if isinstance(profile, dict) else None
         if configured_mode != CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
-            return self._custom_latency_advisor.resolve(configured_mode)
-
-        try:
-            profile = self.app.custom_ai_profiles.get_active_profile(
-                "translation"
-            )
-        except Exception:
-            profile = None
+            with self._custom_route_state_lock:
+                return self._get_custom_latency_advisor(
+                    profile=profile
+                ).resolve(configured_mode)
 
         stream_supported = self._custom_ai_profile_supports_stream(profile)
         primary_cooldown = self._custom_ai_profile_cooldown_seconds(profile)
         healthy_race_count = len(
             self._get_healthy_custom_ai_race_profiles(profile)
         )
-        decision = self._custom_latency_advisor.resolve(
-            configured_mode,
-            stream_supported=stream_supported,
-            healthy_race_profile_count=healthy_race_count,
-            primary_cooldown_seconds=primary_cooldown,
-            commit=commit,
-        )
+        with self._custom_route_state_lock:
+            decision = self._get_custom_latency_advisor(
+                profile=profile
+            ).resolve(
+                configured_mode,
+                stream_supported=stream_supported,
+                healthy_race_profile_count=healthy_race_count,
+                primary_cooldown_seconds=primary_cooldown,
+                commit=commit,
+            )
         if commit:
             log_debug(
                 "LATENCY: adaptive_latency_mode "
@@ -823,24 +978,62 @@ Call Duration: {call_duration:.3f} seconds
         translation_sequence=None,
         latency_mode=None,
         timeout_seconds=None,
+        request_snapshot=None,
     ):
-        with self._custom_context_lock:
-            context_generation = self._custom_context_generation
-        configured_latency_mode = normalize_custom_ai_latency_mode(
-            self._get_custom_ai_latency_mode()
-            if latency_mode is None
-            else latency_mode
+        use_request_snapshot = (
+            isinstance(request_snapshot, dict)
+            and "profile" in request_snapshot
+            and "cache_params" in request_snapshot
         )
-        decision = self._resolve_custom_ai_latency_mode_for_request(
-            current_source=cleaned_text_main,
-            configured_mode=configured_latency_mode,
-            commit=False,
-        )
-        latency_mode = decision.mode
-        profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
-            current_source=cleaned_text_main,
-            latency_mode=latency_mode,
-        )
+        if use_request_snapshot:
+            profile_value = request_snapshot.get("profile")
+            profile = dict(profile_value) if profile_value else None
+            source_lang = request_snapshot.get("source_lang")
+            target_lang = request_snapshot.get("target_lang")
+            cache_params_value = request_snapshot.get("cache_params")
+            cache_params = (
+                dict(cache_params_value) if cache_params_value else None
+            )
+            configured_latency_mode = normalize_custom_ai_latency_mode(
+                request_snapshot.get("configured_latency_mode")
+                or request_snapshot.get("latency_mode")
+                or latency_mode
+            )
+            latency_mode = normalize_custom_ai_latency_mode(
+                request_snapshot.get("latency_mode") or latency_mode
+            )
+            context_generation = request_snapshot.get("context_generation")
+            if context_generation is None:
+                with self._custom_context_lock:
+                    context_generation = self._custom_context_generation
+            decision = None
+        else:
+            with self._custom_context_lock:
+                context_generation = self._custom_context_generation
+            configured_latency_mode = normalize_custom_ai_latency_mode(
+                self._get_custom_ai_latency_mode()
+                if latency_mode is None
+                else latency_mode
+            )
+            try:
+                profile = self.app.custom_ai_profiles.get_active_profile(
+                    "translation"
+                )
+            except Exception:
+                profile = None
+            profile = dict(profile) if profile else None
+            decision = self._resolve_custom_ai_latency_mode_for_request(
+                current_source=cleaned_text_main,
+                configured_mode=configured_latency_mode,
+                commit=False,
+                profile=profile,
+            )
+            latency_mode = decision.mode
+            profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
+                current_source=cleaned_text_main,
+                latency_mode=latency_mode,
+                profile=profile,
+            )
         if not profile:
             return "AI model profile for translation is missing."
 
@@ -859,13 +1052,15 @@ Call Duration: {call_duration:.3f} seconds
         context = list(cache_params.get("context", ()))
         keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
         custom_prompt = cache_params.get("custom_prompt", "")
-        self._commit_custom_ai_latency_mode(
-            configured_latency_mode,
-            latency_mode,
-            decision.reason,
-            decision.p90_seconds,
-            decision.sample_count,
-        )
+        if decision is not None:
+            self._commit_custom_ai_latency_mode(
+                configured_latency_mode,
+                latency_mode,
+                decision.reason,
+                decision.p90_seconds,
+                decision.sample_count,
+                profile=profile,
+            )
 
         try:
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
@@ -911,6 +1106,7 @@ Call Duration: {call_duration:.3f} seconds
             self._record_custom_ai_latency_observation(
                 time.monotonic() - translation_start_monotonic,
                 success=False,
+                profile=profile,
             )
             error_text = self._sanitize_custom_ai_profile_error(
                 e,
@@ -959,7 +1155,12 @@ Call Duration: {call_duration:.3f} seconds
                 context_generation=context_generation,
             )
 
-        log_debug(f"Custom AI translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
+        log_debug(
+            "Custom AI translation completed "
+            f"source {summarize_text_for_log(cleaned_text_main)} "
+            f"result {summarize_text_for_log(translated_api_text)} "
+            f"took {time.monotonic() - translation_start_monotonic:.3f}s"
+        )
         return self._format_dialog_text(translated_api_text)
 
     def _custom_ai_translate_race(
@@ -1228,6 +1429,7 @@ Call Duration: {call_duration:.3f} seconds
         if context is None:
             context = self._get_custom_context_for_request(
                 current_source=current_source,
+                profile=profile,
             )
         try:
             request_latency_mode = normalize_custom_ai_latency_mode(
@@ -1378,12 +1580,19 @@ Call Duration: {call_duration:.3f} seconds
                 if source in retained_sources
             }
 
-    def _get_custom_context_for_request(self, current_source=None):
+    def _get_custom_context_for_request(
+        self,
+        current_source=None,
+        profile=None,
+    ):
         context_size = self._get_custom_context_window_size()
         if context_size == 0:
             return []
 
-        context_budget = self._get_custom_context_char_budget(current_source)
+        context_budget = self._get_custom_context_char_budget(
+            current_source,
+            profile=profile,
+        )
         with self._custom_context_lock:
             context_window = list(self.custom_context_window)
         selected = []
@@ -1417,7 +1626,11 @@ Call Duration: {call_duration:.3f} seconds
                 break
         return list(reversed(selected))
 
-    def _get_custom_context_char_budget(self, current_source=None):
+    def _get_custom_context_char_budget(
+        self,
+        current_source=None,
+        profile=None,
+    ):
         source_text = str(current_source or "")
         source_penalty = min(
             CUSTOM_CONTEXT_SOURCE_PENALTY_CAP,
@@ -1427,17 +1640,20 @@ Call Duration: {call_duration:.3f} seconds
             CUSTOM_CONTEXT_MIN_CHAR_BUDGET,
             CUSTOM_CONTEXT_MAX_CHAR_BUDGET - source_penalty,
         )
-        budget_factor = self._get_custom_prompt_cache_budget_factor()
+        budget_factor = self._get_custom_prompt_cache_budget_factor(
+            profile=profile,
+        )
         return max(
             CUSTOM_CONTEXT_MIN_CHAR_BUDGET,
             int(base_budget * budget_factor),
         )
 
-    def _get_custom_prompt_cache_budget_factor(self):
-        with self._custom_prompt_cache_metrics_lock:
-            sample_count = self._custom_prompt_cache_sample_count
-            cached_ratio_ema = self._custom_cached_input_ratio_ema
-            input_tokens_ema = self._custom_input_tokens_ema
+    def _get_custom_prompt_cache_budget_factor(self, profile=None):
+        with self._custom_route_state_lock:
+            metrics = self._get_custom_prompt_cache_metrics(profile=profile)
+            sample_count = metrics["sample_count"]
+            cached_ratio_ema = metrics["cached_input_ratio_ema"]
+            input_tokens_ema = metrics["input_tokens_ema"]
 
         if sample_count < CUSTOM_PROMPT_CACHE_MIN_SAMPLES:
             return 1.0
@@ -1521,28 +1737,34 @@ Call Duration: {call_duration:.3f} seconds
             ratio_value = cached_tokens / prompt_tokens if prompt_tokens > 0 else 0.0
         return max(0.0, min(1.0, ratio_value)), prompt_tokens
 
-    def _record_custom_prompt_cache_usage(self, call_type, usage):
+    def _record_custom_prompt_cache_usage(
+        self,
+        call_type,
+        usage,
+        profile=None,
+    ):
         cached_ratio, prompt_tokens = self._custom_usage_cached_input_ratio(usage)
         if call_type != "translation" or prompt_tokens <= 0:
             return cached_ratio
 
         alpha = CUSTOM_PROMPT_CACHE_EMA_ALPHA
-        with self._custom_prompt_cache_metrics_lock:
-            if self._custom_prompt_cache_sample_count == 0:
-                self._custom_cached_input_ratio_ema = cached_ratio
-                self._custom_input_tokens_ema = prompt_tokens
+        with self._custom_route_state_lock:
+            metrics = self._get_custom_prompt_cache_metrics(profile=profile)
+            if metrics["sample_count"] == 0:
+                metrics["cached_input_ratio_ema"] = cached_ratio
+                metrics["input_tokens_ema"] = prompt_tokens
             else:
-                self._custom_cached_input_ratio_ema = (
-                    (1.0 - alpha) * self._custom_cached_input_ratio_ema
+                metrics["cached_input_ratio_ema"] = (
+                    (1.0 - alpha) * metrics["cached_input_ratio_ema"]
                     + alpha * cached_ratio
                 )
-                self._custom_input_tokens_ema = (
-                    (1.0 - alpha) * self._custom_input_tokens_ema
+                metrics["input_tokens_ema"] = (
+                    (1.0 - alpha) * metrics["input_tokens_ema"]
                     + alpha * prompt_tokens
                 )
-            self._custom_prompt_cache_sample_count += 1
-            cached_ratio_ema = self._custom_cached_input_ratio_ema
-            input_tokens_ema = self._custom_input_tokens_ema
+            metrics["sample_count"] += 1
+            cached_ratio_ema = metrics["cached_input_ratio_ema"]
+            input_tokens_ema = metrics["input_tokens_ema"]
 
         self._set_runtime_metric_gauge(
             "custom_ai_cached_input_ratio",
@@ -1558,13 +1780,19 @@ Call Duration: {call_duration:.3f} seconds
         )
         return cached_ratio
 
-    def _record_custom_ai_latency_observation(self, duration, success=True):
-        advisor = getattr(self, "_custom_latency_advisor", None)
-        observer = getattr(advisor, "observe_request", None)
-        if not callable(observer):
-            return
+    def _record_custom_ai_latency_observation(
+        self,
+        duration,
+        success=True,
+        profile=None,
+    ):
         try:
-            observer(duration, success=success)
+            with self._custom_route_state_lock:
+                advisor = self._get_custom_latency_advisor(profile=profile)
+                observer = getattr(advisor, "observe_request", None)
+                if not callable(observer):
+                    return
+                observer(duration, success=success)
         except Exception as observe_error:
             log_debug(
                 "Custom AI adaptive latency observation failed: "
@@ -1606,7 +1834,7 @@ Call Duration: {call_duration:.3f} seconds
                     if call_type == "ocr"
                     else "===== TRANSLATION CALL ======="
                 )
-                cost = 0.0
+                cost = self._custom_usage_number(usage, "cost_usd")
                 prompt_tokens = int(self._custom_usage_number(
                     usage,
                     "input_tokens",
@@ -1625,11 +1853,13 @@ Call Duration: {call_duration:.3f} seconds
                 cached_input_ratio = self._record_custom_prompt_cache_usage(
                     call_type,
                     usage,
+                    profile=profile,
                 )
                 if call_type == "translation":
                     self._record_custom_ai_latency_observation(
                         duration,
                         success=True,
+                        profile=profile,
                     )
                 block = (
                     f"{session_header}"
@@ -1690,7 +1920,11 @@ Call Duration: {call_duration:.3f} seconds
         # 1. Check Unified Cache (In-Memory LRU)
         cached_result = self.unified_cache.get(cleaned_text_main, source_lang, target_lang, selected_model, **extra_params)
         if cached_result:
-            log_debug(f"Translation \"{cleaned_text_main}\" -> \"{cached_result}\" from unified cache")
+            log_debug(
+                "Translation returned from unified cache "
+                f"source={summarize_text_for_log(cleaned_text_main)} "
+                f"target={summarize_text_for_log(cached_result)}"
+            )
             
             # Check if file cache is enabled and save LRU result to file cache if not already there
             file_cache_enabled = False
@@ -1744,7 +1978,10 @@ Call Duration: {call_duration:.3f} seconds
             file_cache_hit = self.app.cache_manager.check_file_cache('openai', key)
         
         if file_cache_hit:
-            log_debug(f"Found \"{cleaned_text_main}\" in {selected_model} file cache.")
+            log_debug(
+                f"Found translation in {selected_model} file cache "
+                f"{summarize_text_for_log(cleaned_text_main)}"
+            )
             self.unified_cache.store(cleaned_text_main, source_lang, target_lang, selected_model, file_cache_hit, **extra_params)
             
             provider = self._get_active_llm_provider()
@@ -1754,7 +1991,10 @@ Call Duration: {call_duration:.3f} seconds
             return self._format_dialog_text(file_cache_hit)
 
         # 3. All Caches Miss - Perform API Call
-        log_debug(f"All caches MISS for \"{cleaned_text_main}\". Calling API.")
+        log_debug(
+            "All translation caches missed; calling API "
+            f"{summarize_text_for_log(cleaned_text_main)}"
+        )
         translated_api_text = None
         
         if selected_model == 'marianmt':
@@ -1788,13 +2028,21 @@ Call Duration: {call_duration:.3f} seconds
 
             self.unified_cache.store(cleaned_text_main, source_lang, target_lang, selected_model, translated_api_text, **extra_params)
         
-        log_debug(f"Translation \"{cleaned_text_main}\" -> \"{str(translated_api_text)}\" took {time.monotonic() - translation_start_monotonic:.3f}s")
+        log_debug(
+            "Translation completed "
+            f"source={summarize_text_for_log(cleaned_text_main)} "
+            f"target={summarize_text_for_log(translated_api_text)} "
+            f"duration={time.monotonic() - translation_start_monotonic:.3f}s"
+        )
         return self._format_dialog_text(translated_api_text)
 
 
     # === NON-LLM PROVIDER METHODS (UNCHANGED) ===
     def _google_translate(self, text_to_translate_gt, source_lang_gt, target_lang_gt):
-        log_debug(f"Google Translate API call for: {text_to_translate_gt}")
+        log_debug(
+            "Google Translate API call "
+            f"{summarize_text_for_log(text_to_translate_gt)}"
+        )
         api_key_google = self.app.google_api_key_var.get().strip()
         if not api_key_google: return "Google Translate API key missing"
         if not REQUESTS_AVAILABLE: return "Requests library not available for Google Translate"
@@ -1845,10 +2093,18 @@ Call Duration: {call_duration:.3f} seconds
                 context_string = f"[{custom_prompt}]\n"
         
         model_type = self.app.deepl_model_type_var.get()
-        log_debug(f"DeepL API call for: {text_to_translate_dl} using model_type={model_type}")
+        log_debug(
+            "DeepL API call "
+            f"{summarize_text_for_log(text_to_translate_dl)} "
+            f"model_type={model_type}"
+        )
         
         if context_string:
-            log_debug(f"DeepL context ({len(context_string)} chars, {context_size} subtitles): {context_string[:100]}...")
+            log_debug(
+                "DeepL context prepared "
+                f"{summarize_text_for_log(context_string)} "
+                f"subtitles={context_size}"
+            )
         
         if not self.app.deepl_api_client:
             return "DeepL API client not initialized"
@@ -2027,7 +2283,11 @@ Call Duration: {call_duration:.3f} seconds
             return None
 
     def _marian_translate(self, text_to_translate_mm, source_lang_mm, target_lang_mm, beam_value_mm):
-        log_debug(f"MarianMT translation call for: {text_to_translate_mm} (beam={beam_value_mm})")
+        log_debug(
+            "MarianMT translation call "
+            f"{summarize_text_for_log(text_to_translate_mm)} "
+            f"beam={beam_value_mm}"
+        )
         if self.app.marian_translator is None: return "MarianMT translator not initialized"
         text_to_translate_cleaned = re.sub(r'\s+', ' ', text_to_translate_mm).strip()
         if not text_to_translate_cleaned: return ""
@@ -2056,34 +2316,16 @@ Call Duration: {call_duration:.3f} seconds
         Returns:
             str: The formatted text with proper dialog line breaks
         """
-        # DEBUG: Always log when this function is called
-        log_debug(f"DIALOG_FORMAT_DEBUG: _format_dialog_text called with: {repr(text)}")
-        
         if not text or not isinstance(text, str):
-            log_debug(f"DIALOG_FORMAT_DEBUG: Text is None or not string, returning: {repr(text)}")
             return text
         
         # Check if the text starts with any dash (more robust - no space required)
         dash_check = (text.startswith("-") or text.startswith("–") or text.startswith("—"))
-        log_debug(f"DIALOG_FORMAT_DEBUG: Text starts with dash: {dash_check}")
-        
         if not dash_check:
-            log_debug(f"DIALOG_FORMAT_DEBUG: Text doesn't start with dash, returning unchanged")
             return text
-        
-        log_debug(f"DIALOG_FORMAT_DEBUG: Text starts with dash, proceeding with formatting")
         
         # Apply the formatting transformations
         formatted_text = text
-        
-        # Check for patterns before applying
-        patterns_found = []
-        patterns_to_check = [". -", ". –", ". —", "? -", "? –", "? —", "! -", "! –", "! —"]
-        for pattern in patterns_to_check:
-            if pattern in text:
-                patterns_found.append(pattern)
-        
-        log_debug(f"DIALOG_FORMAT_DEBUG: Patterns found: {patterns_found}")
         
         # New rule: Handle quoted dialogue format
         dialogue_patterns = ['"-', '" "', '- "', '" - "']
@@ -2133,11 +2375,13 @@ Call Duration: {call_duration:.3f} seconds
         formatted_text = formatted_text.replace("! —", "!\n—")
         
         if formatted_text != text:
-            log_debug(f"DIALOG_FORMAT_DEBUG: Dialog formatting applied!")
-            log_debug(f"DIALOG_FORMAT_DEBUG: Original: {repr(text)}")
-            log_debug(f"DIALOG_FORMAT_DEBUG: Formatted: {repr(formatted_text)}")
-        else:
-            log_debug(f"DIALOG_FORMAT_DEBUG: No changes made to text")
+            log_debug_coalesced(
+                "translation-dialog-format-applied",
+                "Dialog formatting applied "
+                f"input {summarize_text_for_log(text)} "
+                f"output {summarize_text_for_log(formatted_text)}",
+                interval_seconds=5.0,
+            )
         
         return formatted_text
     

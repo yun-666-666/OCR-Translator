@@ -2,10 +2,12 @@ import base64
 import hashlib
 import json
 import math
+import os
 import threading
 import time
 import uuid
 from collections import deque
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
@@ -14,8 +16,28 @@ from logger import log_debug
 from ocr_utils import normalize_api_ocr_image_detail
 
 
+class _HTMLTitleParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._in_title = False
+        self.title_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if str(tag).lower() == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag):
+        if str(tag).lower() == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title_parts.append(str(data))
+
+
 ACTIVE_PROFILE_KINDS = {"translation", "ocr"}
 CUSTOM_AI_CREDENTIAL_SERVICE = "OCR-Translator-CustomAI"
+CUSTOM_AI_PROFILE_TEMP_STALE_SECONDS = 300.0
 CUSTOM_AI_LATENCY_MODE_NONE = "none"
 CUSTOM_AI_LATENCY_MODE_SAFE = "safe"
 CUSTOM_AI_LATENCY_MODE_STREAM = "stream"
@@ -344,12 +366,37 @@ class CustomAIProfileManager:
     def __init__(self, path="custom_ai_profiles.json", credential_store=None):
         self.path = Path(path)
         self.credential_store = credential_store or create_default_credential_store(CUSTOM_AI_CREDENTIAL_SERVICE)
+        self._data_lock = threading.RLock()
+        self._transaction_lock = threading.RLock()
         self.data = {
             "profiles": [],
             "active_translation_profile_id": None,
             "active_ocr_profile_id": None,
         }
+        self._cleanup_stale_atomic_temp_files()
         self.load()
+
+    def _cleanup_stale_atomic_temp_files(self):
+        cutoff = time.time() - CUSTOM_AI_PROFILE_TEMP_STALE_SECONDS
+        pattern = f".{self.path.name}.*.tmp"
+        try:
+            candidates = list(self.path.parent.glob(pattern))
+        except Exception as error:
+            log_debug(
+                "Custom AI profiles temporary-file scan failed: "
+                f"{type(error).__name__}"
+            )
+            return
+        for candidate in candidates:
+            try:
+                if candidate.stat().st_mtime > cutoff:
+                    continue
+                candidate.unlink()
+            except Exception as error:
+                log_debug(
+                    "Custom AI profiles stale temporary-file cleanup failed: "
+                    f"{type(error).__name__}"
+                )
 
     def load(self):
         if not self.path.exists():
@@ -368,20 +415,86 @@ class CustomAIProfileManager:
         except Exception as e:
             log_debug(f"Custom AI profiles load failed: {e}")
 
-    def save(self):
+    def _snapshot_data(self):
+        with self._data_lock:
+            return {
+                "profiles": [
+                    dict(profile)
+                    for profile in self.data.get("profiles", [])
+                    if isinstance(profile, dict)
+                ],
+                "active_translation_profile_id": self.data.get(
+                    "active_translation_profile_id"
+                ),
+                "active_ocr_profile_id": self.data.get(
+                    "active_ocr_profile_id"
+                ),
+            }
+
+    def _publish_data(self, staged_data):
+        published_data = {
+            "profiles": [
+                dict(profile)
+                for profile in staged_data.get("profiles", [])
+                if isinstance(profile, dict)
+            ],
+            "active_translation_profile_id": staged_data.get(
+                "active_translation_profile_id"
+            ),
+            "active_ocr_profile_id": staged_data.get(
+                "active_ocr_profile_id"
+            ),
+        }
+        with self._data_lock:
+            self.data = published_data
+
+    def _save_staged_data(self, staged_data):
+        try:
+            return bool(self.save(staged_data))
+        except Exception as error:
+            log_debug(
+                "Custom AI profiles staged save failed: "
+                f"{type(error).__name__}"
+            )
+            return False
+
+    def save(self, data=None):
+        temporary_path = None
         try:
             if self.path.parent and str(self.path.parent) != ".":
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("w", encoding="utf-8") as f:
-                json.dump(self.serialize_for_disk(), f, indent=2, ensure_ascii=False)
+            temporary_path = self.path.with_name(
+                f".{self.path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            with temporary_path.open("x", encoding="utf-8", newline="\n") as f:
+                json.dump(
+                    self.serialize_for_disk(data),
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, self.path)
+            temporary_path = None
             return True
         except Exception as e:
             log_debug(f"Custom AI profiles save failed: {e}")
             return False
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except Exception as cleanup_error:
+                    log_debug(
+                        "Custom AI profiles temporary-file cleanup failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
 
-    def serialize_for_disk(self):
+    def serialize_for_disk(self, data=None):
+        data = self._snapshot_data() if data is None else data
         serialized_profiles = []
-        for profile in self.data.get("profiles", []):
+        for profile in data.get("profiles", []):
             if not isinstance(profile, dict):
                 continue
             serialized = {
@@ -408,12 +521,15 @@ class CustomAIProfileManager:
             serialized_profiles.append(serialized)
         return {
             "profiles": serialized_profiles,
-            "active_translation_profile_id": self.data.get("active_translation_profile_id"),
-            "active_ocr_profile_id": self.data.get("active_ocr_profile_id"),
+            "active_translation_profile_id": data.get("active_translation_profile_id"),
+            "active_ocr_profile_id": data.get("active_ocr_profile_id"),
         }
 
     def _credential_ref(self, profile_id):
         return f"custom-ai:{profile_id}:api_key"
+
+    def _versioned_credential_ref(self, profile_id):
+        return f"{self._credential_ref(profile_id)}:{uuid.uuid4().hex}"
 
     def _log_credential_issue(self, action, credential_ref, error, fallback=False):
         fallback_text = "; plaintext fallback retained" if fallback else ""
@@ -509,11 +625,12 @@ class CustomAIProfileManager:
         self._repair_active_ids()
         return should_save
 
-    def _first_available_profile_id(self):
-        enabled = next((p for p in self.data.get("profiles", []) if p.get("enabled", True)), None)
+    def _first_available_profile_id(self, data=None):
+        data = self.data if data is None else data
+        enabled = next((p for p in data.get("profiles", []) if p.get("enabled", True)), None)
         if enabled:
             return enabled["id"]
-        first = next(iter(self.data.get("profiles", [])), None)
+        first = next(iter(data.get("profiles", [])), None)
         return first["id"] if first else None
 
     def _repair_active_ids(self):
@@ -533,7 +650,11 @@ class CustomAIProfileManager:
             raise ValueError(f"Invalid active profile kind: {kind}")
 
     def list_profiles(self, kind=None, enabled_only=False):
-        profiles = list(self.data.get("profiles", []))
+        with self._data_lock:
+            profiles = [
+                dict(profile)
+                for profile in self.data.get("profiles", [])
+            ]
         if kind is not None:
             self._validate_kind(kind)
         if enabled_only:
@@ -541,23 +662,41 @@ class CustomAIProfileManager:
         return profiles
 
     def get_profile(self, profile_id):
-        for profile in self.data.get("profiles", []):
-            if profile.get("id") == profile_id:
-                return profile
+        with self._data_lock:
+            for profile in self.data.get("profiles", []):
+                if profile.get("id") == profile_id:
+                    return dict(profile)
         return None
 
     def get_active_profile(self, kind):
-        active_id = self.data.get(self._active_key(kind))
-        return self.get_profile(active_id) if active_id else None
+        with self._data_lock:
+            active_id = self.data.get(self._active_key(kind))
+            if not active_id:
+                return None
+            for profile in self.data.get("profiles", []):
+                if profile.get("id") == active_id:
+                    return dict(profile)
+            return None
 
     def set_active_profile(self, kind, profile_id):
         self._validate_kind(kind)
-        profile = self.get_profile(profile_id)
-        if not profile:
-            raise ValueError(f"No profile with id {profile_id}")
-        self.data[self._active_key(kind)] = profile_id
-        self.save()
-        return profile
+        with self._transaction_lock:
+            staged_data = self._snapshot_data()
+            profile = next(
+                (
+                    item
+                    for item in staged_data.get("profiles", [])
+                    if item.get("id") == profile_id
+                ),
+                None,
+            )
+            if not profile:
+                raise ValueError(f"No profile with id {profile_id}")
+            staged_data[self._active_key(kind)] = profile_id
+            if not self._save_staged_data(staged_data):
+                raise RuntimeError("Failed to persist active Custom AI profile")
+            self._publish_data(staged_data)
+            return self.get_profile(profile_id)
 
     def add_profile(
         self,
@@ -587,78 +726,131 @@ class CustomAIProfileManager:
                 structured_output_mode
             ),
         }
-        self._store_profile_api_key(profile, str(api_key), "write")
         profile["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
             reasoning_effort
         )
         self._validate_profile(profile)
-        self.data["profiles"].append(profile)
-        for active_kind in ACTIVE_PROFILE_KINDS:
-            if not self.data.get(self._active_key(active_kind)):
-                self.data[self._active_key(active_kind)] = profile["id"]
-        self.save()
-        return profile
+        with self._transaction_lock:
+            staged_data = self._snapshot_data()
+            self._store_profile_api_key(profile, str(api_key), "write")
+            staged_data["profiles"].append(profile)
+            for active_kind in ACTIVE_PROFILE_KINDS:
+                active_key = self._active_key(active_kind)
+                if not staged_data.get(active_key):
+                    staged_data[active_key] = profile["id"]
+            if not self._save_staged_data(staged_data):
+                self._delete_profile_api_key(profile)
+                raise RuntimeError("Failed to persist new Custom AI profile")
+            self._publish_data(staged_data)
+            return self.get_profile(profile["id"])
 
     def update_profile(self, profile_id, **updates):
-        profile = self.get_profile(profile_id)
-        if not profile:
-            raise ValueError(f"No profile with id {profile_id}")
         if "api_key" in updates and not str(updates.get("api_key") or ""):
             raise ValueError("API key is required")
-        for key in [
-            "name",
-            "base_url",
-            "api_key",
-            "model",
-            "enabled",
-            "wire_api",
-            "reasoning_effort",
-            "model_reasoning_effort",
-            "structured_output_mode",
-        ]:
-            if key in updates:
-                if key == "model_reasoning_effort":
-                    profile["reasoning_effort"] = updates[key]
-                else:
-                    profile[key] = updates[key]
-        profile["name"] = str(profile.get("name") or "").strip()
-        profile["base_url"] = str(profile.get("base_url") or "").strip()
-        if "api_key" in updates:
-            self._store_profile_api_key(profile, str(updates.get("api_key") or ""), "write")
-        else:
-            profile["api_key"] = str(profile.get("api_key") or "")
-        profile["model"] = str(profile.get("model") or "").strip()
-        profile["enabled"] = bool(profile.get("enabled", True))
-        profile["wire_api"] = normalize_custom_ai_wire_api(profile.get("wire_api"))
-        profile["structured_output_mode"] = normalize_custom_ai_structured_output_mode(
-            profile.get("structured_output_mode")
-        )
-        profile["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
-            profile.get("reasoning_effort")
-        )
-        self._validate_profile(profile)
-        self.save()
-        return profile
+        with self._transaction_lock:
+            staged_data = self._snapshot_data()
+            staged_profile = next(
+                (
+                    item
+                    for item in staged_data.get("profiles", [])
+                    if item.get("id") == profile_id
+                ),
+                None,
+            )
+            if not staged_profile:
+                raise ValueError(f"No profile with id {profile_id}")
+            previous_ref = str(
+                staged_profile.get("api_key_ref")
+                or staged_profile.get("credential_ref")
+                or ""
+            ).strip()
+            for key in [
+                "name",
+                "base_url",
+                "api_key",
+                "model",
+                "enabled",
+                "wire_api",
+                "reasoning_effort",
+                "model_reasoning_effort",
+                "structured_output_mode",
+            ]:
+                if key in updates:
+                    if key == "model_reasoning_effort":
+                        staged_profile["reasoning_effort"] = updates[key]
+                    else:
+                        staged_profile[key] = updates[key]
+            staged_profile["name"] = str(
+                staged_profile.get("name") or ""
+            ).strip()
+            staged_profile["base_url"] = str(
+                staged_profile.get("base_url") or ""
+            ).strip()
+            staged_profile["api_key"] = str(
+                staged_profile.get("api_key") or ""
+            )
+            staged_profile["model"] = str(
+                staged_profile.get("model") or ""
+            ).strip()
+            staged_profile["enabled"] = bool(
+                staged_profile.get("enabled", True)
+            )
+            staged_profile["wire_api"] = normalize_custom_ai_wire_api(
+                staged_profile.get("wire_api")
+            )
+            staged_profile["structured_output_mode"] = normalize_custom_ai_structured_output_mode(
+                staged_profile.get("structured_output_mode")
+            )
+            staged_profile["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
+                staged_profile.get("reasoning_effort")
+            )
+            self._validate_profile(staged_profile)
+
+            staged_new_credential = "api_key" in updates
+            if staged_new_credential:
+                staged_profile["api_key_ref"] = self._versioned_credential_ref(
+                    profile_id
+                )
+                staged_profile.pop("credential_ref", None)
+                self._store_profile_api_key(
+                    staged_profile,
+                    str(updates.get("api_key") or ""),
+                    "write",
+                )
+
+            if not self._save_staged_data(staged_data):
+                if staged_new_credential:
+                    self._delete_profile_api_key(staged_profile)
+                raise RuntimeError("Failed to persist Custom AI profile update")
+
+            self._publish_data(staged_data)
+            if staged_new_credential and previous_ref:
+                self._delete_profile_api_key({"api_key_ref": previous_ref})
+            return self.get_profile(profile_id)
 
     def delete_profile(self, profile_id):
-        removed = None
-        remaining = []
-        for profile in self.data.get("profiles", []):
-            if profile.get("id") == profile_id:
-                removed = profile
-            else:
-                remaining.append(profile)
-        if not removed:
-            return False
-        self.data["profiles"] = remaining
-        self._delete_profile_api_key(removed)
-        replacement_id = self._first_available_profile_id()
-        for kind in ACTIVE_PROFILE_KINDS:
-            active_key = self._active_key(kind)
-            if self.data.get(active_key) == profile_id:
-                self.data[active_key] = replacement_id
-        self.save()
-        return True
+        with self._transaction_lock:
+            staged_data = self._snapshot_data()
+            removed = None
+            remaining = []
+            for profile in staged_data.get("profiles", []):
+                if profile.get("id") == profile_id:
+                    removed = profile
+                else:
+                    remaining.append(profile)
+            if not removed:
+                return False
+            staged_data["profiles"] = remaining
+            replacement_id = self._first_available_profile_id(staged_data)
+            for kind in ACTIVE_PROFILE_KINDS:
+                active_key = self._active_key(kind)
+                if staged_data.get(active_key) == profile_id:
+                    staged_data[active_key] = replacement_id
+            if not self._save_staged_data(staged_data):
+                raise RuntimeError("Failed to persist Custom AI profile deletion")
+            self._publish_data(staged_data)
+            self._delete_profile_api_key(removed)
+            return True
 
     def _validate_profile(self, profile):
         if not profile.get("name"):
@@ -691,6 +883,7 @@ class CustomAIProvider:
         self._unsupported_output_limit_keys = set()
         self._unsupported_structured_output_keys = set()
         self._unsupported_reasoning_effort_keys = set()
+        self._unsupported_prompt_cache_key_keys = set()
 
     def _get_http_client(self, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
@@ -783,6 +976,31 @@ class CustomAIProvider:
             )
         return (self._base_url_cache_key(profile), "")
 
+    def _request_cooldown_cache_key(self, profile):
+        transport_key = self._rate_limit_cache_key(profile)
+        profile = profile if isinstance(profile, dict) else {}
+        return transport_key + (
+            normalize_custom_ai_wire_api(profile.get("wire_api")),
+            str(profile.get("model") or "").strip(),
+        )
+
+    def _cooldown_scope_for_failure(self, response, detail):
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code == 429 or self._looks_like_rate_limit_error(detail):
+            return "transport"
+        return "request"
+
+    def _cooldown_cache_key(self, profile, scope):
+        if scope == "transport":
+            return self._rate_limit_cache_key(profile)
+        return self._request_cooldown_cache_key(profile)
+
+    def _cooldown_cache_keys_for_profile(self, profile):
+        return (
+            self._rate_limit_cache_key(profile),
+            self._request_cooldown_cache_key(profile),
+        )
+
     def _credential_scope_key(self, profile):
         api_key = ""
         if isinstance(profile, dict):
@@ -848,6 +1066,24 @@ class CustomAIProvider:
             self._base_url_cache_key(profile.get("base_url")),
             str(profile.get("model") or "").strip(),
         )
+
+    def _prompt_cache_key_capability_key(self, profile):
+        profile = profile if isinstance(profile, dict) else {}
+        return (
+            normalize_custom_ai_wire_api(profile.get("wire_api")),
+            self._canonical_wire_endpoint_cache_key(profile),
+            str(profile.get("model") or "").strip(),
+        )
+
+    def _prompt_cache_key_is_known_unsupported(self, profile):
+        capability_key = self._prompt_cache_key_capability_key(profile)
+        with self._capability_lock:
+            return capability_key in self._unsupported_prompt_cache_key_keys
+
+    def _remember_unsupported_prompt_cache_key(self, profile):
+        capability_key = self._prompt_cache_key_capability_key(profile)
+        with self._capability_lock:
+            self._unsupported_prompt_cache_key_keys.add(capability_key)
 
     def _output_limit_field(self, profile):
         if self._uses_responses_api(profile):
@@ -1089,6 +1325,57 @@ class CustomAIProvider:
         request_payload = dict(payload)
         request_payload.pop(output_limit_field, None)
         return request_payload
+
+    def _with_responses_prompt_cache_key(self, profile, payload, request_kind):
+        if (
+            not isinstance(payload, dict)
+            or not self._uses_responses_api(profile)
+            or self._prompt_cache_key_is_known_unsupported(profile)
+        ):
+            return payload
+        prompt_cache_key = self._translation_prompt_cache_key(profile, request_kind)
+        if not prompt_cache_key or "prompt_cache_key" in payload:
+            return payload
+        request_payload = dict(payload)
+        request_payload["prompt_cache_key"] = prompt_cache_key
+        return request_payload
+
+    def _without_prompt_cache_key(self, payload):
+        if not isinstance(payload, dict) or "prompt_cache_key" not in payload:
+            return payload
+        request_payload = dict(payload)
+        request_payload.pop("prompt_cache_key", None)
+        return request_payload
+
+    def _response_rejects_prompt_cache_key(
+        self,
+        response,
+        url,
+        api_key,
+    ):
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code not in {400, 422}:
+            return False
+        error_message = self._response_error_message(
+            response,
+            url,
+            api_key,
+        ).lower()
+        if "prompt_cache_key" not in error_message:
+            return False
+        return any(
+            marker in error_message
+            for marker in (
+                "unsupported",
+                "not supported",
+                "unknown",
+                "unrecognized",
+                "not permitted",
+                "not allowed",
+                "extra input",
+                "extra field",
+            )
+        )
 
     def _response_rejects_output_limit(
         self,
@@ -1365,7 +1652,26 @@ class CustomAIProvider:
         response = send(request_payload)
         output_limit_field = self._output_limit_field(profile)
         pending_reasoning_memory = None
-        for _attempt in range(3):
+        for _attempt in range(4):
+            if (
+                "prompt_cache_key" in request_payload
+                and self._response_rejects_prompt_cache_key(
+                    response,
+                    url,
+                    api_key,
+                )
+            ):
+                self._remember_unsupported_prompt_cache_key(profile)
+                request_payload = self._without_prompt_cache_key(
+                    request_payload,
+                )
+                log_debug(
+                    "COMPAT: retrying Custom AI request without unsupported "
+                    "prompt_cache_key"
+                )
+                response = send(request_payload)
+                continue
+
             if (
                 request_kind
                 and self._payload_has_reasoning_effort(request_payload)
@@ -1567,46 +1873,70 @@ class CustomAIProvider:
             return 0.0
 
         base_cooldown_seconds = self._parse_retry_after_seconds(response)
-        cache_key = self._rate_limit_cache_key(profile)
+        scope = self._cooldown_scope_for_failure(response, detail)
+        cache_key = self._cooldown_cache_key(profile, scope)
         if not cache_key:
             return base_cooldown_seconds
 
+        now = time.monotonic()
         with self._rate_limit_lock:
-            backoff_count = self._rate_limit_backoff_counts.get(cache_key, 0) + 1
-            self._rate_limit_backoff_counts[cache_key] = backoff_count
-            backoff_multiplier = 2 ** min(max(0, backoff_count - 1), 8)
-            cooldown_seconds = min(300.0, base_cooldown_seconds * backoff_multiplier)
-            cooldown_until = time.monotonic() + cooldown_seconds
             existing_until = self._rate_limit_cooldowns.get(cache_key, 0.0)
-            self._rate_limit_cooldowns[cache_key] = max(existing_until, cooldown_until)
+            if existing_until > now:
+                cooldown_until = max(
+                    existing_until,
+                    now + base_cooldown_seconds,
+                )
+                cooldown_seconds = cooldown_until - now
+            else:
+                backoff_count = (
+                    self._rate_limit_backoff_counts.get(cache_key, 0) + 1
+                )
+                self._rate_limit_backoff_counts[cache_key] = backoff_count
+                backoff_multiplier = 2 ** min(max(0, backoff_count - 1), 8)
+                cooldown_seconds = min(
+                    300.0,
+                    base_cooldown_seconds * backoff_multiplier,
+                )
+                cooldown_until = now + cooldown_seconds
+            self._rate_limit_cooldowns[cache_key] = cooldown_until
 
+        profile_values = profile if isinstance(profile, dict) else {}
+        model_name = " ".join(
+            str(profile_values.get("model") or "").split()
+        )[:80] or "unknown"
         log_debug(
-            "LATENCY: custom_ai rate limit cooldown activated "
-            f"provider={profile.get('name', 'Custom AI') if isinstance(profile, dict) else 'Custom AI'} "
+            "LATENCY: custom_ai provider cooldown activated "
+            f"provider={profile_values.get('name', 'Custom AI')} "
+            f"scope={scope} model={model_name} "
             f"seconds={cooldown_seconds:.1f} detail={str(detail or '').strip()[:160]}"
         )
         return cooldown_seconds
 
     def _note_rate_limit_success(self, profile):
-        cache_key = self._rate_limit_cache_key(profile)
-        if not cache_key:
-            return
+        cache_keys = self._cooldown_cache_keys_for_profile(profile)
         with self._rate_limit_lock:
-            self._rate_limit_backoff_counts.pop(cache_key, None)
+            for cache_key in cache_keys:
+                self._rate_limit_backoff_counts.pop(cache_key, None)
 
     def get_cooldown_remaining(self, profile):
-        cache_key = self._rate_limit_cache_key(profile)
-        if not cache_key:
-            return 0.0
+        cache_keys = self._cooldown_cache_keys_for_profile(profile)
 
         with self._rate_limit_lock:
-            cooldown_until = self._rate_limit_cooldowns.get(cache_key, 0.0)
+            cooldown_until = max(
+                (
+                    self._rate_limit_cooldowns.get(cache_key, 0.0)
+                    for cache_key in cache_keys
+                ),
+                default=0.0,
+            )
 
-        remaining = cooldown_until - time.monotonic()
+        now = time.monotonic()
+        remaining = cooldown_until - now
         if remaining <= 0:
             with self._rate_limit_lock:
-                if self._rate_limit_cooldowns.get(cache_key, 0.0) <= time.monotonic():
-                    self._rate_limit_cooldowns.pop(cache_key, None)
+                for cache_key in cache_keys:
+                    if self._rate_limit_cooldowns.get(cache_key, 0.0) <= now:
+                        self._rate_limit_cooldowns.pop(cache_key, None)
             return 0.0
         return remaining
 
@@ -1660,6 +1990,37 @@ class CustomAIProvider:
     def _is_openrouter_profile(self, profile):
         host = urlparse(profile.get("base_url", "")).netloc.lower()
         return host == "openrouter.ai" or host.endswith(".openrouter.ai")
+
+    def _translation_prompt_cache_key(self, profile, request_kind):
+        if str(request_kind or "").strip().lower() != "translation":
+            return None
+        profile = profile if isinstance(profile, dict) else {}
+        cache_identity = {
+            "base_url": self._base_url_cache_key(profile.get("base_url")),
+            "model": str(profile.get("model") or "").strip(),
+            "profile_id": str(profile.get("id") or "").strip(),
+            "wire_api": normalize_custom_ai_wire_api(profile.get("wire_api")),
+        }
+        encoded_identity = json.dumps(
+            cache_identity,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "ocr-translator-" + hashlib.sha256(encoded_identity).hexdigest()[:24]
+
+    def _xai_chat_prompt_cache_headers(self, profile, headers, request_kind):
+        if self._uses_responses_api(profile):
+            return headers
+        host = (urlparse(profile.get("base_url", "")).hostname or "").lower()
+        if host != "api.x.ai":
+            return headers
+        prompt_cache_key = self._translation_prompt_cache_key(profile, request_kind)
+        if not prompt_cache_key:
+            return headers
+        routed_headers = dict(headers)
+        routed_headers["x-grok-conv-id"] = prompt_cache_key
+        return routed_headers
 
     def _uses_responses_api(self, profile):
         return normalize_custom_ai_wire_api(profile.get("wire_api")) == CUSTOM_AI_WIRE_API_RESPONSES
@@ -2275,7 +2636,9 @@ class CustomAIProvider:
             raise ValueError(error_message)
         output_text = response_json.get("output_text")
         if output_text:
-            return str(output_text).strip()
+            normalized_output_text = str(output_text).strip()
+            if normalized_output_text:
+                return normalized_output_text
 
         chunks = []
         for output_item in response_json.get("output", []) or []:
@@ -2292,6 +2655,91 @@ class CustomAIProvider:
         if not content:
             raise ValueError("Responses API response did not contain output text")
         return content
+
+    def _responses_response_shape_summary(self, response_json):
+        if not isinstance(response_json, dict):
+            return f"response_type={type(response_json).__name__}"
+
+        known_statuses = {
+            "cancelled",
+            "completed",
+            "failed",
+            "in_progress",
+            "incomplete",
+            "queued",
+        }
+        status = str(response_json.get("status") or "missing").strip().lower()
+        if status not in known_statuses and status != "missing":
+            status = "other"
+
+        incomplete_details = response_json.get("incomplete_details")
+        incomplete_reason = "none"
+        if isinstance(incomplete_details, dict):
+            raw_reason = str(incomplete_details.get("reason") or "").strip().lower()
+            if raw_reason in {"content_filter", "max_output_tokens"}:
+                incomplete_reason = raw_reason
+            elif raw_reason:
+                incomplete_reason = "other"
+
+        output_items = response_json.get("output")
+        output_items = output_items if isinstance(output_items, list) else []
+        message_items = 0
+        reasoning_items = 0
+        content_items = 0
+        top_level_output_text = response_json.get("output_text")
+        output_text_items = (
+            1
+            if top_level_output_text and str(top_level_output_text).strip()
+            else 0
+        )
+        refusal_items = 0
+        for output_item in output_items:
+            if not isinstance(output_item, dict):
+                continue
+            item_type = output_item.get("type")
+            if item_type == "message":
+                message_items += 1
+            elif item_type == "reasoning":
+                reasoning_items += 1
+            content = output_item.get("content")
+            if not isinstance(content, list):
+                continue
+            for content_item in content:
+                if not isinstance(content_item, dict):
+                    continue
+                content_items += 1
+                content_type = content_item.get("type")
+                if content_type in {"output_text", "text"}:
+                    output_text_items += 1
+                elif content_type == "refusal":
+                    refusal_items += 1
+
+        usage = response_json.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        output_details = usage.get("output_tokens_details")
+        output_details = output_details if isinstance(output_details, dict) else {}
+
+        def safe_count(value):
+            try:
+                return max(0, int(value or 0))
+            except (OverflowError, TypeError, ValueError):
+                return 0
+
+        return (
+            f"status={status} incomplete_reason={incomplete_reason} "
+            f"output_items={len(output_items)} message_items={message_items} "
+            f"reasoning_items={reasoning_items} content_items={content_items} "
+            f"output_text_items={output_text_items} refusal_items={refusal_items} "
+            f"output_tokens={safe_count(usage.get('output_tokens'))} "
+            f"reasoning_tokens={safe_count(output_details.get('reasoning_tokens'))}"
+        )
+
+    def _is_empty_responses_output_error(self, profile, error):
+        return (
+            self._uses_responses_api(profile)
+            and str(error).strip()
+            == "Responses API response did not contain output text"
+        )
 
     def _parse_response_text(self, profile, response_json):
         if self._uses_responses_api(profile):
@@ -2498,6 +2946,10 @@ class CustomAIProvider:
                 ),
             )
         except ValueError as parse_error:
+            empty_responses_output = self._is_empty_responses_output_error(
+                profile,
+                parse_error,
+            )
             should_retry_plain_text = (
                 used_stream_to_non_stream_fallback
                 and self._structured_output_mode(profile)
@@ -2505,14 +2957,39 @@ class CustomAIProvider:
                 and self._payload_has_structured_output(active_payload)
                 and "structured translation response" in str(parse_error).casefold()
             )
-            if not should_retry_plain_text:
+            if not should_retry_plain_text and not empty_responses_output:
                 raise
-            retry_payload = self._without_structured_output(active_payload)
-            log_debug(
-                "LATENCY: custom_ai structured stream fallback failed; "
-                "retrying plain-text request: "
-                f"{type(parse_error).__name__} - {parse_error}"
+            retry_without_structured_output = (
+                should_retry_plain_text
+                or (
+                    empty_responses_output
+                    and self._structured_output_mode(profile)
+                    == CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
+                    and self._payload_has_structured_output(active_payload)
+                )
             )
+            retry_payload = (
+                self._without_structured_output(active_payload)
+                if retry_without_structured_output
+                else dict(active_payload)
+            )
+            if empty_responses_output:
+                retry_contract = (
+                    "plain_text"
+                    if retry_without_structured_output
+                    else "preserved"
+                )
+                log_debug(
+                    "RECOVERY: custom_ai responses empty output recovery; "
+                    f"retry_contract={retry_contract} "
+                    f"{self._responses_response_shape_summary(response_json)}"
+                )
+            else:
+                log_debug(
+                    "LATENCY: custom_ai structured stream fallback failed; "
+                    "retrying plain-text request: "
+                    f"{type(parse_error).__name__} - {parse_error}"
+                )
             response_json, retry_duration = active_request(retry_payload)
             duration += retry_duration
             terminal_error = self._translation_terminal_error(
@@ -2523,7 +3000,16 @@ class CustomAIProvider:
                 raise ValueError(terminal_error)
             result = self._normalize_translation_output(
                 text,
-                self._parse_response_text(profile, response_json),
+                (
+                    self._parse_response_text(profile, response_json)
+                    if retry_without_structured_output
+                    else self._parse_translation_response_text(
+                        profile,
+                        response_json,
+                        latency_mode=response_latency_mode,
+                        stream=response_stream,
+                    )
+                ),
             )
         return result, self._extract_usage(response_json), duration
 
@@ -2683,6 +3169,11 @@ class CustomAIProvider:
             "Authorization": f"Bearer {profile.get('api_key', '')}",
             "Content-Type": "application/json",
         }
+        headers = self._xai_chat_prompt_cache_headers(
+            profile,
+            headers,
+            request_kind,
+        )
         if self._uses_responses_api(profile):
             return self._responses_post(
                 profile,
@@ -2777,6 +3268,11 @@ class CustomAIProvider:
         api_key = profile.get("api_key", "")
         self._raise_if_rate_limited(profile)
         request_payload = self.build_responses_payload_from_chat_payload(profile, payload, stream=False)
+        request_payload = self._with_responses_prompt_cache_key(
+            profile,
+            request_payload,
+            request_kind,
+        )
         cache_key, urls, cached_url = self._ordered_candidates(
             profile.get("base_url"),
             self._successful_responses_urls,
@@ -2858,6 +3354,11 @@ class CustomAIProvider:
             "Authorization": f"Bearer {profile.get('api_key', '')}",
             "Content-Type": "application/json",
         }
+        headers = self._xai_chat_prompt_cache_headers(
+            profile,
+            headers,
+            request_kind,
+        )
         if self._uses_responses_api(profile):
             return self._stream_responses_post(
                 profile,
@@ -2961,6 +3462,11 @@ class CustomAIProvider:
         }
         api_key = profile.get("api_key", "")
         request_payload = self.build_responses_payload_from_chat_payload(profile, payload, stream=True)
+        request_payload = self._with_responses_prompt_cache_key(
+            profile,
+            request_payload,
+            request_kind,
+        )
         cache_key, urls, cached_url = self._ordered_candidates(
             profile.get("base_url"),
             self._successful_responses_urls,
@@ -3166,6 +3672,33 @@ class CustomAIProvider:
             result["usage"] = usage
         return result
 
+    def _compact_html_error_detail(self, response, text):
+        text = str(text or "").strip()
+        headers = getattr(response, "headers", None) or {}
+        content_type = ""
+        if hasattr(headers, "get"):
+            content_type = str(
+                headers.get("Content-Type")
+                or headers.get("content-type")
+                or ""
+            ).lower()
+        leading = text.lstrip().lower()
+        if (
+            "text/html" not in content_type
+            and not leading.startswith(("<!doctype html", "<html"))
+        ):
+            return None
+
+        parser = _HTMLTitleParser()
+        try:
+            parser.feed(text[:16384])
+        except Exception:
+            pass
+        title = " ".join("".join(parser.title_parts).split())
+        if title:
+            return f"Upstream HTML error page: {title[:160]}"
+        return "Upstream returned an HTML error page"
+
     def _response_error_message(self, response, url, api_key):
         status_code = int(getattr(response, "status_code", 0) or 0)
         detail = ""
@@ -3180,7 +3713,11 @@ class CustomAIProvider:
             elif payload:
                 detail = json.dumps(payload, ensure_ascii=False)
         except Exception:
-            detail = str(getattr(response, "text", "") or "").strip()
+            response_text = str(getattr(response, "text", "") or "").strip()
+            detail = (
+                self._compact_html_error_detail(response, response_text)
+                or response_text
+            )
 
         detail = self._sanitize_error(detail, api_key)
         if len(detail) > 500:
@@ -3191,6 +3728,7 @@ class CustomAIProvider:
 
     def _non_json_response_message(self, response, url, api_key):
         text = str(getattr(response, "text", "") or "").strip()
+        text = self._compact_html_error_detail(response, text) or text
         text = self._sanitize_error(text, api_key)
         if len(text) > 300:
             text = text[:300] + "..."
@@ -3260,7 +3798,14 @@ class CustomAIProvider:
             if prompt_tokens > 0
             else 0.0
         )
-        return {
+        cost_usd = None
+        try:
+            cost_ticks = usage.get("cost_in_usd_ticks")
+            if cost_ticks is not None:
+                cost_usd = float(cost_ticks) / 10_000_000_000
+        except (TypeError, ValueError):
+            cost_usd = None
+        normalized_usage = {
             "prompt_tokens": prompt_tokens,
             "input_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -3270,3 +3815,6 @@ class CustomAIProvider:
             "cached_input_tokens": cached_prompt_tokens,
             "cached_input_ratio": cached_input_ratio,
         }
+        if cost_usd is not None:
+            normalized_usage["cost_usd"] = cost_usd
+        return normalized_usage

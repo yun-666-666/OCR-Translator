@@ -8,13 +8,12 @@ import numpy as np
 import cv2
 import pyautogui
 import hashlib
-import random
 import re
 import threading
 import traceback
 from datetime import datetime
 
-from logger import log_debug
+from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 from ocr_utils import (
     capture_screen_region,
     build_capture_signature, build_ocr_frame_cache_key,
@@ -43,6 +42,49 @@ OCR_STABILITY_GATE_MIN_WAIT_SECONDS = 0.12
 OCR_STABILITY_GATE_MAX_WAIT_SECONDS = 0.25
 OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH = 12
 OCR_STABILITY_GATE_NOISE_RATIO = 0.35
+CAPTURE_SLOW_SECONDS_MSS = 0.050
+CAPTURE_SLOW_SECONDS_PYAUTOGUI = 0.250
+OCR_CACHE_HIT_SLOW_SECONDS = 0.050
+PADDLE_OCR_SLOW_SECONDS = 0.500
+
+
+def _log_hot_path_timing(
+    event_key,
+    message,
+    duration_seconds,
+    slow_threshold_seconds,
+    normal_interval_seconds=5.0,
+    slow_interval_seconds=1.0,
+):
+    """Coalesce normal timing samples separately from slow-path samples."""
+    try:
+        duration_seconds = max(0.0, float(duration_seconds))
+    except (TypeError, ValueError):
+        duration_seconds = 0.0
+    try:
+        slow_threshold_seconds = max(0.0, float(slow_threshold_seconds))
+    except (TypeError, ValueError):
+        slow_threshold_seconds = 0.0
+
+    is_slow = duration_seconds >= slow_threshold_seconds
+    channel = "slow" if is_slow else "normal"
+    interval_seconds = (
+        slow_interval_seconds if is_slow else normal_interval_seconds
+    )
+    prepared_message = f"SLOW: {message}" if is_slow else message
+    return log_debug_coalesced(
+        (event_key, channel),
+        prepared_message,
+        interval_seconds=interval_seconds,
+    )
+
+
+def _log_paddle_ocr_route():
+    return log_debug_coalesced(
+        "ocr-routing-paddle",
+        "WT: OCR routing to PaddleOCR PP-OCRv6",
+        interval_seconds=5.0,
+    )
 
 
 def _runtime_metrics(app):
@@ -139,6 +181,19 @@ def _get_screenshot_frame_hash(screenshot_pil):
         Image.Resampling.NEAREST if hasattr(Image, "Resampling") else Image.NEAREST
     )
     return hashlib.md5(cache_img.tobytes()).hexdigest()
+
+
+def _advance_local_capture_signature(
+    last_signature,
+    repeat_count,
+    current_signature,
+):
+    """Return updated local-frame state and whether to enqueue this frame."""
+    if current_signature != last_signature:
+        return current_signature, 0, True
+
+    repeat_count = max(0, int(repeat_count or 0)) + 1
+    return current_signature, repeat_count, repeat_count <= 1
 
 
 def _get_api_ocr_cache_model_key(app, provider_name):
@@ -638,6 +693,183 @@ def _has_pending_ocr_stability_candidate(app):
     return bool(getattr(gate, "pending_text", None))
 
 
+def _translation_display_epoch(app):
+    return (
+        float(
+            getattr(app, "last_successful_translation_time", 0.0)
+            or 0.0
+        ),
+        int(
+            getattr(app, "last_displayed_translation_sequence", 0)
+            or 0
+        ),
+    )
+
+
+def _advance_translation_display_activity(
+    app,
+    now,
+    last_display_time,
+    last_display_sequence,
+):
+    successful_display_time, displayed_sequence = (
+        _translation_display_epoch(app)
+    )
+    if displayed_sequence != last_display_sequence:
+        return (
+            max(
+                float(last_display_time),
+                successful_display_time,
+                float(now),
+            ),
+            displayed_sequence,
+        )
+    return (
+        max(float(last_display_time), successful_display_time),
+        last_display_sequence,
+    )
+
+
+def _translation_clear_blocker(app):
+    if getattr(app, "is_running", True) is False:
+        return "app stopped"
+    if str(getattr(app, "previous_text", "") or "").strip():
+        return "source text present"
+    if getattr(app, "active_translation_calls", None):
+        return "active translation calls"
+    if getattr(app, "active_translation_inflight_keys", None):
+        return "active translation identities"
+    if getattr(app, "pending_translation_request", None) is not None:
+        return "pending translation request"
+    if getattr(app, "pending_translation_flush_scheduled", False):
+        return "pending translation flush"
+    if _has_pending_ocr_stability_candidate(app):
+        return "pending OCR stability candidate"
+
+    translation_queue = getattr(app, "translation_queue", None)
+    if translation_queue is not None:
+        try:
+            if not translation_queue.empty():
+                return "legacy translation queue"
+        except Exception:
+            pass
+    return None
+
+
+def _apply_inactive_translation_clear(
+    app,
+    expected_epoch,
+    inactive_duration,
+    timeout_seconds,
+):
+    if (
+        getattr(
+            app,
+            "translation_inactivity_clear_scheduled_epoch",
+            None,
+        )
+        == expected_epoch
+    ):
+        app.translation_inactivity_clear_scheduled_epoch = None
+
+    current_epoch = _translation_display_epoch(app)
+    if current_epoch != expected_epoch:
+        log_debug(
+            "LATENCY: skipped stale translation inactivity clear "
+            f"expected_epoch={expected_epoch} current_epoch={current_epoch}"
+        )
+        return False
+
+    blocker = _translation_clear_blocker(app)
+    if blocker:
+        log_debug(
+            "LATENCY: deferred translation inactivity clear on UI thread "
+            f"reason={blocker}"
+        )
+        return False
+
+    try:
+        display_manager = getattr(app, "display_manager", None)
+        direct_updater = getattr(
+            display_manager,
+            "_update_translation_text_on_main_thread",
+            None,
+        )
+        if callable(direct_updater):
+            direct_updater("")
+        else:
+            app.update_translation_text("")
+    except Exception as clear_error:
+        log_debug(
+            "LATENCY: failed to apply translation inactivity clear: "
+            f"{type(clear_error).__name__} - {clear_error}"
+        )
+        return False
+
+    _clear_local_ocr_submit_state(app)
+    app.translation_inactivity_cleared_epoch = expected_epoch
+    _increment_metric(app, "translation_inactivity_clear")
+    log_debug(
+        "WT: Cleared translation once after sustained inactivity "
+        f"duration={float(inactive_duration):.1f}s "
+        f"timeout={float(timeout_seconds):.1f}s"
+    )
+    return True
+
+
+def _schedule_inactive_translation_clear(
+    app,
+    inactive_duration,
+    timeout_seconds,
+):
+    expected_epoch = _translation_display_epoch(app)
+    if expected_epoch == (0.0, 0):
+        return False
+    if (
+        getattr(app, "translation_inactivity_cleared_epoch", None)
+        == expected_epoch
+    ):
+        return False
+    if (
+        getattr(
+            app,
+            "translation_inactivity_clear_scheduled_epoch",
+            None,
+        )
+        == expected_epoch
+    ):
+        return False
+    if _translation_clear_blocker(app):
+        return False
+
+    app.translation_inactivity_clear_scheduled_epoch = expected_epoch
+    try:
+        app.root.after(
+            0,
+            _apply_inactive_translation_clear,
+            app,
+            expected_epoch,
+            float(inactive_duration),
+            float(timeout_seconds),
+        )
+    except Exception as schedule_error:
+        if (
+            getattr(
+                app,
+                "translation_inactivity_clear_scheduled_epoch",
+                None,
+            )
+            == expected_epoch
+        ):
+            app.translation_inactivity_clear_scheduled_epoch = None
+        log_debug(
+            "LATENCY: failed to schedule translation inactivity clear: "
+            f"{type(schedule_error).__name__} - {schedule_error}"
+        )
+        return False
+    return True
+
+
 def _clear_ocr_stability_gate(app, reason):
     gate = getattr(app, "ocr_stability_gate", None)
     clearer = getattr(gate, "clear", None)
@@ -685,31 +917,6 @@ def enqueue_ocr_frame_for_model(app, screenshot, ocr_model):
     return False
 
 
-def _local_ocr_candidate_has_instant_cache(app, text_to_translate):
-    enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
-    try:
-        instant_cache_enabled = (
-            enable_instant_var.get() if enable_instant_var is not None else True
-        )
-    except Exception:
-        instant_cache_enabled = True
-    if not instant_cache_enabled:
-        return False
-
-    handler = getattr(app, 'translation_handler', None)
-    getter = getattr(handler, 'get_cached_translation_for_display', None)
-    if not callable(getter):
-        return False
-    try:
-        return bool(getter(text_to_translate))
-    except Exception as cache_error:
-        log_debug(
-            "LATENCY: failed to check instant cache before OCR stability gate: "
-            f"{type(cache_error).__name__} - {cache_error}"
-        )
-        return False
-
-
 def _submit_final_local_ocr_text(
     app,
     text_to_translate,
@@ -718,9 +925,11 @@ def _submit_final_local_ocr_text(
 ):
     if _should_skip_local_ocr_resubmit(app, text_to_translate):
         app.reset_clear_timeout()
-        log_debug(
+        log_debug_coalesced(
+            "local-ocr-near-duplicate-skip",
             "LATENCY: skipped local OCR resubmit for near-duplicate stable text: "
-            f"'{text_to_translate}'"
+            f"{summarize_text_for_log(text_to_translate)}",
+            interval_seconds=5.0,
         )
         return "skipped"
 
@@ -803,20 +1012,13 @@ def _route_local_ocr_candidate_for_translation(
     if _should_skip_local_ocr_resubmit(app, text_to_translate):
         _clear_ocr_stability_gate(app, "near-duplicate local OCR")
         app.reset_clear_timeout()
-        log_debug(
+        log_debug_coalesced(
+            "local-ocr-near-duplicate-skip",
             "LATENCY: skipped local OCR resubmit for near-duplicate stable text: "
-            f"'{text_to_translate}'"
+            f"{summarize_text_for_log(text_to_translate)}",
+            interval_seconds=5.0,
         )
         return "skipped"
-
-    if _local_ocr_candidate_has_instant_cache(app, text_to_translate):
-        _clear_ocr_stability_gate(app, "instant cache hit")
-        return _submit_final_local_ocr_text(
-            app,
-            text_to_translate,
-            ocr_sequence_number,
-            requested_at_monotonic=now,
-        )
 
     gate = _get_ocr_stability_gate(app)
     decision = gate.evaluate(text_to_translate, now=now)
@@ -830,17 +1032,22 @@ def _route_local_ocr_candidate_for_translation(
         )
     if decision.action == "drop":
         _clear_ocr_stability_gate(app, decision.reason or "OCR candidate dropped")
-        log_debug(
+        log_debug_coalesced(
+            "local-ocr-stability-drop",
             "LATENCY: dropped OCR stability candidate "
-            f"reason={decision.reason}: '{text_to_translate}'"
+            f"reason={decision.reason} "
+            f"{summarize_text_for_log(text_to_translate)}",
+            interval_seconds=5.0,
         )
         return "dropped"
 
     _schedule_ocr_stability_flush(app, gate, decision.delay_seconds)
-    log_debug(
+    log_debug_coalesced(
+        "local-ocr-stability-pending",
         "LATENCY: pending OCR stability candidate "
         f"delay={decision.delay_seconds:.3f}s reason={decision.reason}: "
-        f"'{decision.text}'"
+        f"{summarize_text_for_log(decision.text)}",
+        interval_seconds=5.0,
     )
     return "pending"
 
@@ -1044,7 +1251,7 @@ def run_capture_thread(app):
     last_cap_signature = None
     last_capture_geometry_signature = None
     min_interval = 0.05  # 50ms minimum safety floor - user can control via Settings tab
-    similar_frames = 0
+    duplicate_capture_count = 0
     current_scan_interval_sec = min_interval # Initialize
 
     while app.is_running:
@@ -1119,7 +1326,7 @@ def run_capture_thread(app):
                 log_debug(f"CAPTURE: source context changed to {geometry_signature}; clearing stale OCR state")
                 last_capture_geometry_signature = geometry_signature
                 last_cap_signature = None
-                similar_frames = 0
+                duplicate_capture_count = 0
                 app.last_processed_subtitle = None
                 app.previous_text = ""
                 app.text_stability_counter = 0
@@ -1148,10 +1355,18 @@ def run_capture_thread(app):
                         (x1, y1, width, height),
                         reason=fallback_reason,
                     )
-            log_debug(
+            capture_slow_threshold = (
+                CAPTURE_SLOW_SECONDS_PYAUTOGUI
+                if actual_capture_backend == "pyautogui"
+                else CAPTURE_SLOW_SECONDS_MSS
+            )
+            _log_hot_path_timing(
+                ("capture-timing", actual_capture_backend),
                 f"LATENCY: capture backend={actual_capture_backend} "
                 f"configured={capture_backend} resolved={resolved_capture_backend} "
-                f"region={width}x{height} took {capture_duration:.3f}s"
+                f"region={width}x{height} took {capture_duration:.3f}s",
+                capture_duration,
+                capture_slow_threshold,
             )
             _record_metric_timing(app, "capture_duration", capture_duration)
             _refresh_ocr_queue_metric(app)
@@ -1173,15 +1388,19 @@ def run_capture_thread(app):
                     continue
                 last_cap_signature = capture_signature
             else:
-                if capture_signature == last_cap_signature:
-                    similar_frames +=1
-                    skip_probability = min(0.95, 0.5 + (similar_frames*0.05))
-                    if random.random() < skip_probability:
-                        time.sleep(min(0.1, current_scan_interval_sec*0.5))
-                        continue
-                else:
-                    similar_frames = 0
-                last_cap_signature = capture_signature
+                (
+                    last_cap_signature,
+                    duplicate_capture_count,
+                    should_enqueue,
+                ) = _advance_local_capture_signature(
+                    last_cap_signature,
+                    duplicate_capture_count,
+                    capture_signature,
+                )
+                if not should_enqueue:
+                    _increment_metric(app, "capture_exact_duplicate_skip")
+                    time.sleep(min(0.1, current_scan_interval_sec * 0.5))
+                    continue
 
             try:
                 enqueue_ocr_frame_for_model(app, screenshot, ocr_model)
@@ -1272,7 +1491,13 @@ def run_ocr_thread(app):
                 if cached_ocr_text is not None:
                     ocr_cleaned_text = cached_ocr_text
                     ocr_duration = time.monotonic() - ocr_proc_start_time
-                    log_debug(f"LATENCY: OCR cache hit for {ocr_model} took {ocr_duration:.3f}s")
+                    _log_hot_path_timing(
+                        ("ocr-cache-hit-timing", ocr_model),
+                        f"LATENCY: OCR cache hit for {ocr_model} "
+                        f"took {ocr_duration:.3f}s",
+                        ocr_duration,
+                        OCR_CACHE_HIT_SLOW_SECONDS,
+                    )
                     _increment_metric(app, "ocr_frame_cache_hit")
                     _record_metric_timing(app, "ocr_duration", ocr_duration)
                     if app.ocr_debugging_var.get() and app.last_processed_image is not None:
@@ -1292,7 +1517,7 @@ def run_ocr_thread(app):
                 continue # Skip to the next loop iteration
 
             elif ocr_model == PADDLEOCR_MODEL_CODE:
-                log_debug("WT: OCR routing to PaddleOCR PP-OCRv6")
+                _log_paddle_ocr_route()
 
             else:
                 log_debug(f"WT: OCR: Unknown OCR model '{ocr_model}', falling back to PaddleOCR")
@@ -1313,7 +1538,12 @@ def run_ocr_thread(app):
                 if ocr_cache_key is not None:
                     app.ocr_frame_cache.put(ocr_cache_key, ocr_cleaned_text)
                 ocr_duration = time.monotonic() - ocr_proc_start_time
-                log_debug(f"LATENCY: {engine_label} OCR took {ocr_duration:.3f}s")
+                _log_hot_path_timing(
+                    ("ocr-processing-timing", engine_label),
+                    f"LATENCY: {engine_label} OCR took {ocr_duration:.3f}s",
+                    ocr_duration,
+                    PADDLE_OCR_SLOW_SECONDS,
+                )
                 _record_metric_timing(app, "ocr_duration", ocr_duration)
 
 
@@ -1410,29 +1640,40 @@ def run_translation_thread(app):
     """Simplified translation thread for async processing."""
     log_debug("WT: Translation thread started (simplified for async processing).")
     thread_local_last_translation_display_time = time.monotonic()
+    thread_local_last_displayed_sequence = int(
+        getattr(app, 'last_displayed_translation_sequence', 0) or 0
+    )
 
     while app.is_running:
         now = time.monotonic()
         try:
+            (
+                thread_local_last_translation_display_time,
+                thread_local_last_displayed_sequence,
+            ) = _advance_translation_display_activity(
+                app,
+                now,
+                thread_local_last_translation_display_time,
+                thread_local_last_displayed_sequence,
+            )
             ocr_model = app.get_ocr_model_setting()
 
             if not app.is_api_based_ocr_model(ocr_model):
                 inactive_duration = now - thread_local_last_translation_display_time
                 if app.clear_translation_timeout > 0 and inactive_duration > app.clear_translation_timeout:
-                    if not app.previous_text or app.previous_text == "":
-                        app.update_translation_text("")
-                        log_debug(f"WT: Cleared translation after {inactive_duration:.1f}s of inactivity with no source text (timeout: {app.clear_translation_timeout}s)")
-                    else:
-                        log_debug(f"WT: Not clearing translation despite {inactive_duration:.1f}s inactivity because source area still has text")
-                    thread_local_last_translation_display_time = now
-
-            if app.last_successful_translation_time > thread_local_last_translation_display_time:
-                thread_local_last_translation_display_time = app.last_successful_translation_time
+                    _schedule_inactive_translation_clear(
+                        app,
+                        inactive_duration,
+                        app.clear_translation_timeout,
+                    )
 
             try:
                 text_to_translate = app.translation_queue.get(timeout=0.1)
                 if text_to_translate and not app.is_placeholder_text(text_to_translate):
-                    log_debug(f"WT: Processing legacy queue item: '{text_to_translate}'")
+                    log_debug(
+                        "WT: Processing legacy queue item "
+                        f"{summarize_text_for_log(text_to_translate)}"
+                    )
                     start_async_translation(app, text_to_translate, 0)
             except queue.Empty:
                 pass
@@ -1561,7 +1802,10 @@ def process_api_ocr_async(app, image_data, source_lang, sequence_number, provide
         )
         _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
 
-        log_debug(f"{provider_name} OCR batch {sequence_number} completed: '{ocr_result}', scheduling response")
+        log_debug(
+            f"{provider_name} OCR batch {sequence_number} completed, "
+            f"scheduling response {summarize_text_for_log(ocr_result)}"
+        )
         app.root.after(0, process_api_ocr_response, app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key)
 
     except Exception as e:
@@ -1577,7 +1821,10 @@ def process_api_ocr_async(app, image_data, source_lang, sequence_number, provide
 def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key=None):
     """Process any API OCR response with chronological order enforcement. This is the generic callback."""
     try:
-        log_debug(f"Processing {provider_name} OCR response for batch {sequence_number}: '{ocr_result}'")
+        log_debug(
+            f"Processing {provider_name} OCR response for batch "
+            f"{sequence_number} {summarize_text_for_log(ocr_result)}"
+        )
 
         if not hasattr(app, 'last_displayed_batch_sequence'):
             app.last_displayed_batch_sequence = 0
@@ -1599,7 +1846,10 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
             app.ocr_frame_cache.put(ocr_cache_key, ocr_result)
 
         if isinstance(ocr_result, str) and ocr_result.startswith("<e>:"):
-            log_debug(f"OCR error in {provider_name} batch {sequence_number}: {ocr_result}")
+            log_debug(
+                f"OCR error in {provider_name} batch {sequence_number} "
+                f"{summarize_text_for_log(ocr_result)}"
+            )
             visible_error = ocr_result[len("<e>:"):].strip() or ocr_result
             app.update_translation_text(f"OCR Error:\n{visible_error}")
             app.last_displayed_batch_sequence = sequence_number
@@ -1612,7 +1862,10 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
 
         if hasattr(app, 'last_processed_subtitle') and ocr_result == app.last_processed_subtitle:
             app.reset_clear_timeout()
-            log_debug(f"Keeping existing translation for successive identical {provider_name} OCR: '{ocr_result}'")
+            log_debug(
+                "Keeping existing translation for successive identical "
+                f"{provider_name} OCR {summarize_text_for_log(ocr_result)}"
+            )
             app.last_displayed_batch_sequence = sequence_number
             return
 
@@ -1765,15 +2018,69 @@ def _invalidate_pending_translation_request(app, reason):
     return generation
 
 
+def reset_translation_scheduler_session_state(app, reason):
+    """Invalidate scheduler state that must not cross stop/start boundaries."""
+    pending_generation = _invalidate_pending_translation_request(app, reason)
+    app.latest_translation_candidate = None
+    app.translation_profile_refresh_generation = int(
+        getattr(app, "translation_profile_refresh_generation", 0) or 0
+    ) + 1
+    app.last_translation_submit_monotonic = 0.0
+
+    sequence_floor = 0
+    for sequence_name in (
+        "last_displayed_translation_sequence",
+        "latest_translation_sequence_started",
+        "translation_sequence_counter",
+    ):
+        try:
+            sequence_floor = max(
+                sequence_floor,
+                int(getattr(app, sequence_name, 0) or 0),
+            )
+        except (TypeError, ValueError):
+            continue
+    app.last_displayed_translation_sequence = sequence_floor
+
+    active_sequences = set(getattr(app, "active_translation_calls", ()) or ())
+    inflight_keys = getattr(app, "active_translation_inflight_keys", None)
+    started_by_sequence = getattr(
+        app,
+        "active_translation_started_monotonic",
+        None,
+    )
+    if active_sequences:
+        if isinstance(started_by_sequence, dict):
+            for sequence in tuple(started_by_sequence):
+                if sequence not in active_sequences:
+                    started_by_sequence.pop(sequence, None)
+    else:
+        if hasattr(inflight_keys, "clear"):
+            inflight_keys.clear()
+        if hasattr(started_by_sequence, "clear"):
+            started_by_sequence.clear()
+
+    log_debug(
+        "LATENCY: reset translation scheduler session state "
+        f"pending_generation={pending_generation} "
+        f"profile_generation={app.translation_profile_refresh_generation} "
+        f"sequence_floor={sequence_floor} "
+        f"active_calls={len(active_sequences)} "
+        f"reason={reason}"
+    )
+
+
 def _flush_pending_translation_request(app, flush_generation=None):
     try:
         current_generation = int(
             getattr(app, 'pending_translation_flush_generation', 0) or 0
         )
         if flush_generation is not None and flush_generation != current_generation:
-            log_debug(
+            log_debug_coalesced(
+                "translation-stale-pending-timer",
                 "LATENCY: ignored stale pending translation timer "
-                f"generation={flush_generation} current={current_generation}"
+                f"generation={flush_generation} current={current_generation}",
+                interval_seconds=5.0,
             )
             return
 
@@ -1788,11 +2095,18 @@ def _flush_pending_translation_request(app, flush_generation=None):
             log_debug("LATENCY: dropped pending translation because the app is stopped")
             return
 
+        submit_kwargs = {
+            "requested_at_monotonic": pending_request.get(
+                "requested_at_monotonic"
+            )
+        }
+        if pending_request.get("configuration_refresh", False):
+            submit_kwargs["configuration_refresh"] = True
         start_async_translation(
             app,
             pending_request["text"],
             pending_request["ocr_sequence_number"],
-            requested_at_monotonic=pending_request.get("requested_at_monotonic"),
+            **submit_kwargs,
         )
     except Exception as flush_error:
         log_debug(
@@ -1808,6 +2122,7 @@ def _queue_pending_translation_request(
     delay_seconds,
     reason,
     requested_at_monotonic=None,
+    configuration_refresh=False,
 ):
     now = time.monotonic()
     if requested_at_monotonic is None:
@@ -1817,11 +2132,14 @@ def _queue_pending_translation_request(
         "text": text_to_translate,
         "ocr_sequence_number": ocr_sequence_number,
         "requested_at_monotonic": float(requested_at_monotonic),
+        "configuration_refresh": bool(configuration_refresh),
     }
-    log_debug(
+    log_debug_coalesced(
+        "translation-pending-queue",
         "LATENCY: queued latest translation request "
         f"for OCR batch {ocr_sequence_number} delay={delay_seconds:.3f}s "
-        f"reason={reason}: '{text_to_translate}'"
+        f"reason={reason}",
+        interval_seconds=5.0,
     )
 
     desired_deadline = now + max(0.0, float(delay_seconds or 0.0))
@@ -1870,7 +2188,91 @@ def _expedite_pending_translation_request(app):
         0.0,
         "active translation completed",
         requested_at_monotonic=pending_request.get("requested_at_monotonic"),
+        configuration_refresh=bool(
+            pending_request.get("configuration_refresh", False)
+        ),
     )
+
+
+def _apply_translation_profile_refresh(
+    app,
+    refresh_generation,
+    captured_candidate,
+    reason,
+):
+    current_generation = int(
+        getattr(app, "translation_profile_refresh_generation", 0) or 0
+    )
+    if refresh_generation != current_generation:
+        log_debug(
+            "LATENCY: ignored stale translation profile refresh "
+            f"generation={refresh_generation} current={current_generation}"
+        )
+        return False
+    if not getattr(app, "is_running", False):
+        return False
+
+    pending_request = getattr(app, "pending_translation_request", None)
+    latest_candidate = getattr(app, "latest_translation_candidate", None)
+    if isinstance(pending_request, dict):
+        candidate = pending_request
+    elif isinstance(latest_candidate, dict):
+        candidate = latest_candidate
+    else:
+        candidate = captured_candidate
+    if not isinstance(candidate, dict) or not candidate.get("text"):
+        return False
+
+    _invalidate_pending_translation_request(
+        app,
+        "applying translation profile refresh",
+    )
+    start_async_translation(
+        app,
+        candidate["text"],
+        candidate.get("ocr_sequence_number", 0),
+        requested_at_monotonic=candidate.get("requested_at_monotonic"),
+        configuration_refresh=True,
+    )
+    return True
+
+
+def refresh_translation_after_profile_change(app, reason="profile changed"):
+    """Re-evaluate the latest subtitle without inheriting an old model timer."""
+    pending_request = getattr(app, "pending_translation_request", None)
+    latest_candidate = getattr(app, "latest_translation_candidate", None)
+    candidate = pending_request if isinstance(pending_request, dict) else None
+    if candidate is None and isinstance(latest_candidate, dict):
+        candidate = latest_candidate
+    if not candidate or not getattr(app, "is_running", False):
+        return False
+    if not candidate.get("text"):
+        return False
+
+    previous_generation = int(
+        getattr(app, "translation_profile_refresh_generation", 0) or 0
+    )
+    refresh_generation = previous_generation + 1
+    app.translation_profile_refresh_generation = refresh_generation
+    try:
+        app.root.after(
+            0,
+            _apply_translation_profile_refresh,
+            app,
+            refresh_generation,
+            dict(candidate),
+            reason,
+        )
+    except Exception:
+        app.translation_profile_refresh_generation = previous_generation
+        raise
+
+    _invalidate_pending_translation_request(app, reason)
+    log_debug(
+        "LATENCY: scheduled latest translation refresh after profile change "
+        f"reason={reason}"
+    )
+    return True
 
 
 def _submit_async_translation_request(
@@ -1880,6 +2282,7 @@ def _submit_async_translation_request(
     inflight_key,
     requested_at_monotonic=None,
     latency_mode=None,
+    request_snapshot=None,
 ):
     app.translation_sequence_counter += 1
     translation_sequence = app.translation_sequence_counter
@@ -1909,6 +2312,7 @@ def _submit_async_translation_request(
             inflight_key,
             requested_at_monotonic,
             latency_mode,
+            request_snapshot,
         )
     except Exception:
         app.active_translation_calls.discard(translation_sequence)
@@ -1919,18 +2323,54 @@ def _submit_async_translation_request(
 
     log_debug(
         f"Started async translation {translation_sequence} for OCR batch {ocr_sequence_number} "
-        f"(active calls: {len(app.active_translation_calls)}): '{text_to_translate}'"
+        f"(active calls: {len(app.active_translation_calls)}) "
+        f"{summarize_text_for_log(text_to_translate)}"
     )
+
+
+def _coalesce_matching_pending_translation_request(
+    app,
+    text_to_translate,
+    ocr_sequence_number,
+):
+    pending_request = getattr(app, 'pending_translation_request', None)
+    if (
+        not isinstance(pending_request, dict)
+        or pending_request.get('text') != text_to_translate
+        or not getattr(app, 'pending_translation_flush_scheduled', False)
+    ):
+        return False
+
+    pending_request['ocr_sequence_number'] = ocr_sequence_number
+    _increment_metric(app, 'pending_translation_coalesced')
+    return True
+
 
 def start_async_translation(
     app,
     text_to_translate,
     ocr_sequence_number,
     requested_at_monotonic=None,
+    configuration_refresh=False,
 ):
     """Start async translation processing to eliminate queue bottlenecks."""
     try:
         app.initialize_async_translation_infrastructure()
+
+        if requested_at_monotonic is None:
+            requested_at_monotonic = time.monotonic()
+        app.latest_translation_candidate = {
+            "text": text_to_translate,
+            "ocr_sequence_number": ocr_sequence_number,
+            "requested_at_monotonic": float(requested_at_monotonic),
+        }
+
+        if _coalesce_matching_pending_translation_request(
+            app,
+            text_to_translate,
+            ocr_sequence_number,
+        ):
+            return
 
         enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
         instant_cache_enabled = enable_instant_var.get() if enable_instant_var is not None else True
@@ -1954,7 +2394,8 @@ def start_async_translation(
                 app.last_successful_translation_time = time.monotonic()
                 log_debug(
                     "LATENCY: instant translation cache display "
-                    f"for sequence {app.translation_sequence_counter}: '{final_processed_translation}'"
+                    f"for sequence {app.translation_sequence_counter} "
+                    f"{summarize_text_for_log(final_processed_translation)}"
                 )
                 return
 
@@ -1997,15 +2438,15 @@ def start_async_translation(
 
         if inflight_key in app.active_translation_inflight_keys:
             _increment_metric(app, "duplicate_inflight_skip")
-            log_debug(
-                f"LATENCY: duplicate in-flight translation skipped for OCR batch {ocr_sequence_number}: "
-                f"'{text_to_translate}'"
+            log_debug_coalesced(
+                "translation-duplicate-inflight",
+                "LATENCY: duplicate in-flight translation skipped "
+                f"for OCR batch {ocr_sequence_number}",
+                interval_seconds=5.0,
             )
             return
 
         now = time.monotonic()
-        if requested_at_monotonic is None:
-            requested_at_monotonic = now
         submit_interval = _get_translation_submit_interval_seconds(app, text_to_translate)
         cooldown_remaining = _get_translation_provider_cooldown_seconds(
             app,
@@ -2027,7 +2468,7 @@ def start_async_translation(
             queue_delay = max(queue_delay, cooldown_remaining)
             queue_reasons.append(f"provider cooldown {cooldown_remaining:.3f}s")
 
-        if elapsed_since_submit < submit_interval:
+        if not configuration_refresh and elapsed_since_submit < submit_interval:
             remaining_interval = submit_interval - elapsed_since_submit
             queue_delay = max(queue_delay, remaining_interval)
             queue_reasons.append(f"submit interval {remaining_interval:.3f}s")
@@ -2039,10 +2480,16 @@ def start_async_translation(
             may_use_overflow_slot = (
                 concurrency_limit == 1
                 and active_translation_count < MAX_SUPERSEDED_TRANSLATION_CONCURRENCY
-                and oldest_active_age is not None
                 and _get_translation_latency_mode(app, latency_mode) != "race"
+                and (
+                    configuration_refresh
+                    or oldest_active_age is not None
+                )
             )
-            if may_use_overflow_slot and oldest_active_age >= supersede_after:
+            if may_use_overflow_slot and (
+                configuration_refresh
+                or oldest_active_age >= supersede_after
+            ):
                 may_supersede_stale_call = True
             else:
                 if may_use_overflow_slot:
@@ -2066,14 +2513,21 @@ def start_async_translation(
                 queue_delay,
                 ", ".join(queue_reasons),
                 requested_at_monotonic=requested_at_monotonic,
+                configuration_refresh=configuration_refresh,
             )
             return
 
         if may_supersede_stale_call:
+            oldest_active_age_text = (
+                f"{oldest_active_age:.3f}s"
+                if oldest_active_age is not None
+                else "unknown"
+            )
             log_debug(
                 "LATENCY: newest translation using one bounded overflow slot "
                 f"for OCR batch {ocr_sequence_number} "
-                f"age={oldest_active_age:.3f}s threshold={supersede_after:.3f}s"
+                f"age={oldest_active_age_text} "
+                f"threshold={supersede_after:.3f}s"
             )
 
         _submit_async_translation_request(
@@ -2083,6 +2537,7 @@ def start_async_translation(
             inflight_key,
             requested_at_monotonic=requested_at_monotonic,
             latency_mode=latency_mode,
+            request_snapshot=request_snapshot,
         )
         commit_snapshot = getattr(
             getattr(app, 'translation_handler', None),
@@ -2171,6 +2626,7 @@ def process_translation_async(
     inflight_key=None,
     requested_at_monotonic=None,
     latency_mode=None,
+    request_snapshot=None,
 ):
     """Process translation API call asynchronously with timeout and staleness handling."""
     start_time = time.monotonic()
@@ -2195,13 +2651,18 @@ def process_translation_async(
                 translation_sequence,
             )
 
+        translation_kwargs = {
+            "timeout_seconds": 10.0,
+            "ocr_batch_number": ocr_sequence_number,
+            "stream_callback": stream_callback,
+            "translation_sequence": translation_sequence,
+            "latency_mode": latency_mode,
+        }
+        if request_snapshot is not None:
+            translation_kwargs["request_snapshot"] = request_snapshot
         translation_result = app.translation_handler.translate_text_with_timeout(
             text_to_translate,
-            timeout_seconds=10.0,
-            ocr_batch_number=ocr_sequence_number,
-            stream_callback=stream_callback,
-            translation_sequence=translation_sequence,
-            latency_mode=latency_mode,
+            **translation_kwargs,
         )
 
         completed_at = time.monotonic()
@@ -2219,7 +2680,10 @@ def process_translation_async(
         if elapsed_time > 5.0:
             log_debug(f"Translation {translation_sequence} took {elapsed_time:.1f}s, may be stale but will attempt display")
 
-        log_debug(f"Translation {translation_sequence} completed in {elapsed_time:.3f}s: '{translation_result}'")
+        log_debug(
+            f"Translation {translation_sequence} completed in {elapsed_time:.3f}s "
+            f"{summarize_text_for_log(translation_result)}"
+        )
 
         app.root.after(0, process_translation_response, app, translation_result, translation_sequence, text_to_translate, ocr_sequence_number)
 
@@ -2263,7 +2727,10 @@ def process_translation_async(
 def process_translation_response(app, translation_result, translation_sequence, original_text, ocr_sequence_number):
     """Process translation response with chronological order enforcement - same logic as OCR."""
     try:
-        log_debug(f"Processing translation response for sequence {translation_sequence}: '{translation_result}'")
+        log_debug(
+            "Processing translation response for sequence "
+            f"{translation_sequence} {summarize_text_for_log(translation_result)}"
+        )
 
         if translation_result is None:
             log_debug(f"Translation {translation_sequence}: Timeout occurred, no message displayed (suppressed)")
@@ -2283,11 +2750,15 @@ def process_translation_response(app, translation_result, translation_sequence, 
             if _is_transient_custom_ai_provider_error(translation_result):
                 log_debug(
                     "Translation transient provider error suppressed in "
-                    f"sequence {translation_sequence}: {translation_result}"
+                    f"sequence {translation_sequence} "
+                    f"{summarize_text_for_log(translation_result)}"
                 )
                 _clear_local_ocr_submit_state(app)
                 return
-            log_debug(f"Translation error in sequence {translation_sequence}: {translation_result}")
+            log_debug(
+                f"Translation error in sequence {translation_sequence} "
+                f"{summarize_text_for_log(translation_result)}"
+            )
             app.update_translation_text(f"Translation Error:\n{translation_result}")
             app.last_displayed_translation_sequence = translation_sequence
             _clear_local_ocr_submit_state(app)
@@ -2315,7 +2786,11 @@ def process_translation_response(app, translation_result, translation_sequence, 
                     "LATENCY: skipped duplicate final display after stream "
                     f"for sequence={translation_sequence}"
                 )
-            log_debug(f"Translation {translation_sequence} displayed: '{final_processed_translation}' (from OCR batch {ocr_sequence_number})")
+            log_debug(
+                f"Translation {translation_sequence} displayed "
+                f"{summarize_text_for_log(final_processed_translation)} "
+                f"(from OCR batch {ocr_sequence_number})"
+            )
             app.last_displayed_translation_sequence = translation_sequence
             app.last_successful_translation_time = time.monotonic()
             if ocr_sequence_number == 0:

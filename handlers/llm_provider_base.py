@@ -7,7 +7,7 @@ import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 
-from logger import log_debug
+from logger import log_debug, summarize_text_for_log
 
 
 class NetworkCircuitBreaker:
@@ -392,12 +392,20 @@ Purpose: Concise {self.provider_name} translation call results and statistics
             
             # Rule 2: If translation is identical to previous, skip context update (but keep in cache)
             if target_text == last_target:
-                log_debug(f"Skipping {self.provider_name} context window update - duplicate target text: '{target_text}'")
+                log_debug(
+                    f"Skipping {self.provider_name} context window update - "
+                    "duplicate target text "
+                    f"{summarize_text_for_log(target_text)}"
+                )
                 return
             
             # Additional check: if source is also identical, skip (though this should be caught at OCR level)
             if source_text == last_source:
-                log_debug(f"Skipping {self.provider_name} context window update - duplicate source text: '{source_text}'")
+                log_debug(
+                    f"Skipping {self.provider_name} context window update - "
+                    "duplicate source text "
+                    f"{summarize_text_for_log(source_text)}"
+                )
                 return
         
         # Add new pair with language codes
@@ -811,7 +819,10 @@ Result:
     
     def translate(self, text_to_translate, source_lang, target_lang, ocr_batch_number=None):
         """Main translation method - handles all common logic."""
-        log_debug(f"{self.provider_name.title()} translate request for: {text_to_translate}")
+        log_debug(
+            f"{self.provider_name.title()} translate request "
+            f"{summarize_text_for_log(text_to_translate)}"
+        )
         
         # Check circuit breaker and force refresh if needed
         if self.circuit_breaker.should_force_refresh():
@@ -862,8 +873,15 @@ Result:
             # Build context string (identical format for all providers)
             message_content = self._build_context_string(text_to_translate, source_lang, target_lang)
             
-            log_debug(f"Sending to {self.provider_name.title()} {source_lang}->{target_lang}: [{text_to_translate}]")
-            log_debug(f"Making {self.provider_name.title()} API call for: {text_to_translate}")
+            log_debug(
+                f"Sending to {self.provider_name.title()} "
+                f"{source_lang}->{target_lang} "
+                f"{summarize_text_for_log(text_to_translate)}"
+            )
+            log_debug(
+                f"Making {self.provider_name.title()} API call "
+                f"{summarize_text_for_log(text_to_translate)}"
+            )
             
             api_call_start_time = time.time()
             
@@ -887,7 +905,10 @@ Result:
             # Parse the response (provider-specific)
             translation_result, input_tokens, output_tokens, model_name_for_costing, model_name_for_logging, model_source = self._parse_response(response)
             
-            log_debug(f"{self.provider_name.title()} response: {translation_result}")
+            log_debug(
+                f"{self.provider_name.title()} response "
+                f"{summarize_text_for_log(translation_result)}"
+            )
             
             # Log complete API call atomically (request + response + stats together)
             self._log_complete_translation_call(message_content, translation_result, call_duration, 

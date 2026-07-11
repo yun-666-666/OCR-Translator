@@ -16,6 +16,54 @@ _writer_registry = {}
 _writer_registry_lock = threading.RLock()
 
 
+class _LogCoalescingGate:
+    """Prepare first-and-periodic messages without retaining message content."""
+
+    def __init__(self, clock=None):
+        self._clock = clock or time.monotonic
+        self._lock = threading.RLock()
+        self._states = {}
+
+    def prepare(self, event_key, message, interval_seconds=5.0):
+        try:
+            interval_seconds = max(0.0, float(interval_seconds))
+        except (TypeError, ValueError):
+            interval_seconds = 5.0
+        now = float(self._clock())
+
+        with self._lock:
+            state = self._states.get(event_key)
+            if state is None:
+                self._states[event_key] = (now, 0)
+                return str(message)
+
+            last_logged, suppressed_count = state
+            if now - last_logged < interval_seconds:
+                self._states[event_key] = (
+                    last_logged,
+                    suppressed_count + 1,
+                )
+                return None
+
+            self._states[event_key] = (now, 0)
+
+        message = str(message)
+        if not suppressed_count:
+            return message
+        event_word = "event" if suppressed_count == 1 else "events"
+        return (
+            f"{message} (suppressed {suppressed_count} similar {event_word} "
+            "since previous log)"
+        )
+
+    def clear(self):
+        with self._lock:
+            self._states.clear()
+
+
+_debug_log_coalescer = _LogCoalescingGate()
+
+
 class _RotatingTextWriter:
     """Thread-safe, line-buffered text writer with bounded file rotation."""
 
@@ -275,6 +323,21 @@ def is_debug_logging_enabled():
     return _debug_logging_enabled
 
 
+def summarize_text_for_log(value):
+    """Return content-free text shape metadata for runtime diagnostics."""
+    try:
+        if isinstance(value, str):
+            text = value
+        elif value is None:
+            text = ""
+        else:
+            text = str(value)
+    except Exception:
+        text = ""
+    line_count = text.count("\n") + 1 if text else 0
+    return f"chars={len(text)} lines={line_count}"
+
+
 def log_debug(message):
     """Append a timestamped message to the bounded debug log."""
     if not _debug_logging_enabled:
@@ -291,6 +354,25 @@ def log_debug(message):
         print(f"Error writing to log file: {e}")
 
 
+def log_debug_coalesced(event_key, message, interval_seconds=5.0):
+    """Log the first event immediately and summarize repetitions periodically."""
+    if not _debug_logging_enabled:
+        return False
+    try:
+        prepared_message = _debug_log_coalescer.prepare(
+            event_key,
+            message,
+            interval_seconds=interval_seconds,
+        )
+    except Exception:
+        log_debug(message)
+        return True
+    if prepared_message is None:
+        return False
+    log_debug(prepared_message)
+    return True
+
+
 def clear_debug_log():
     """Safely clear the active debug log while preserving the shared writer."""
     marker = f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Debug log cleared by user.\n"
@@ -301,6 +383,7 @@ def clear_debug_log():
         DEBUG_LOG_BACKUP_COUNT,
     )
     writer.clear(marker)
+    _debug_log_coalescer.clear()
 
 
 ensure_test_log_environment()

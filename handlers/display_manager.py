@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import font
 import time
-from logger import log_debug
+from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 
 # RTL Text Processing Architecture:
 # 1. PRIMARY: PySide overlay with Qt's native RTL support (optimal for all RTL languages)
@@ -241,14 +241,21 @@ class DisplayManager:
                         self.app.target_overlay.raise_()
 
             new_text_to_display = text_content_main_thread.strip() if text_content_main_thread else ""
-            log_debug(f"DisplayManager: Processing text for display: '{new_text_to_display}'")
+            log_debug(
+                "DisplayManager: Processing text for display "
+                f"{summarize_text_for_log(new_text_to_display)}"
+            )
 
             # Convert <br> tags to newlines for display
             new_text_to_display = new_text_to_display.replace('<br>', '\n')
 
             # --- FIX: Directly use the target language code from the correct variable ---
             target_lang_code = self.app.target_lang_var.get()
-            log_debug(f"DisplayManager: Target language code is '{target_lang_code}'")
+            log_debug_coalesced(
+                ("display-target-language", target_lang_code),
+                f"DisplayManager: Target language code is '{target_lang_code}'",
+                interval_seconds=5.0,
+            )
 
             # Store current text and language for resize handling
             self.current_logical_text = new_text_to_display
@@ -256,7 +263,12 @@ class DisplayManager:
 
             if hasattr(self.app.translation_text, 'set_rtl_text'):
                 # PySide text widget
-                log_debug(f"DisplayManager: Using PySide RTL text display for language: {target_lang_code}")
+                log_debug_coalesced(
+                    ("display-widget-route", "pyside", target_lang_code),
+                    "DisplayManager: Using PySide RTL text display "
+                    f"for language: {target_lang_code}",
+                    interval_seconds=5.0,
+                )
                 text_color = self.app.target_text_colour_var.get()
                 font_size = self.app.target_font_size_var.get()
                 font_type = self.app.target_font_type_var.get()
@@ -267,12 +279,17 @@ class DisplayManager:
                     target_lang_code,
                     bg_color,
                     text_color,
-                    font_size
+                    font_size,
+                    font_family=font_type,
                 )
-                self.app.translation_text.configure(font=(font_type, font_size))
             else:
                 # Fallback to tkinter handling
-                log_debug(f"DisplayManager: Using tkinter text widget with RTL processor (fallback)")
+                log_debug_coalesced(
+                    ("display-widget-route", "tkinter", target_lang_code),
+                    "DisplayManager: Using tkinter text widget with RTL "
+                    "processor (fallback)",
+                    interval_seconds=5.0,
+                )
                 is_rtl = RTL_PROCESSOR_AVAILABLE and RTLTextProcessor._is_rtl_language(target_lang_code)
 
                 if is_rtl and new_text_to_display:

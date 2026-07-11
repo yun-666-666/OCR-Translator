@@ -139,6 +139,7 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                     api_key=TEST_SECRET_KEY,
                     model="qwen",
                 )
+                first_credential_ref = profile.get("api_key_ref")
                 first_fingerprint = provider._credential_scope_key(manager.get_profile(profile["id"]))
                 updated = manager.update_profile(profile["id"], api_key=UPDATED_TEST_SECRET_KEY)
                 second_fingerprint = provider._credential_scope_key(manager.get_profile(profile["id"]))
@@ -149,6 +150,8 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
             assert_secret_not_in_text(self, persisted_text, "custom_ai_profiles.json")
             self.assertNotEqual(first_fingerprint, second_fingerprint)
+            self.assertNotEqual(first_credential_ref, credential_ref)
+            self.assertIn(first_credential_ref, store.deleted)
             self.assertTrue(store.matches(credential_ref, UPDATED_TEST_SECRET_KEY), "credential store did not receive updated key")
             self.assertTrue(updated.get("api_key") == UPDATED_TEST_SECRET_KEY, "runtime profile did not resolve updated API key")
 
@@ -275,6 +278,279 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertEqual(len(reloaded.list_profiles()), 1)
             self.assertEqual(len(reloaded.list_profiles("translation")), 1)
             self.assertNotIn("kind", reloaded.list_profiles()[0])
+
+    def test_active_profile_save_failure_rolls_back_in_memory_selection(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=FakeCredentialStore(),
+            )
+            first = manager.add_profile(
+                name="First",
+                base_url="https://proxy.example/v1",
+                api_key="secret",
+                model="first-model",
+            )
+            second = manager.add_profile(
+                name="Second",
+                base_url="https://proxy.example/v1",
+                api_key="secret-2",
+                model="second-model",
+            )
+            manager.set_active_profile("translation", first["id"])
+
+            with patch.object(manager, "save", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    manager.set_active_profile("translation", second["id"])
+
+            self.assertEqual(
+                manager.get_active_profile("translation")["id"],
+                first["id"],
+            )
+
+    def test_profile_atomic_save_replace_failure_preserves_previous_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            manager = CustomAIProfileManager(
+                path,
+                credential_store=FakeCredentialStore(),
+            )
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key="secret",
+                model="model",
+            )
+            original_bytes = path.read_bytes()
+            profile["name"] = "Uncommitted"
+
+            with patch.object(
+                custom_ai_module.os,
+                "replace",
+                side_effect=OSError("replace unavailable"),
+            ):
+                saved = manager.save()
+
+            self.assertFalse(saved)
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(
+                list(path.parent.glob(f".{path.name}.*.tmp")),
+                [],
+            )
+
+    def test_profile_manager_cleans_only_its_stale_atomic_temp_family(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            stale_profile_temp = path.parent / f".{path.name}.deadbeef.tmp"
+            unrelated_temp = path.parent / ".other.json.deadbeef.tmp"
+            stale_profile_temp.write_text("stale-secret", encoding="utf-8")
+            unrelated_temp.write_text("keep", encoding="utf-8")
+            stale_time = time.time() - 600.0
+            os.utime(stale_profile_temp, (stale_time, stale_time))
+
+            CustomAIProfileManager(
+                path,
+                credential_store=FakeCredentialStore(),
+            )
+
+            self.assertFalse(stale_profile_temp.exists())
+            self.assertTrue(unrelated_temp.exists())
+
+    def test_default_profile_atomic_temp_family_is_gitignored(self):
+        gitignore = (
+            Path(__file__).resolve().parents[1] / ".gitignore"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".custom_ai_profiles.json.*.tmp", gitignore.splitlines())
+
+    def test_add_profile_save_failure_rolls_back_profile_and_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=store,
+            )
+
+            with patch.object(manager, "save", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    manager.add_profile(
+                        name="Unsaved",
+                        base_url="https://proxy.example/v1",
+                        api_key="new-secret",
+                        model="model",
+                    )
+
+            self.assertEqual(manager.list_profiles(), [])
+            self.assertEqual(store.values, {})
+            self.assertEqual(len(store.deleted), 1)
+
+    def test_add_profile_validation_failure_removes_staged_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=store,
+            )
+
+            with self.assertRaises(ValueError):
+                manager.add_profile(
+                    name="",
+                    base_url="https://proxy.example/v1",
+                    api_key="new-secret",
+                    model="model",
+                )
+
+            self.assertEqual(manager.list_profiles(), [])
+            self.assertEqual(store.values, {})
+
+    def test_update_profile_save_failure_restores_profile_and_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=store,
+            )
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key="old-secret",
+                model="old-model",
+            )
+            profile_id = profile["id"]
+            credential_ref = profile["api_key_ref"]
+
+            with patch.object(manager, "save", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    manager.update_profile(
+                        profile_id,
+                        name="Unsaved",
+                        api_key="new-secret",
+                        model="new-model",
+                    )
+
+            restored = manager.get_profile(profile_id)
+            self.assertEqual(restored["name"], "Original")
+            self.assertEqual(restored["model"], "old-model")
+            self.assertEqual(restored["api_key"], "old-secret")
+            self.assertTrue(store.matches(credential_ref, "old-secret"))
+
+    def test_update_validation_failure_restores_profile_and_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=store,
+            )
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key="old-secret",
+                model="old-model",
+            )
+            profile_id = profile["id"]
+            credential_ref = profile["api_key_ref"]
+
+            with self.assertRaises(ValueError):
+                manager.update_profile(
+                    profile_id,
+                    name="",
+                    api_key="new-secret",
+                )
+
+            restored = manager.get_profile(profile_id)
+            self.assertEqual(restored["name"], "Original")
+            self.assertEqual(restored["api_key"], "old-secret")
+            self.assertTrue(store.matches(credential_ref, "old-secret"))
+
+    def test_blocked_profile_update_does_not_publish_uncommitted_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=FakeCredentialStore(),
+            )
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key="secret",
+                model="model",
+            )
+            save_started = threading.Event()
+            release_save = threading.Event()
+            update_finished = threading.Event()
+
+            def blocked_save(*args, **kwargs):
+                save_started.set()
+                release_save.wait(timeout=2.0)
+                return False
+
+            def update_profile():
+                try:
+                    manager.update_profile(profile["id"], name="Uncommitted")
+                except RuntimeError:
+                    pass
+                finally:
+                    update_finished.set()
+
+            with patch.object(manager, "save", side_effect=blocked_save):
+                worker = threading.Thread(target=update_profile)
+                worker.start()
+                self.assertTrue(save_started.wait(timeout=1.0))
+                visible_name_during_save = manager.get_profile(
+                    profile["id"]
+                )["name"]
+                release_save.set()
+                self.assertTrue(update_finished.wait(timeout=1.0))
+                worker.join(timeout=1.0)
+
+            self.assertEqual(visible_name_during_save, "Original")
+            self.assertEqual(manager.get_profile(profile["id"])["name"], "Original")
+
+    def test_profile_read_snapshot_remains_complete_across_publish(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=FakeCredentialStore(),
+            )
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key="secret",
+                model="model",
+            )
+            read_snapshot = manager.get_profile(profile["id"])
+
+            manager.update_profile(profile["id"], name="Committed")
+
+            self.assertEqual(read_snapshot["name"], "Original")
+            self.assertTrue(read_snapshot["base_url"])
+            self.assertEqual(
+                manager.get_profile(profile["id"])["name"],
+                "Committed",
+            )
+
+    def test_delete_profile_save_failure_retains_profile_and_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(
+                Path(tmp_dir) / "profiles.json",
+                credential_store=store,
+            )
+            profile = manager.add_profile(
+                name="Keep",
+                base_url="https://proxy.example/v1",
+                api_key="keep-secret",
+                model="model",
+            )
+            profile_id = profile["id"]
+            credential_ref = profile["api_key_ref"]
+
+            with patch.object(manager, "save", return_value=False):
+                with self.assertRaises(RuntimeError):
+                    manager.delete_profile(profile_id)
+
+            self.assertIsNotNone(manager.get_profile(profile_id))
+            self.assertTrue(store.matches(credential_ref, "keep-secret"))
+            self.assertNotIn(credential_ref, store.deleted)
 
     def test_legacy_kind_profiles_are_migrated_to_unified_list(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -541,6 +817,19 @@ class CustomAIProviderTests(unittest.TestCase):
             places=4,
         )
 
+    def test_extract_usage_converts_xai_cost_ticks_to_usd(self):
+        provider = CustomAIProvider()
+
+        usage = provider._extract_usage({
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 20,
+                "cost_in_usd_ticks": 123456,
+            }
+        })
+
+        self.assertAlmostEqual(usage.get("cost_usd"), 0.0000123456)
+
     def test_normalize_chat_completions_url(self):
         provider = CustomAIProvider()
 
@@ -725,6 +1014,166 @@ class CustomAIProviderTests(unittest.TestCase):
                 "https://host.example/chat/completions",
             ],
         )
+
+    def test_xai_chat_translation_sets_stable_prompt_cache_conversation_id(self):
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return {"choices": [{"message": {"content": "OK"}}]}
+
+        class Client:
+            def __init__(self):
+                self.headers = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.headers.append(dict(headers or {}))
+                return Response()
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "id": "xai-translation",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok-4.20-0309-non-reasoning",
+        }
+        payload = {"model": profile["model"], "messages": []}
+
+        provider._post(profile, payload, request_kind="translation")
+        provider._post(profile, payload, request_kind="translation")
+
+        first_key = client.headers[0]["x-grok-conv-id"]
+        self.assertTrue(first_key.startswith("ocr-translator-"))
+        self.assertEqual(client.headers[1]["x-grok-conv-id"], first_key)
+
+    def test_responses_gateway_retries_without_unsupported_prompt_cache_key_and_remembers(self):
+        class Response:
+            headers = {}
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.payloads.append(dict(json or {}))
+                if "prompt_cache_key" in json:
+                    return Response(
+                        400,
+                        {
+                            "error": {
+                                "message": "Unknown parameter: prompt_cache_key",
+                            }
+                        },
+                    )
+                return Response(200, {"output_text": "OK"})
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "id": "gateway-gpt",
+            "base_url": "https://gateway.example/v1",
+            "api_key": "super-secret",
+            "model": "gpt-5.5",
+            "wire_api": "responses",
+        }
+        payload = {"model": profile["model"], "messages": []}
+
+        first_response, _duration = provider._post(
+            profile,
+            payload,
+            request_kind="translation",
+        )
+        second_response, _duration = provider._post(
+            profile,
+            payload,
+            request_kind="translation",
+        )
+
+        self.assertEqual(first_response["output_text"], "OK")
+        self.assertEqual(second_response["output_text"], "OK")
+        self.assertIn("prompt_cache_key", client.payloads[0])
+        self.assertNotIn("prompt_cache_key", client.payloads[1])
+        self.assertNotIn("prompt_cache_key", client.payloads[2])
+
+    def test_compatibility_fallback_handles_all_supported_request_field_rejections(self):
+        class Response:
+            headers = {}
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self):
+                self.payloads = []
+                self.responses = [
+                    Response(400, {"error": {"message": "Unknown parameter: prompt_cache_key"}}),
+                    Response(400, {"error": {"message": "Unsupported parameter: reasoning.effort"}}),
+                    Response(400, {"error": {"message": "Unsupported parameter: text.format"}}),
+                    Response(400, {"error": {"message": "Unknown parameter: max_output_tokens"}}),
+                    Response(200, {"output_text": "OK"}),
+                ]
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.payloads.append(dict(json or {}))
+                return self.responses.pop(0)
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "id": "gateway-gpt",
+            "base_url": "https://gateway.example/v1",
+            "api_key": "super-secret",
+            "model": "gpt-5.5",
+            "wire_api": "responses",
+            "reasoning_effort": "low",
+            "structured_output_mode": "auto",
+        }
+        payload = {
+            "model": profile["model"],
+            "input": [],
+            "prompt_cache_key": "ocr-translator-test",
+            "reasoning": {"effort": "low"},
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "translation_result",
+                    "schema": {"type": "object"},
+                }
+            },
+            "max_output_tokens": 64,
+        }
+
+        response = provider._post_with_output_limit_fallback(
+            client,
+            "https://gateway.example/v1/responses",
+            {},
+            payload,
+            profile,
+            profile["api_key"],
+            request_kind="translation",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(client.payloads), 5)
+        self.assertNotIn("prompt_cache_key", client.payloads[1])
+        self.assertNotIn("reasoning", client.payloads[2])
+        self.assertNotIn("text", client.payloads[3])
+        self.assertNotIn("max_output_tokens", client.payloads[4])
 
     def test_post_clears_failed_cached_chat_url_and_falls_back(self):
         class Response:
@@ -1637,6 +2086,7 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertEqual(translated, "\u4f60\u597d")
         self.assertEqual(usage["total_tokens"], 14)
+        self.assertEqual(len(provider.http_client.posts), 1)
         self.assertEqual(provider.http_client.posts[0]["url"], "https://host.example/v1/responses")
         payload = provider.http_client.posts[0]["payload"]
         self.assertNotIn("messages", payload)
@@ -2259,6 +2709,52 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("bad model", str(ctx.exception))
         self.assertNotIn("super-secret", str(ctx.exception))
 
+    def test_html_error_response_is_compacted_to_title(self):
+        class Response:
+            status_code = 502
+            headers = {"Content-Type": "text/html; charset=UTF-8"}
+            text = (
+                "<!DOCTYPE html><html><head>"
+                "<title>wanfeng.me | 502:   Bad gateway</title>"
+                "</head><body>diagnostic body must not escape</body></html>"
+            )
+
+            def json(self):
+                raise ValueError("not json")
+
+        provider = CustomAIProvider(http_client=object())
+
+        message = provider._response_error_message(
+            Response(),
+            "https://gateway.example/v1/responses",
+            "super-secret",
+        )
+
+        self.assertIn(
+            "Upstream HTML error page: wanfeng.me | 502: Bad gateway",
+            message,
+        )
+        self.assertNotIn("<!DOCTYPE", message)
+        self.assertNotIn("<html", message)
+        self.assertNotIn("diagnostic body", message)
+
+    def test_html_non_json_response_without_title_uses_generic_summary(self):
+        class Response:
+            headers = {"content-type": "text/html"}
+            text = "<html><body>private proxy diagnostics</body></html>"
+
+        provider = CustomAIProvider(http_client=object())
+
+        message = provider._non_json_response_message(
+            Response(),
+            "https://gateway.example/v1/responses",
+            "super-secret",
+        )
+
+        self.assertIn("Upstream returned an HTML error page", message)
+        self.assertNotIn("<html", message)
+        self.assertNotIn("private proxy diagnostics", message)
+
     def test_post_enters_rate_limit_cooldown_after_retry_after_response(self):
         class Response:
             status_code = 429
@@ -2331,6 +2827,93 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("cooldown", str(cooldown_ctx.exception).lower())
         self.assertEqual(provider.http_client.calls, 1)
 
+    def test_capacity_cooldown_is_scoped_to_wire_api_and_model(self):
+        class Response:
+            status_code = 502
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        failed = {
+            "base_url": "https://host.example/v1",
+            "api_key": "same-secret",
+            "wire_api": "responses",
+            "model": "gpt-5.6",
+        }
+        alternative = dict(failed, model="gpt-5.5")
+        wire_alternative = dict(failed, wire_api="chat_completions")
+
+        with patch("custom_ai.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                failed,
+                Response(),
+                "Upstream gateway unavailable",
+            )
+
+        with patch("custom_ai.time.monotonic", return_value=101.0):
+            self.assertGreater(provider.get_cooldown_remaining(failed), 0.0)
+            self.assertEqual(
+                provider.get_cooldown_remaining(alternative),
+                0.0,
+            )
+            self.assertEqual(
+                provider.get_cooldown_remaining(wire_alternative),
+                0.0,
+            )
+
+    def test_capacity_cooldown_log_identifies_scope_and_model_without_secret(self):
+        class Response:
+            status_code = 502
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "name": "Relay",
+            "base_url": "https://host.example/v1",
+            "api_key": "same-secret",
+            "wire_api": "responses",
+            "model": "gpt-5.6",
+        }
+
+        with patch("custom_ai.log_debug") as debug_log:
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Upstream gateway unavailable",
+            )
+
+        message = debug_log.call_args.args[0]
+        self.assertIn("provider cooldown activated", message)
+        self.assertIn("scope=request", message)
+        self.assertIn("model=gpt-5.6", message)
+        self.assertNotIn("same-secret", message)
+
+    def test_explicit_rate_limit_cooldown_remains_shared_across_models(self):
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        failed = {
+            "base_url": "https://host.example/v1",
+            "api_key": "same-secret",
+            "wire_api": "responses",
+            "model": "gpt-5.6",
+        }
+        alternative = dict(failed, model="gpt-5.5")
+
+        with patch("custom_ai.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                failed,
+                Response(),
+                "Rate limit exceeded",
+            )
+
+        with patch("custom_ai.time.monotonic", return_value=101.0):
+            self.assertGreater(
+                provider.get_cooldown_remaining(alternative),
+                0.0,
+            )
+
     def test_rate_limit_cooldown_grows_after_consecutive_retry_after_failures(self):
         class Response:
             status_code = 429
@@ -2349,10 +2932,66 @@ class CustomAIProviderTests(unittest.TestCase):
         with patch("custom_ai.time.monotonic", return_value=100.0):
             first = provider._activate_rate_limit_cooldown(profile, Response(), "Rate limit exceeded")
 
-        with patch("custom_ai.time.monotonic", return_value=101.0):
+        with patch("custom_ai.time.monotonic", return_value=161.0):
             second = provider._activate_rate_limit_cooldown(profile, Response(), "Rate limit exceeded")
 
         self.assertGreater(second, first)
+
+    def test_concurrent_cooldown_failures_share_one_backoff_step(self):
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {"base_url": "https://host.example/v1", "name": "Custom AI"}
+        cache_key = provider._rate_limit_cache_key(profile)
+
+        with patch("custom_ai.time.monotonic", return_value=100.0):
+            first = provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Rate limit exceeded",
+            )
+        with patch("custom_ai.time.monotonic", return_value=101.0):
+            second = provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Rate limit exceeded",
+            )
+
+        self.assertEqual(first, 60.0)
+        self.assertEqual(second, 60.0)
+        self.assertEqual(provider._rate_limit_backoff_counts[cache_key], 1)
+        self.assertEqual(provider._rate_limit_cooldowns[cache_key], 161.0)
+
+    def test_concurrent_longer_retry_after_extends_deadline_without_backoff_growth(self):
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        class LongerRetryAfterResponse(Response):
+            headers = {"Retry-After": "90"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {"base_url": "https://host.example/v1", "name": "Custom AI"}
+        cache_key = provider._rate_limit_cache_key(profile)
+
+        with patch("custom_ai.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Rate limit exceeded",
+            )
+        with patch("custom_ai.time.monotonic", return_value=101.0):
+            remaining = provider._activate_rate_limit_cooldown(
+                profile,
+                LongerRetryAfterResponse(),
+                "Rate limit exceeded",
+            )
+
+        self.assertEqual(remaining, 90.0)
+        self.assertEqual(provider._rate_limit_backoff_counts[cache_key], 1)
+        self.assertEqual(provider._rate_limit_cooldowns[cache_key], 191.0)
 
     def test_successful_response_resets_rate_limit_backoff_counter(self):
         class Response:
@@ -2827,6 +3466,204 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertIn("response_format", client.payloads[0])
         self.assertNotIn("response_format", client.payloads[1])
         self.assertNotIn("response_format", second_payload)
+
+    def test_responses_empty_output_retries_once_without_auto_schema(self):
+        provider = CustomAIProvider(http_client=object())
+        request_payloads = []
+        responses = [
+            (
+                {
+                    "status": "completed",
+                    "output_text": "   ",
+                    "output": [
+                        {
+                            "type": "reasoning",
+                            "summary": [
+                                {
+                                    "type": "summary_text",
+                                    "text": "sensitive-response-body-marker",
+                                }
+                            ],
+                        }
+                    ],
+                    "usage": {
+                        "output_tokens": 18,
+                        "output_tokens_details": {"reasoning_tokens": 18},
+                    },
+                },
+                0.4,
+            ),
+            (
+                {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Recovered translation",
+                                }
+                            ],
+                        }
+                    ],
+                    "usage": {"input_tokens": 10, "output_tokens": 3},
+                },
+                0.2,
+            ),
+        ]
+
+        def fake_post(
+            profile,
+            payload,
+            latency_mode="safe",
+            request_kind=None,
+            timeout_seconds=None,
+        ):
+            request_payloads.append(dict(payload))
+            return responses.pop(0)
+
+        provider._post = Mock(side_effect=fake_post)
+        profile = {
+            "name": "Relay",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "gpt-5.5",
+            "structured_output_mode": "auto",
+            "wire_api": "responses",
+        }
+
+        with patch.object(custom_ai_module, "log_debug") as log_debug:
+            translated, usage, duration = provider.translate(
+                profile,
+                "Bonjour",
+                "fr",
+                "en",
+            )
+
+        self.assertEqual(translated, "Recovered translation")
+        self.assertEqual(usage["output_tokens"], 3)
+        self.assertAlmostEqual(duration, 0.6)
+        self.assertEqual(len(request_payloads), 2)
+        self.assertIn("response_format", request_payloads[0])
+        self.assertNotIn("response_format", request_payloads[1])
+        log_text = "\n".join(
+            str(call.args[0])
+            for call in log_debug.call_args_list
+            if call.args
+        )
+        self.assertIn("empty output recovery", log_text)
+        self.assertIn("status=completed", log_text)
+        self.assertIn("reasoning_items=1", log_text)
+        self.assertIn("output_text_items=0", log_text)
+        self.assertNotIn("super-secret", log_text)
+        self.assertNotIn("sensitive-response-body-marker", log_text)
+
+    def test_responses_empty_output_retry_is_bounded(self):
+        provider = CustomAIProvider(http_client=object())
+        empty_response = {
+            "status": "completed",
+            "output": [],
+            "usage": {"output_tokens": float("inf")},
+        }
+        provider._post = Mock(return_value=(empty_response, 0.1))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Responses API response did not contain output text",
+        ):
+            provider.translate(
+                {
+                    "name": "Relay",
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "gpt-5.5",
+                    "structured_output_mode": "off",
+                    "wire_api": "responses",
+                },
+                "Bonjour",
+                "fr",
+                "en",
+            )
+
+        self.assertEqual(provider._post.call_count, 2)
+        for call in provider._post.call_args_list:
+            self.assertNotIn("response_format", call.args[1])
+
+    def test_responses_empty_output_strict_retry_preserves_schema(self):
+        provider = CustomAIProvider(http_client=object())
+        provider._post = Mock(side_effect=[
+            (
+                {"status": "completed", "output": []},
+                0.1,
+            ),
+            (
+                {
+                    "status": "completed",
+                    "output_text": json.dumps(
+                        {"translation": "Strict recovery"}
+                    ),
+                },
+                0.2,
+            ),
+        ])
+
+        translated, _usage, duration = provider.translate(
+            {
+                "name": "Relay",
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "model": "gpt-5.5",
+                "structured_output_mode": "strict",
+                "wire_api": "responses",
+            },
+            "Bonjour",
+            "fr",
+            "en",
+        )
+
+        self.assertEqual(translated, "Strict recovery")
+        self.assertAlmostEqual(duration, 0.3)
+        self.assertEqual(provider._post.call_count, 2)
+        for call in provider._post.call_args_list:
+            self.assertIn("response_format", call.args[1])
+
+    def test_responses_empty_output_retry_preserves_terminal_error(self):
+        provider = CustomAIProvider(http_client=object())
+        provider._post = Mock(side_effect=[
+            (
+                {"status": "completed", "output": []},
+                0.1,
+            ),
+            (
+                {
+                    "status": "failed",
+                    "error": {"message": "upstream failed after retry"},
+                    "output": [],
+                },
+                0.2,
+            ),
+        ])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Translation response failed: upstream failed after retry",
+        ):
+            provider.translate(
+                {
+                    "name": "Relay",
+                    "base_url": "https://host.example/v1",
+                    "api_key": "super-secret",
+                    "model": "gpt-5.5",
+                    "structured_output_mode": "off",
+                    "wire_api": "responses",
+                },
+                "Bonjour",
+                "fr",
+                "en",
+            )
+
+        self.assertEqual(provider._post.call_count, 2)
 
     def test_stream_fallback_retries_plain_text_when_structured_translation_is_empty(self):
         provider = CustomAIProvider(http_client=object())
@@ -4052,6 +4889,22 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertEqual(result, "OK")
 
+    def test_parse_responses_response_ignores_blank_top_level_output_text(self):
+        provider = CustomAIProvider()
+
+        result = provider.parse_responses_response({
+            "output_text": "   ",
+            "output": [
+                {
+                    "content": [
+                        {"type": "output_text", "text": "Nested output"},
+                    ]
+                }
+            ],
+        })
+
+        self.assertEqual(result, "Nested output")
+
     def test_cache_key_is_isolated_by_profile_url_and_model(self):
         cache = UnifiedTranslationCache(max_size=10)
 
@@ -4298,6 +5151,42 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(cache.get("Hello", "en", "zh-CN", "custom_ai"), "你好")
         self.assertEqual(cache._cache.getitem_calls, 1)
         self.assertEqual(cache._cache.contains_calls, 0)
+
+    def test_unified_cache_miss_uses_coalesced_content_free_log(self):
+        cache = UnifiedTranslationCache(max_size=10)
+
+        with patch(
+            "unified_translation_cache.log_debug_coalesced"
+        ) as log_coalesced:
+            self.assertIsNone(
+                cache.get(
+                    "secret subtitle one",
+                    "en",
+                    "zh-CN",
+                    "custom_ai",
+                )
+            )
+            self.assertIsNone(
+                cache.get(
+                    "secret subtitle two",
+                    "en",
+                    "zh-CN",
+                    "custom_ai",
+                )
+            )
+
+        self.assertEqual(log_coalesced.call_count, 2)
+        for call in log_coalesced.call_args_list:
+            self.assertEqual(
+                call.args[0],
+                ("unified-cache-miss", "custom_ai", "en", "zh-cn", ""),
+            )
+            self.assertEqual(
+                call.args[1],
+                "Unified cache MISS: custom_ai en->zh-CN",
+            )
+            self.assertEqual(call.kwargs["interval_seconds"], 5.0)
+            self.assertNotIn("secret subtitle", call.args[1])
 
     def test_get_stats_uses_provider_index_without_scanning_cache_keys(self):
         class NoKeysDict(dict):
@@ -5239,6 +6128,72 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
 
 
 class TranslationHandlerCustomAITests(unittest.TestCase):
+    def test_translation_request_snapshot_keeps_original_profile_after_live_edit(self):
+        import inspect
+
+        profile = {
+            "id": "relay",
+            "name": "Relay",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "model": "gpt-5.6-sol",
+            "wire_api": "responses",
+            "reasoning_effort": "medium",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+            translation_model_var=DummyVar("custom_ai"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            handler.unified_cache.get = Mock(return_value=None)
+            self.assertIn(
+                "request_snapshot",
+                inspect.signature(
+                    handler.translate_text_with_timeout
+                ).parameters,
+                "translation execution must accept its immutable request snapshot",
+            )
+            snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Hello",
+                commit=False,
+            )
+            self.assertIn("profile", snapshot)
+            self.assertIn("cache_params", snapshot)
+
+            profile["model"] = "gpt-5.5-sol"
+
+            handler.custom_ai_provider.translate = Mock(
+                return_value=("你好", {}, 0.1)
+            )
+            result = handler.translate_text_with_timeout(
+                "Hello",
+                request_snapshot=snapshot,
+            )
+
+            self.assertEqual(snapshot["profile"]["model"], "gpt-5.6-sol")
+            self.assertEqual(
+                snapshot["cache_params"]["model"],
+                "gpt-5.6-sol",
+            )
+            called_profile = handler.custom_ai_provider.translate.call_args.args[0]
+            self.assertEqual(called_profile["model"], "gpt-5.6-sol")
+            self.assertEqual(result, "你好")
+        finally:
+            handler.close()
+
     def test_custom_ai_translation_error_redacts_active_profile_key(self):
         profile = {
             "id": "active",
@@ -5381,6 +6336,29 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "cached_input_ratio=0.85",
             append_text.call_args.args[1],
         )
+
+    def test_custom_ai_short_log_records_reported_usage_cost(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            handler._log_custom_short_call(
+                "translation",
+                profile,
+                "translated",
+                {
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 20,
+                    "cost_usd": 0.00001234,
+                },
+                0.25,
+            )
+            handler.close()
+
+        self.assertIn("Cost: $0.00001234", append_text.call_args.args[1])
 
     def test_low_cached_ratio_conservatively_reduces_custom_ai_context_budget(self):
         class App:
@@ -5581,7 +6559,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             custom_ai_latency_mode_var=DummyVar("adaptive"),
         )
         handler = TranslationHandler(app)
-        advisor = getattr(handler, "_custom_latency_advisor", None)
+        advisor = handler._get_custom_latency_advisor(profile=profile)
         self.assertIsNotNone(advisor)
         for duration in (0.3, 1.8, 2.0):
             advisor.observe_request(duration, success=True)
@@ -5618,7 +6596,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             custom_ai_latency_mode_var=mode,
         )
         handler = TranslationHandler(app)
-        advisor = getattr(handler, "_custom_latency_advisor", None)
+        advisor = handler._get_custom_latency_advisor(profile=profile)
         self.assertIsNotNone(advisor)
         for duration in (0.4, 1.7, 1.9):
             advisor.observe_request(duration, success=True)
@@ -5640,6 +6618,229 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             ],
             "stream",
         )
+        handler.close()
+
+    def test_adaptive_latency_history_is_isolated_by_profile_route(self):
+        slow_profile = {
+            "id": "slow-profile",
+            "base_url": "https://slow.example/v1",
+            "api_key": "slow-secret",
+            "model": "slow-model",
+            "wire_api": "responses",
+        }
+        healthy_profile = {
+            "id": "healthy-profile",
+            "base_url": "https://healthy.example/v1",
+            "api_key": "healthy-secret",
+            "model": "healthy-model",
+            "wire_api": "chat_completions",
+        }
+
+        class Profiles:
+            active = slow_profile
+
+            def get_active_profile(self, kind):
+                return self.active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [slow_profile, healthy_profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("adaptive"),
+        )
+        handler = TranslationHandler(app)
+        for duration in (0.3, 1.8, 2.0):
+            handler._record_custom_ai_latency_observation(
+                duration,
+                success=True,
+                profile=slow_profile,
+            )
+
+        slow_decision = handler._resolve_custom_ai_latency_mode_for_request(
+            configured_mode="adaptive",
+            profile=slow_profile,
+        )
+        healthy_decision = handler._resolve_custom_ai_latency_mode_for_request(
+            configured_mode="adaptive",
+            profile=healthy_profile,
+        )
+
+        self.assertEqual(slow_decision.mode, "stream")
+        self.assertEqual(slow_decision.sample_count, 3)
+        self.assertEqual(healthy_decision.mode, "safe")
+        self.assertEqual(healthy_decision.reason, "insufficient_samples")
+        self.assertEqual(healthy_decision.sample_count, 0)
+        handler.close()
+
+    def test_prompt_cache_budget_is_isolated_by_profile_route(self):
+        low_cache_profile = {
+            "id": "low-cache",
+            "base_url": "https://low-cache.example/v1",
+            "api_key": "low-cache-secret",
+            "model": "shared-model",
+            "wire_api": "responses",
+        }
+        fresh_profile = {
+            "id": "fresh",
+            "base_url": "https://fresh.example/v1",
+            "api_key": "fresh-secret",
+            "model": "shared-model",
+            "wire_api": "responses",
+        }
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(5))
+        )
+        usage = {
+            "prompt_tokens": 5000,
+            "cached_prompt_tokens": 0,
+        }
+        for _ in range(4):
+            handler._record_custom_prompt_cache_usage(
+                "translation",
+                usage,
+                profile=low_cache_profile,
+            )
+
+        self.assertEqual(
+            handler._get_custom_prompt_cache_budget_factor(
+                profile=low_cache_profile,
+            ),
+            0.5,
+        )
+        self.assertEqual(
+            handler._get_custom_prompt_cache_budget_factor(
+                profile=fresh_profile,
+            ),
+            1.0,
+        )
+        handler.close()
+
+    def test_frozen_snapshot_records_latency_on_original_route(self):
+        original_profile = {
+            "id": "original",
+            "base_url": "https://original.example/v1",
+            "api_key": "original-secret",
+            "model": "original-model",
+            "wire_api": "responses",
+        }
+        replacement_profile = {
+            "id": "replacement",
+            "base_url": "https://replacement.example/v1",
+            "api_key": "replacement-secret",
+            "model": "replacement-model",
+            "wire_api": "responses",
+        }
+
+        class Profiles:
+            active = original_profile
+
+            def get_active_profile(self, kind):
+                return self.active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [original_profile, replacement_profile]
+
+        profiles = Profiles()
+        app = types.SimpleNamespace(
+            translation_model_var=DummyVar("custom_ai"),
+            custom_ai_profiles=profiles,
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("adaptive"),
+        )
+        handler = TranslationHandler(app)
+        snapshot = handler.get_custom_ai_translation_request_snapshot("Hello")
+
+        def translate_after_switch(*args, **kwargs):
+            profiles.active = replacement_profile
+            return "translated", {"prompt_tokens": 10}, 1.75
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=translate_after_switch
+        )
+        with patch.object(translation_handler_module, "append_rotating_text"):
+            result = handler._custom_ai_translate(
+                "Hello",
+                time.monotonic(),
+                request_snapshot=snapshot,
+            )
+
+        original_decision = handler._get_custom_latency_advisor(
+            profile=original_profile,
+        ).resolve("adaptive")
+        replacement_decision = handler._get_custom_latency_advisor(
+            profile=replacement_profile,
+        ).resolve("adaptive")
+
+        self.assertEqual(result, "translated")
+        self.assertEqual(original_decision.sample_count, 1)
+        self.assertEqual(replacement_decision.sample_count, 0)
+        handler.close()
+
+    def test_route_adaptation_state_is_lru_bounded(self):
+        handler = TranslationHandler(object())
+        profiles = [
+            {
+                "id": f"profile-{index}",
+                "base_url": f"https://route-{index}.example/v1",
+                "api_key": f"secret-{index}",
+                "model": "demo",
+                "wire_api": "responses",
+            }
+            for index in range(33)
+        ]
+        first_key = handler._custom_ai_route_state_key(profiles[0])
+        for profile in profiles:
+            handler._get_custom_latency_advisor(profile=profile)
+
+        self.assertEqual(len(handler._custom_latency_advisors), 32)
+        self.assertNotIn(first_key, handler._custom_latency_advisors)
+        handler.close()
+
+    def test_route_adaptation_key_excludes_url_and_api_secrets(self):
+        handler = TranslationHandler(object())
+        profile = {
+            "id": "secret-route",
+            "base_url": (
+                "https://route-user:route-password@relay.example:8443/v1/"
+                "responses?access_token=query-secret#fragment-secret"
+            ),
+            "api_key": "profile-secret",
+            "model": "demo",
+            "wire_api": "responses",
+        }
+
+        route_key = handler._custom_ai_route_state_key(profile)
+        route_text = repr(route_key)
+        different_query_profile = dict(profile)
+        different_query_profile["base_url"] = (
+            "https://route-user:route-password@relay.example:8443/v1/"
+            "responses?access_token=other-secret#fragment-secret"
+        )
+        different_query_key = handler._custom_ai_route_state_key(
+            different_query_profile
+        )
+
+        self.assertIn("relay.example:8443/v1/responses", route_text)
+        for secret in (
+            "route-user",
+            "route-password",
+            "query-secret",
+            "fragment-secret",
+            "profile-secret",
+            "other-secret",
+        ):
+            self.assertNotIn(secret, route_text)
+        self.assertNotEqual(route_key, different_query_key)
         handler.close()
 
     def test_inflight_and_cache_params_include_structured_output_contract(self):

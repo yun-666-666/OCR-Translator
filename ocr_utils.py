@@ -6,7 +6,7 @@ import time
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
-from logger import log_debug
+from logger import log_debug, log_debug_coalesced
 
 
 def _pil_image():
@@ -140,7 +140,11 @@ def capture_screen_region(region, backend='auto', mss_factory=None, pyautogui_mo
                 image = _capture_with_pyautogui((x, y, width, height), pyautogui_module=pyautogui_module)
             image = _validate_capture_image(image, backend_name)
             _set_capture_metadata(image, backend_name, fallback_reason=fallback_reason)
-            log_debug(f"CAPTURE: {backend_name} captured {width}x{height}")
+            log_debug_coalesced(
+                ("capture-success", backend_name, width, height),
+                f"CAPTURE: {backend_name} captured {width}x{height}",
+                interval_seconds=5.0,
+            )
             return image
         except Exception as e:
             last_error = e
@@ -527,7 +531,11 @@ class OCRFrameCache:
                 return None
             value = self._cache.pop(key)
             self._cache[key] = value
-            log_debug("OCR CACHE: frame hit")
+            log_debug_coalesced(
+                "ocr-frame-cache-hit",
+                "OCR CACHE: frame hit",
+                interval_seconds=5.0,
+            )
             return value
 
     def put(self, key, text):

@@ -1,6 +1,6 @@
 import os
 import time
-from logger import log_debug
+from logger import log_debug, summarize_text_for_log
 
 class CacheManager:
     """Handles file caching operations for translation services"""
@@ -180,7 +180,12 @@ class CacheManager:
                                         
                                         # FIXED: Only treat as duplicate if BOTH source text AND language pair match
                                         if existing_source_text == original_text and existing_lang_pair == lang_pair:
-                                            log_debug(f"Duplicate source text and language pair ({existing_lang_pair}) found in {cache_type} file cache, skipping save: {original_text}")
+                                            log_debug(
+                                                "Duplicate source text and language pair "
+                                                f"({existing_lang_pair}) found in {cache_type} "
+                                                "file cache, skipping save "
+                                                f"{summarize_text_for_log(original_text)}"
+                                            )
                                             return False
                                     except (ValueError, IndexError):
                                         # Continue checking other lines if this one is malformed
@@ -201,7 +206,10 @@ class CacheManager:
             
             # Update the timestamp since we just modified the file
             self._file_timestamps[cache_type] = os.path.getmtime(cache_file_path)
-            log_debug(f"Added new translation to {cache_type} file cache: {original_text}")
+            log_debug(
+                f"Added new translation to {cache_type} file cache "
+                f"{summarize_text_for_log(original_text)}"
+            )
             
             return True
         except Exception as e_stfc:

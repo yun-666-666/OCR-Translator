@@ -161,6 +161,186 @@ def build_custom_ai_profile_values_from_form(app):
     return values
 
 
+def _apply_custom_ai_profile_model_selection(app):
+    profile_id = getattr(app, "ai_profile_selected_id", None)
+    profiles = getattr(app, "custom_ai_profiles", None)
+    model_var = getattr(app, "ai_profile_model_var", None)
+    if not profile_id or profiles is None or model_var is None:
+        return False
+
+    profile = profiles.get_profile(profile_id)
+    if not profile:
+        return False
+    model = str(model_var.get() or "").strip()
+    if not model or model == str(profile.get("model") or "").strip():
+        return False
+
+    updated_profile = profiles.update_profile(profile_id, model=model)
+    active_profile = profiles.get_active_profile("translation")
+    if (
+        not active_profile
+        or active_profile.get("id") != updated_profile.get("id")
+    ):
+        return True
+
+    translation_handler = getattr(app, "translation_handler", None)
+    clear_context = getattr(translation_handler, "_clear_active_context", None)
+    if callable(clear_context):
+        clear_context()
+
+    if getattr(app, "is_running", False):
+        from worker_threads import refresh_translation_after_profile_change
+
+        refresh_translation_after_profile_change(
+            app,
+            reason="active profile model changed",
+        )
+    log_debug(
+        "Custom AI active translation profile model changed "
+        f"profile={updated_profile.get('name', 'Custom AI')} "
+        f"model={model}"
+    )
+    return True
+
+
+def apply_custom_ai_profile_model_selection(app):
+    """Persist an explicit model choice and wake an active translation profile."""
+    try:
+        return _apply_custom_ai_profile_model_selection(app)
+    except Exception as error:
+        log_debug(
+            "Custom AI profile model apply failed: "
+            f"{type(error).__name__} - {error}"
+        )
+        ui_lang = getattr(app, "ui_lang", None)
+        title = (
+            ui_lang.get_label("profile_error_title", "Profile Error")
+            if ui_lang is not None
+            else "Profile Error"
+        )
+        try:
+            messagebox.showerror(
+                title,
+                str(error),
+                parent=getattr(app, "root", None),
+            )
+        except Exception as dialog_error:
+            log_debug(
+                "Custom AI profile error dialog failed: "
+                f"{type(dialog_error).__name__} - {dialog_error}"
+            )
+        return False
+
+
+def _apply_custom_ai_translation_profile_selection(app, selected_name):
+    profiles = getattr(app, "custom_ai_profiles", None)
+    selected_name = str(selected_name or "").strip()
+    if profiles is None or not selected_name:
+        return False
+
+    selected_profile = next(
+        (
+            profile
+            for profile in profiles.list_profiles(enabled_only=True)
+            if str(profile.get("name") or "") == selected_name
+        ),
+        None,
+    )
+    if not selected_profile:
+        return False
+
+    active_profile = profiles.get_active_profile("translation")
+    if (
+        active_profile
+        and active_profile.get("id") == selected_profile.get("id")
+    ):
+        translation_model_var = getattr(app, "translation_model_var", None)
+        if translation_model_var is not None:
+            translation_model_var.set("custom_ai")
+        return False
+
+    updated_profile = profiles.set_active_profile(
+        "translation",
+        selected_profile["id"],
+    )
+    translation_model_var = getattr(app, "translation_model_var", None)
+    if translation_model_var is not None:
+        translation_model_var.set("custom_ai")
+
+    translation_handler = getattr(app, "translation_handler", None)
+    clear_context = getattr(translation_handler, "_clear_active_context", None)
+    if callable(clear_context):
+        clear_context()
+
+    if getattr(app, "is_running", False):
+        from worker_threads import refresh_translation_after_profile_change
+
+        refresh_translation_after_profile_change(
+            app,
+            reason="active translation profile changed",
+        )
+
+    log_debug(
+        "Custom AI active translation profile changed "
+        f"profile={updated_profile.get('name', 'Custom AI')} "
+        f"model={updated_profile.get('model', '')}"
+    )
+    return True
+
+
+def apply_custom_ai_translation_profile_selection(app, selected_name):
+    """Persist and apply a primary translation profile selection immediately."""
+    try:
+        return _apply_custom_ai_translation_profile_selection(
+            app,
+            selected_name,
+        )
+    except Exception as error:
+        log_debug(
+            "Custom AI translation profile apply failed: "
+            f"{type(error).__name__} - {error}"
+        )
+        ui_lang = getattr(app, "ui_lang", None)
+        title = (
+            ui_lang.get_label("profile_error_title", "Profile Error")
+            if ui_lang is not None
+            else "Profile Error"
+        )
+        try:
+            messagebox.showerror(
+                title,
+                str(error),
+                parent=getattr(app, "root", None),
+            )
+        except Exception as dialog_error:
+            log_debug(
+                "Custom AI translation profile error dialog failed: "
+                f"{type(dialog_error).__name__} - {dialog_error}"
+            )
+        return False
+
+
+def handle_translation_profile_selection(
+    app,
+    selected_name,
+    event=None,
+):
+    """Apply the selected profile before synchronizing the remaining UI state."""
+    changed = apply_custom_ai_translation_profile_selection(
+        app,
+        selected_name,
+    )
+    # The selection has already been persisted above. Synchronize the rest of
+    # the UI through the non-mutating path so the legacy handler cannot save
+    # the same active profile a second time outside this error boundary.
+    app.on_translation_model_selection_changed(
+        event=None,
+        initial_setup=False,
+        synchronize_ui_only=True,
+    )
+    return changed
+
+
 def run_profile_network_task_async(app, button, task, on_success, failure_title):
     """Run a Custom AI profile network action without blocking the Tk UI thread."""
     def set_button_state(state):
@@ -488,7 +668,11 @@ def create_main_tab(app):
 
 def create_settings_tab(app):
     # Create a scrollable tab content frame
-    scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("settings_tab_title"))
+    scrollable_content = create_scrollable_tab(
+        app.tab_control,
+        app.ui_lang.get_label("settings_tab_title"),
+        protect_wheel_inputs=True,
+    )
     app.tab_settings = scrollable_content
 
     # Create the settings frame inside the scrollable area
@@ -567,12 +751,11 @@ def create_settings_tab(app):
 
     def handle_translation_model_selection(event):
         selected_name = app.translation_model_display_var.get()
-        for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):
-            if profile["name"] == selected_name:
-                app.custom_ai_profiles.set_active_profile("translation", profile["id"])
-                app.translation_model_var.set("custom_ai")
-                break
-        app.on_translation_model_selection_changed(event=event, initial_setup=False)
+        handle_translation_profile_selection(
+            app,
+            selected_name,
+            event=event,
+        )
     app.translation_model_combobox.bind('<<ComboboxSelected>>',
         create_combobox_handler_wrapper(handle_translation_model_selection))
 
@@ -1439,6 +1622,14 @@ def create_settings_tab(app):
     app.ai_profile_model_combobox = ttk.Combobox(model_frame, textvariable=app.ai_profile_model_var)
     app.ai_profile_model_combobox.grid(row=0, column=0, sticky="ew")
     app.ai_profile_model_combobox.bind("<KeyRelease>", filter_model_list_form)
+    app.ai_profile_model_combobox.bind(
+        "<<ComboboxSelected>>",
+        lambda _event: apply_custom_ai_profile_model_selection(app),
+    )
+    app.ai_profile_model_combobox.bind(
+        "<Return>",
+        lambda _event: apply_custom_ai_profile_model_selection(app),
+    )
     app.ai_profile_fetch_models_button = ttk.Button(model_frame, text=app.ui_lang.get_label("fetch_model_list_btn", "Fetch Models"), command=fetch_model_list_form)
     app.ai_profile_fetch_models_button.grid(row=0, column=1, padx=(5, 0))
 

@@ -1351,9 +1351,19 @@ class GameChangingTranslator:
              self.save_settings()
 
 
-    def on_translation_model_selection_changed(self, event=None, initial_setup=False):
+    def on_translation_model_selection_changed(
+        self,
+        event=None,
+        initial_setup=False,
+        synchronize_ui_only=False,
+    ):
         # Handle session management for translation method changes
-        if (hasattr(self, 'translation_handler') and self.is_running and not initial_setup):
+        if (
+            not synchronize_ui_only
+            and hasattr(self, 'translation_handler')
+            and self.is_running
+            and not initial_setup
+        ):
             current_model = self.translation_model_var.get()
 
             # End translation session if switching away from Gemini
@@ -1372,7 +1382,11 @@ class GameChangingTranslator:
                 self.translation_handler.start_translation_session()
 
         self.ui_interaction_handler.on_translation_model_selection_changed(event, initial_setup)
-        if not initial_setup and self._fully_initialized:
+        if (
+            not synchronize_ui_only
+            and not initial_setup
+            and self._fully_initialized
+        ):
             self.save_settings()
 
     def clear_debug_log(self):
@@ -2021,6 +2035,12 @@ class GameChangingTranslator:
         if items_cleared_count > 0:
             log_debug(f"Cleared {items_cleared_count} items from {type(q_to_clear).__name__}.")
 
+    def _reset_translation_scheduler_session_state(self, reason):
+        """Invalidate async translation scheduler state at a session boundary."""
+        from worker_threads import reset_translation_scheduler_session_state
+
+        reset_translation_scheduler_session_state(self, reason)
+
     def _reset_gemini_batch_state(self):
         """Reset Gemini OCR batch management state for clean start."""
         self.batch_sequence_counter = 0
@@ -2141,6 +2161,7 @@ class GameChangingTranslator:
 
         self._clear_queue(self.ocr_queue)
         self._clear_queue(self.translation_queue)
+        self._reset_translation_scheduler_session_state("translation stopped")
         self.clear_ocr_stability_gate("translation stopped")
 
         if self.translation_text and self.translation_text.winfo_exists():
@@ -2278,8 +2299,9 @@ class GameChangingTranslator:
 
                 self._clear_queue(self.ocr_queue)
                 self._clear_queue(self.translation_queue)
-                if hasattr(self, 'active_translation_inflight_keys'):
-                    self.active_translation_inflight_keys.clear()
+                self._reset_translation_scheduler_session_state(
+                    "translation starting"
+                )
                 self.last_local_ocr_submitted_text = None
                 self.last_local_ocr_submitted_norm = None
                 self.last_local_ocr_submitted_scope = None

@@ -11,7 +11,7 @@ import zipfile
 import urllib.request
 from pathlib import Path
 
-from logger import log_debug
+from logger import log_debug, summarize_text_for_log
 from resource_handler import get_resource_path
 
 # --- Configuration ---
@@ -646,15 +646,23 @@ class MarianMTTranslator:
                 # Log device used for performance tracking
                 current_device_name = "GPU" if (self.current_device.type == 'cuda') else "CPU"
                 fallback_info = " (temporary fallback)" if self.temporary_cpu_fallback else ""
-                log_debug(f"Translation completed on {current_device_name}{fallback_info}: {len(text)} → {len(result)} chars")
+                log_debug(
+                    f"Translation completed on {current_device_name}{fallback_info} "
+                    f"source={summarize_text_for_log(text)} "
+                    f"target={summarize_text_for_log(result)}"
+                )
 
                 # IMPROVED: Check for potentially incomplete translations
                 if (len(result) < len(text) * 0.7 and len(text) > 50) or \
                    (output_sentences < input_sentences and input_sentences > 1) or \
                    (len(result) < 10 and len(text) > 20):
-                    log_debug(f"Warning: Translation may be incomplete. Input: {len(text)} chars ({input_sentences} sentences), Output: {len(result)} chars ({output_sentences} sentences), Ratio: {log_ratio:.2f}")
-                    log_debug(f"Input text: '{text}'")
-                    log_debug(f"Result: '{result}'")
+                    log_debug(
+                        "Warning: Translation may be incomplete. "
+                        f"Input: {summarize_text_for_log(text)} "
+                        f"({input_sentences} sentences), Output: "
+                        f"{summarize_text_for_log(result)} "
+                        f"({output_sentences} sentences), Ratio: {log_ratio:.2f}"
+                    )
 
                 return result
             else: # Fallback if torch is not available
@@ -817,14 +825,21 @@ class MarianMTTranslator:
         # Log the text being translated for debugging
         current_device_name = "GPU" if (self.current_device.type == 'cuda') else "CPU"
         fallback_info = " (temporary fallback)" if self.temporary_cpu_fallback else ""
-        log_debug(f"MarianMT translating on {current_device_name}{fallback_info}: \"{text}\" from {source_lang} to {target_lang}")
+        log_debug(
+            f"MarianMT translating on {current_device_name}{fallback_info} "
+            f"from {source_lang} to {target_lang} "
+            f"{summarize_text_for_log(text)}"
+        )
 
         # Split text into sentences
         sentences = self._split_into_sentences(text)
 
         # Handle single-sentence case directly
         if len(sentences) <= 1 or len(text) < 30:
-            log_debug(f"Using direct translation for single sentence or short text: \"{text}\"")
+            log_debug(
+                "Using direct translation for single sentence or short text "
+                f"{summarize_text_for_log(text)}"
+            )
             result = self._translate_batch(text, source_lang, target_lang)
 
             # Log completion time
@@ -832,7 +847,10 @@ class MarianMTTranslator:
             current_device_name = "GPU" if (self.current_device.type == 'cuda') else "CPU"
             fallback_info = " (temporary fallback)" if self.temporary_cpu_fallback else ""
             log_debug(f"MarianMT translation complete in {translation_time:.3f} seconds on {current_device_name}{fallback_info}")
-            log_debug(f"The completed translation is displayed: \"{result}\"")
+            log_debug(
+                "The completed translation is displayed "
+                f"{summarize_text_for_log(result)}"
+            )
 
             return result
 
@@ -853,7 +871,10 @@ class MarianMTTranslator:
             current_device_name = "GPU" if (self.current_device.type == 'cuda') else "CPU"
             fallback_info = " (temporary fallback)" if self.temporary_cpu_fallback else ""
             log_debug(f"Batch translation complete on {current_device_name}{fallback_info}: {len(translated_sentences)} sentences processed in {translation_time:.3f} seconds")
-            log_debug(f"The completed subtitle is displayed: \"{result}\"")
+            log_debug(
+                "The completed subtitle is displayed "
+                f"{summarize_text_for_log(result)}"
+            )
 
             return result
 
@@ -873,9 +894,15 @@ class MarianMTTranslator:
         try:
             # If sentences list is empty or invalid, translate the full text directly
             if not sentences:
-                log_debug(f"No sentences to translate, using full text: \"{full_text}\"")
+                log_debug(
+                    "No sentences to translate, using full text "
+                    f"{summarize_text_for_log(full_text)}"
+                )
                 result = self._translate_batch(full_text, source_lang, target_lang)
-                log_debug(f"Full text translated in fallback mode: \"{result}\"")
+                log_debug(
+                    "Full text translated in fallback mode "
+                    f"{summarize_text_for_log(result)}"
+                )
                 return result
 
             # Process sentences sequentially using the single input method
@@ -883,7 +910,10 @@ class MarianMTTranslator:
             translated_parts = []
             for i, sentence in enumerate(sentences):
                 if sentence.strip():
-                    log_debug(f"Sequentially translating sentence {i+1}: \"{sentence}\"")
+                    log_debug(
+                        f"Sequentially translating sentence {i+1} "
+                        f"{summarize_text_for_log(sentence)}"
+                    )
 
                     # Track individual sentence translation time
                     sentence_start_time = time.monotonic()
@@ -891,11 +921,21 @@ class MarianMTTranslator:
                     sentence_translation_time = time.monotonic() - sentence_start_time
 
                     if translated and not self._is_error_message(translated):
-                        log_debug(f"Sentence {i+1}: \"{sentence}\" has been translated by MarianMT in {sentence_translation_time:.2f}s")
-                        log_debug(f"Translation result: \"{translated}\"")
+                        log_debug(
+                            f"Sentence {i+1} translated by MarianMT in "
+                            f"{sentence_translation_time:.2f}s "
+                            f"{summarize_text_for_log(sentence)}"
+                        )
+                        log_debug(
+                            "Translation result "
+                            f"{summarize_text_for_log(translated)}"
+                        )
                         translated_parts.append(translated)
                     else:
-                        log_debug(f"Sentence {i+1} translation failed, using original: \"{sentence}\"")
+                        log_debug(
+                            f"Sentence {i+1} translation failed, using original "
+                            f"{summarize_text_for_log(sentence)}"
+                        )
                         translated_parts.append(sentence)
                 else:
                     # Add empty sentence as-is
@@ -906,14 +946,23 @@ class MarianMTTranslator:
                 result = " ".join(translated_parts)
                 translation_time = time.monotonic() - sequential_start_time
                 log_debug(f"Sequential translation complete: {len(translated_parts)} sentences processed in {translation_time:.3f} seconds")
-                log_debug(f"The completed subtitle is displayed: \"{result}\"")
+                log_debug(
+                    "The completed subtitle is displayed "
+                    f"{summarize_text_for_log(result)}"
+                )
                 return result
             else:
                 # Last resort - translate full text
-                log_debug(f"No translated parts, using full text as last resort: \"{full_text}\"")
+                log_debug(
+                    "No translated parts, using full text as last resort "
+                    f"{summarize_text_for_log(full_text)}"
+                )
                 result = self._translate_batch(full_text, source_lang, target_lang)
                 translation_time = time.monotonic() - sequential_start_time
-                log_debug(f"Full text translated in {translation_time:.3f} seconds: \"{result}\"")
+                log_debug(
+                    f"Full text translated in {translation_time:.3f} seconds "
+                    f"{summarize_text_for_log(result)}"
+                )
                 return result
 
         except Exception as e:
@@ -935,7 +984,10 @@ class MarianMTTranslator:
     def _translate_batch(self, text, source_lang, target_lang):
         """Translate a single batch of text using appropriate model. (Pivot translation removed)."""
         try:
-            log_debug(f"Attempting to translate batch: \"{text}\" from {source_lang} to {target_lang}")
+            log_debug(
+                f"Attempting to translate batch from {source_lang} to "
+                f"{target_lang} {summarize_text_for_log(text)}"
+            )
 
             # --- Direct Translation Attempt Only ---
             model_key = (source_lang, target_lang)
@@ -961,7 +1013,10 @@ class MarianMTTranslator:
                 log_debug(f"Using direct translation model for {source_lang}->{target_lang}")
                 # Pass self.num_beams as the third argument to the cached function
                 translated = self._translate_text_cached(text, model_key, self.num_beams)
-                log_debug(f"Direct translation result: \"{translated}\"")
+                log_debug(
+                    "Direct translation result "
+                    f"{summarize_text_for_log(translated)}"
+                )
                 return translated
 
             # --- Handle Failure: Direct Model Not Available (No Pivot Fallback) ---
@@ -998,7 +1053,10 @@ class MarianMTTranslator:
         text = re.sub(r'\s+', ' ', text).strip()
 
         # Log the full text before splitting
-        log_debug(f"Splitting text into sentences: \"{text}\"")
+        log_debug(
+            "Splitting text into sentences "
+            f"{summarize_text_for_log(text)}"
+        )
 
         # Define character ranges for different languages
         # latin_chars = r'A-ZÀ-ÖØ-ÞÇÉÈÊÂÄÀÔÛÙÏÎŘa-z0-9–—-'
@@ -1076,18 +1134,26 @@ class MarianMTTranslator:
 
         # Handle special cases
         if not processed_sentences:
-            log_debug(f"No sentences found after splitting, using full text: \"{text}\"")
+            log_debug(
+                "No sentences found after splitting, using full text "
+                f"{summarize_text_for_log(text)}"
+            )
             return [text]  # Return original if splitting failed
 
         # Don't split very short text
         if len(text) < 30:
-            log_debug(f"Text too short for splitting (<30 chars): \"{text}\"")
+            log_debug(
+                "Text too short for splitting (<30 chars) "
+                f"{summarize_text_for_log(text)}"
+            )
             return [text]
 
         # Log each sentence found
         log_debug(f"Splitting into {len(processed_sentences)} sentences:")
         for i, sentence in enumerate(processed_sentences):
-            log_debug(f"Sentence {i+1}: \"{sentence}\"")
+            log_debug(
+                f"Sentence {i+1} {summarize_text_for_log(sentence)}"
+            )
 
         return processed_sentences
 

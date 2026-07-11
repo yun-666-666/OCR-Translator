@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from logger import log_debug
+from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 
 
 PADDLEOCR_MODEL_CODE = "paddleocr"
@@ -17,6 +17,21 @@ PADDLEOCR_DISPLAY_NAME = "PaddleOCR PP-OCRv6 (offline)"
 
 class PaddleOCRUnavailableError(RuntimeError):
     """Raised when PaddleOCR cannot be imported or initialized."""
+
+
+def _sanitize_exception_reason_for_log(error, max_chars=120):
+    """Return a bounded single-line diagnostic without quoted OCR content."""
+    try:
+        reason = str(error)
+    except Exception:
+        reason = ""
+    reason = re.sub(r"(['\"]).*?\1", "<redacted>", reason)
+    reason = re.sub(r"https?://\S+", "<url>", reason, flags=re.IGNORECASE)
+    reason = re.sub(r"\b[A-Za-z]:[\\/]\S+", "<path>", reason)
+    reason = re.sub(r"\s+", " ", reason).strip()
+    if not reason:
+        return "no detail"
+    return reason[: max(1, int(max_chars))].rstrip()
 
 
 @dataclass(frozen=True)
@@ -436,7 +451,13 @@ def flatten_paddleocr_result(result, min_score=0.35, keep_linebreaks=False):
             except Exception:
                 confidence = 0.0
             if confidence < min_score:
-                log_debug(f"PaddleOCR filtered low-confidence line: {clean_text!r} ({confidence:.3f})")
+                log_debug_coalesced(
+                    "paddle-full-low-confidence",
+                    "PaddleOCR filtered low-confidence line "
+                    f"{summarize_text_for_log(clean_text)} "
+                    f"confidence={confidence:.3f}",
+                    interval_seconds=5.0,
+                )
                 continue
             bbox = _tolist_if_possible(boxes[index]) if index < len(boxes) else None
             lines.append(PaddleOCRLine(clean_text, round(confidence, 3), bbox))
@@ -461,10 +482,22 @@ def flatten_paddleocr_text_recognition_result(result, min_score=0.35):
         except Exception:
             confidence = 0.0
         if confidence < min_score:
-            log_debug(f"PaddleOCR subtitle fast path filtered low-confidence line: {clean_text!r} ({confidence:.3f})")
+            log_debug_coalesced(
+                "paddle-subtitle-fast-path-low-confidence",
+                "PaddleOCR subtitle fast path filtered low-confidence line "
+                f"{summarize_text_for_log(clean_text)} "
+                f"confidence={confidence:.3f}",
+                interval_seconds=5.0,
+            )
             continue
         if _looks_like_subtitle_symbol_noise(clean_text):
-            log_debug(f"PaddleOCR subtitle fast path filtered noisy line: {clean_text!r} ({confidence:.3f})")
+            log_debug_coalesced(
+                "paddle-subtitle-fast-path-symbol-noise",
+                "PaddleOCR subtitle fast path filtered noisy line "
+                f"{summarize_text_for_log(clean_text)} "
+                f"confidence={confidence:.3f}",
+                interval_seconds=5.0,
+            )
             continue
         lines.append(PaddleOCRLine(clean_text, round(confidence, 3), None))
     return " ".join(line.text for line in lines), lines
@@ -542,19 +575,34 @@ def recognize_subtitle_with_paddleocr(pil_image, settings=None, keep_linebreaks=
             if recognized_lines:
                 separator = "\n" if keep_linebreaks else " "
                 text = separator.join(line.text for line in recognized_lines)
-                log_debug(
+                log_debug_coalesced(
+                    "paddle-subtitle-fast-path-success",
                     "PaddleOCR subtitle fast path recognized "
-                    f"{len(recognized_lines)} line(s): {text!r}"
+                    f"lines={len(recognized_lines)} chars={len(text)}",
+                    interval_seconds=5.0,
                 )
                 return text, recognized_lines
-            log_debug("PaddleOCR subtitle fast path found no usable text; falling back to full OCR")
+            log_debug_coalesced(
+                "paddle-subtitle-fast-path-no-usable-text",
+                "PaddleOCR subtitle fast path found no usable text; "
+                "falling back to full OCR",
+                interval_seconds=5.0,
+            )
         except Exception as subtitle_error:
-            log_debug(
+            reason = _sanitize_exception_reason_for_log(subtitle_error)
+            log_debug_coalesced(
+                "paddle-subtitle-fast-path-error",
                 "PaddleOCR subtitle fast path failed; falling back to full OCR: "
-                f"{type(subtitle_error).__name__} - {subtitle_error}"
+                f"{type(subtitle_error).__name__}: {reason}",
+                interval_seconds=5.0,
             )
     else:
-        log_debug("PaddleOCR subtitle fast path found no line crop; falling back to full OCR")
+        log_debug_coalesced(
+            "paddle-subtitle-fast-path-no-line-crop",
+            "PaddleOCR subtitle fast path found no line crop; "
+            "falling back to full OCR",
+            interval_seconds=5.0,
+        )
 
     return recognize_with_paddleocr(
         pil_image,

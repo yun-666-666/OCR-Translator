@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from logger import log_debug
+from logger import log_debug, log_debug_coalesced
 
 
 CACHE_SCHEMA_VERSION = 2
@@ -736,13 +736,31 @@ class UnifiedTranslationCache:
             try:
                 translation = self._cache[cache_key]
             except KeyError:
+                normalized_provider = str(provider).lower()
+                normalized_source = str(source_lang).lower()
+                normalized_target = str(target_lang).lower()
+                model_type = ""
                 if provider.lower() == "deepl_api" and "model_type" in kwargs:
-                    log_debug(
+                    model_type = str(kwargs["model_type"])
+                    miss_message = (
                         f"Unified cache MISS: {provider} {source_lang}->{target_lang} "
                         f"(model_type={kwargs['model_type']})"
                     )
                 else:
-                    log_debug(f"Unified cache MISS: {provider} {source_lang}->{target_lang}")
+                    miss_message = (
+                        f"Unified cache MISS: {provider} {source_lang}->{target_lang}"
+                    )
+                log_debug_coalesced(
+                    (
+                        "unified-cache-miss",
+                        normalized_provider,
+                        normalized_source,
+                        normalized_target,
+                        model_type,
+                    ),
+                    miss_message,
+                    interval_seconds=5.0,
+                )
                 return None
             else:
                 access_time = time.time()

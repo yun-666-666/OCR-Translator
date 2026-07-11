@@ -25,9 +25,11 @@ boundaries:
 
 The operation invalidates the pending timer generation, clears the pending and
 latest candidates, invalidates profile-refresh callbacks, resets the submit
-interval clock, and clears completed-session in-flight timing identities. It
-does not reset monotonically increasing translation sequence counters, because
-those counters remain the final defense against late response ordering.
+interval clock, clears completed-session in-flight timing identities, and
+raises the display sequence floor to the highest already-started sequence. It
+does not reset monotonically increasing translation sequence counters. New
+requests continue above the floor, while an old HTTP/Tk response callback that
+finishes around stop/restart is rejected by normal chronological ordering.
 
 This is preferred over merely clamping queue timing because the stale request
 would still be sent and displayed. A new session epoch on every request would
@@ -59,7 +61,9 @@ incrementing their generations makes them harmless when they eventually run.
 2. A shutdown regression proves `_finalize_shutdown()` invokes the reset.
 3. A start-boundary regression exercises the helper through the app method so a
    previous-session pending request cannot be expedited after restart.
-4. Run the focused latency suite, the full test suite, compilation checks, and
+4. A response-order regression proves an already-started old sequence cannot
+   display after the boundary reset.
+5. Run the focused latency suite, the full test suite, compilation checks, and
    `git diff --check`.
 
 ## Success criteria
