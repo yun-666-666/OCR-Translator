@@ -90,6 +90,7 @@ class StartupOptimizationTests(unittest.TestCase):
             "handlers/ui_interaction_handler.py",
             "requirements.txt",
             "resources/gui_eng.csv",
+            "resources/gui_pol.csv",
             "resources/gui_zh.csv",
             "ocr_translator_config.ini",
         ]

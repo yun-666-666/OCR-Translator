@@ -11,14 +11,6 @@ clear_debug_log_btn,清空调试日志
 toggle_debug_log_disable_btn,禁用调试日志
 toggle_debug_log_enable_btn,启用调试日志
 gui_language_label,界面语言
-main_controls_title,屏幕 OCR 翻译器
-workflow_status_title,工作流
-status_track_ocr,OCR
-status_track_translate,翻译
-status_track_overlay,叠加层
-capture_overlay_title,捕获与叠加层
-runtime_controls_title,运行控制
-maintenance_title,维护
 keyboard_shortcuts_title,快捷键
 status_ready,状态：就绪
 status_ready_hotkey,状态：就绪（按 ~ 开始/停止）
@@ -31,15 +23,6 @@ shortcut_clear_log,清空调试日志
 status_running,运行中（按 ~ 停止）
 status_stopped,已停止（按 ~ 开始）
 settings_tab_title,设置
-settings_summary_ocr,PaddleOCR
-settings_summary_ai,自定义 AI
-settings_summary_overlay,叠加层
-settings_group_models,模型与语言
-settings_group_providers,服务商接入与质量
-settings_group_local_ocr,离线 MarianMT
-settings_group_custom_ai_runtime,自定义 AI 运行设置
-settings_group_capture,捕获时序
-settings_group_overlay,叠加层外观
 translation_model_label,翻译模型：
 translation_model_marianmt_offline,MarianMT（离线免费）
 ocr_model_label,OCR 模型：

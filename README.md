@@ -29,7 +29,6 @@ Older built-in provider modules and historical resources may still exist in the 
 - Floating overlay with configurable font, color, transparency, and geometry
 - Hotkeys for controlling translation while another app is focused
 - Startup/shutdown paths that preserve settings and overlay placement
-- Application UI languages: English and Chinese. Translation language support remains provider-dependent.
 
 ## Installation
 

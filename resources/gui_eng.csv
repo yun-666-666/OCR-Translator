@@ -11,14 +11,6 @@ clear_debug_log_btn,Clear Debug Log
 toggle_debug_log_disable_btn,Disable Debug Log
 toggle_debug_log_enable_btn,Enable Debug Log
 gui_language_label,GUI Language
-main_controls_title,Screen OCR translator
-workflow_status_title,Workflow
-status_track_ocr,OCR
-status_track_translate,Translate
-status_track_overlay,Overlay
-capture_overlay_title,Capture and overlay
-runtime_controls_title,Run controls
-maintenance_title,Maintenance
 keyboard_shortcuts_title,Keyboard Shortcuts
 status_ready,Status: Ready
 status_ready_hotkey,Status: Ready (Press ~ to Start/Stop)
@@ -31,15 +23,6 @@ shortcut_clear_log,Clear Debug Log
 status_running,Running (Press ~ to Stop)
 status_stopped,Stopped (Press ~ to Start)
 settings_tab_title,Settings
-settings_summary_ocr,PaddleOCR
-settings_summary_ai,Custom AI
-settings_summary_overlay,Overlay
-settings_group_models,Models and languages
-settings_group_providers,Provider access and quality
-settings_group_local_ocr,Offline MarianMT
-settings_group_custom_ai_runtime,Custom AI runtime
-settings_group_capture,Capture timing
-settings_group_overlay,Overlay appearance
 translation_model_label,Translation Model:
 translation_model_marianmt_offline,MarianMT (offline and free)
 ocr_model_label,OCR Model:

@@ -70,26 +70,6 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertEqual(loaded_config["Settings"]["ocr_model"], "paddleocr")
         self.assertIn("ocr_model = paddleocr", persisted_config)
 
-    def test_legacy_polish_gui_language_config_migrates_to_english(self):
-        import config_manager
-
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            previous_cwd = os.getcwd()
-            os.chdir(tmp_dir)
-            try:
-                Path("ocr_translator_config.ini").write_text(
-                    "[Settings]\ngui_language = polski\n",
-                    encoding="utf-8",
-                )
-
-                loaded_config = config_manager.load_app_config()
-                persisted_config = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
-            finally:
-                os.chdir(previous_cwd)
-
-        self.assertEqual(loaded_config["Settings"]["gui_language"], "English")
-        self.assertIn("gui_language = English", persisted_config)
-
     def test_default_config_includes_custom_ai_submit_interval(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
@@ -147,7 +127,7 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertNotIn("confidence_label", ui_handler_source)
         self.assertNotIn(legacy_confidence_key, gui_builder_source)
 
-        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv"):
+        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv", "resources/gui_pol.csv"):
             with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
                 labels = {
                     row[0]: row[1]
@@ -157,14 +137,6 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertIn("paddleocr_min_score_label", labels, msg=path)
             self.assertTrue(labels["paddleocr_min_score_label"].strip(), msg=path)
             self.assertNotIn(legacy_confidence_key, labels, msg=path)
-
-    def test_main_tab_includes_ocr_translate_overlay_status_track(self):
-        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
-
-        self.assertIn("create_status_track", gui_builder_source)
-        self.assertIn("OCR", gui_builder_source)
-        self.assertIn("Translate", gui_builder_source)
-        self.assertIn("Overlay", gui_builder_source)
 
     def test_new_custom_ai_controls_have_all_language_labels(self):
         required_keys = {
@@ -191,7 +163,7 @@ class StartupOptimizationTests(unittest.TestCase):
             "custom_ai_ocr_image_detail_high",
         }
 
-        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv"):
+        for path in ("resources/gui_eng.csv", "resources/gui_zh.csv", "resources/gui_pol.csv"):
             with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
                 labels = {
                     row[0]: row[1]
@@ -263,6 +235,7 @@ class StartupOptimizationTests(unittest.TestCase):
             "handlers/ui_interaction_handler.py",
             "requirements.txt",
             "resources/gui_eng.csv",
+            "resources/gui_pol.csv",
             "resources/gui_zh.csv",
             "ocr_translator_config.ini",
         ]
@@ -315,6 +288,7 @@ class StartupOptimizationTests(unittest.TestCase):
             "handlers/display_manager.py",
             "handlers/ui_interaction_handler.py",
             "resources/gui_eng.csv",
+            "resources/gui_pol.csv",
             "resources/gui_zh.csv",
             "requirements.txt",
             "setup.py",
@@ -358,15 +332,6 @@ class ChineseUILanguageTests(unittest.TestCase):
 
         self.assertIn("zh", manager.get_available_languages())
         self.assertEqual(manager.get_available_languages()["zh"], "中文")
-
-    def test_ui_language_options_are_limited_to_english_and_chinese(self):
-        manager = UILanguageManager()
-
-        self.assertEqual(set(manager.get_available_languages()), {"eng", "zh"})
-        self.assertEqual(manager.get_language_list(), ["English", "中文"])
-        self.assertEqual(manager.get_language_code_from_name("polski"), "eng")
-        self.assertEqual(manager.normalize_display_name("Polish"), "English")
-        self.assertFalse(Path("resources/gui_pol.csv").exists())
 
     def test_chinese_gui_csv_covers_english_keys(self):
         def keys(path):

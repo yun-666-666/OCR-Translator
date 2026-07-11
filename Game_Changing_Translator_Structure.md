@@ -107,7 +107,7 @@ resources/
 │   ├── MarianMT_select_models.csv
 │   └── MarianMT_models_short_list.csv
 ├── UI Localization
-│   ├── gui_eng.csv / gui_zh.csv
+│   ├── gui_eng.csv / gui_pol.csv
 │   └── language_display_names.csv
 └── Language Mappings
     └── lang_codes.csv
@@ -123,9 +123,9 @@ resources/
 
 ### **User Documentation** (`docs/`)
 - **`developer-guide.md`** - **Comprehensive development guide**
-- **`user-manual.html`** - User manual (English)
-- **`installation.html`** - Installation guide (English)
-- **`gallery.html`** - Application gallery (English)
+- **`user-manual.html`** / **`user-manual_pl.html`** - User manuals (EN/PL)
+- **`installation.html`** / **`installation_pl.html`** - Installation guides (EN/PL)
+- **`gallery.html`** / **`gallery_pl.html`** - Application galleries (EN/PL)
 - **`troubleshooting.md`** - Problem resolution guide
 - **`flags/`**, **`gallery/`**, **`screenshots/`** - Visual assets
 

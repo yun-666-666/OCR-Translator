@@ -580,137 +580,22 @@ def get_system_fonts():
         # Fallback if system font detection fails
         return ['Arial', 'Times New Roman', 'Calibri', 'Cambria', 'Helvetica', 'Courier New', 'Verdana', 'Tahoma']
 
-
-def create_status_track(app, parent):
-    """Build the OCR > Translate > Overlay pipeline bar with amber pulse dots.
-
-    Each step gets a small tk.Canvas dot.  The dot canvases are stored on
-    ``app._pipeline_dot_canvases`` so the pulse helpers in modern_ui can
-    recolour them.  The palette is read from ``app.root.white_clean_palette``
-    (set by apply_white_clean_theme) or falls back to the module default.
-    """
-    palette = getattr(app.root, "white_clean_palette", None)
-    if palette is None:
-        from modern_ui import WHITE_CLEAN_PALETTE
-        palette = WHITE_CLEAN_PALETTE
-
-    idle_color = palette.get("surface_variant", "#e4e9ee")
-
-    track = ttk.Frame(parent, style="StatusTrack.TFrame", padding=(10, 6))
-    # 5 columns: dot+label, arrow, dot+label, arrow, dot+label
-    for col in (0, 2, 4):
-        track.columnconfigure(col, weight=1, uniform="workflow")
-
-    steps = [
-        app.ui_lang.get_label("status_track_ocr", "OCR"),
-        app.ui_lang.get_label("status_track_translate", "Translate"),
-        app.ui_lang.get_label("status_track_overlay", "Overlay"),
-    ]
-
-    dot_canvases = []
-    for index, label_text in enumerate(steps):
-        column = index * 2
-
-        # Step cell: dot + label side by side in a small inner frame
-        cell = ttk.Frame(track, style="StatusTrack.TFrame")
-        cell.grid(row=0, column=column, sticky="ew", padx=2)
-        cell.columnconfigure(1, weight=1)
-
-        # 8×8 dot canvas
-        dot = tk.Canvas(
-            cell,
-            width=8, height=8,
-            bg=idle_color,
-            highlightthickness=0,
-            bd=0,
-        )
-        dot.grid(row=0, column=0, padx=(0, 4))
-        # Draw a filled oval tagged "dot" for easy recolouring
-        dot.create_oval(1, 1, 7, 7, fill=idle_color, outline=idle_color, tags="dot")
-        dot_canvases.append(dot)
-
-        ttk.Label(
-            cell,
-            text=label_text,
-            style="StatusTrackStep.TLabel",
-            anchor="w",
-        ).grid(row=0, column=1, sticky="ew")
-
-        if index < len(steps) - 1:
-            ttk.Label(
-                track,
-                text="›",
-                style="StatusTrackArrow.TLabel",
-                anchor="center",
-            ).grid(row=0, column=column + 1, padx=4)
-
-    # Store dot canvases so app_logic can drive the pulse
-    app._pipeline_dot_canvases = dot_canvases
-    app._pipeline_pulse_palette = palette
-    app._pipeline_pulse_id = None
-
-    return track
-
-
-def _create_section(parent, title):
-    section = ttk.LabelFrame(parent, text=title, style="Section.TLabelframe", padding=(10, 8))
-    section.columnconfigure(0, weight=1)
-    return section
-
-
-def _pack_command_button(parent, text, command, style=None):
-    button = ttk.Button(parent, text=text, command=command, style=style or "Secondary.TButton", width=28)
-    button.pack(fill=tk.X, pady=(0, 6))
-    return button
-
-
-def _settings_group_heading(parent, text, row):
-    """Settings section heading: 3 px amber left-accent bar + label + separator."""
-    palette = getattr(getattr(parent, "master", None), "white_clean_palette", None)
-    amber = palette.get("primary", "#d4700c") if palette else "#d4700c"
-
-    heading = ttk.Frame(parent, style="Surface.TFrame")
-    heading.grid(row=row, column=0, columnspan=3, padx=5, pady=(14, 4), sticky="ew")
-    heading.columnconfigure(2, weight=1)
-
-    # 3 px amber accent bar
-    bar = tk.Frame(heading, width=3, bg=amber)
-    bar.grid(row=0, column=0, sticky="ns", padx=(0, 6))
-
-    ttk.Label(heading, text=text, style="SettingsGroup.TLabel").grid(
-        row=0, column=1, padx=(0, 8), sticky="w"
-    )
-    ttk.Separator(heading, orient=tk.HORIZONTAL).grid(row=0, column=2, sticky="ew")
-    return heading
-
-
-def _settings_label(parent, text, wraplength=220):
-    return ttk.Label(parent, text=text, wraplength=wraplength, justify=tk.LEFT)
-
-
 def create_main_tab(app):
+    # Create a scrollable tab content frame
     scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("main_tab_title"))
     app.tab_main = scrollable_content
 
-    frame = ttk.Frame(scrollable_content, padding=(14, 12))
-    frame.pack(fill="both", expand=True)
-    frame.columnconfigure(0, weight=1)
-    frame.columnconfigure(1, weight=1)
+    # Create the main frame inside the scrollable area
+    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("main_tab_title"))
+    frame.pack(fill="both", expand=True, padx=10, pady=10)
 
+    # Add GUI language selection at the top
     language_frame = ttk.Frame(frame)
-    language_frame.grid(row=0, column=0, columnspan=2, padx=0, pady=(0, 10), sticky="ew")
-    language_frame.columnconfigure(0, weight=1)
+    language_frame.grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky="w")
 
-    ttk.Label(
-        language_frame,
-        text=app.ui_lang.get_label("main_controls_title", "Screen OCR translator"),
-        style="Header.TLabel",
-    ).grid(row=0, column=0, sticky="w")
-    language_picker = ttk.Frame(language_frame)
-    language_picker.grid(row=0, column=1, sticky="e")
-    ttk.Label(language_picker, text=app.ui_lang.get_label("gui_language_label")).pack(side=tk.LEFT, padx=(0, 6))
-    app.gui_language_combobox = ttk.Combobox(language_picker, textvariable=app.gui_language_var,
-                                             values=app.ui_lang.get_language_list(), width=14, state='readonly')
+    ttk.Label(language_frame, text=app.ui_lang.get_label("gui_language_label")).pack(side=tk.LEFT, padx=(0,5))
+    app.gui_language_combobox = ttk.Combobox(language_frame, textvariable=app.gui_language_var,
+                                           values=app.ui_lang.get_language_list(), width=15, state='readonly')
     app.gui_language_combobox.pack(side=tk.LEFT)
 
     def on_gui_language_changed(event):
@@ -742,69 +627,43 @@ def create_main_tab(app):
 
     app.gui_language_combobox.bind('<<ComboboxSelected>>', on_gui_language_changed)
 
-    workflow_frame = _create_section(frame, app.ui_lang.get_label("workflow_status_title", "Workflow"))
-    workflow_frame.grid(row=1, column=0, columnspan=2, padx=0, pady=(0, 10), sticky="ew")
-    create_status_track(app, workflow_frame).pack(fill=tk.X)
+    ttk.Button(frame, text=app.ui_lang.get_label("select_source_btn"), command=app.select_source_area, width=30).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+    ttk.Button(frame, text=app.ui_lang.get_label("select_target_btn"), command=app.select_target_area, width=30).grid(row=2, column=0, padx=5, pady=5, sticky="w")
+    app.start_stop_btn = ttk.Button(frame, text=app.ui_lang.get_label("start_btn"), command=app.toggle_translation, width=30)
+    app.start_stop_btn.grid(row=3, column=0, padx=5, pady=5, sticky="w")
 
-    area_frame = _create_section(frame, app.ui_lang.get_label("capture_overlay_title", "Capture and overlay"))
-    area_frame.grid(row=2, column=0, padx=(0, 6), pady=(0, 10), sticky="nsew")
-    _pack_command_button(area_frame, app.ui_lang.get_label("select_source_btn"), app.select_source_area)
-    _pack_command_button(area_frame, app.ui_lang.get_label("select_target_btn"), app.select_target_area)
-    _pack_command_button(area_frame, app.ui_lang.get_label("hide_source_btn"), app.toggle_source_visibility)
-    _pack_command_button(area_frame, app.ui_lang.get_label("hide_target_btn"), app.toggle_target_visibility)
-
-    run_frame = _create_section(frame, app.ui_lang.get_label("runtime_controls_title", "Run controls"))
-    run_frame.grid(row=2, column=1, padx=(6, 0), pady=(0, 10), sticky="nsew")
-
-    # START button: larger vertical padding so it reads as the primary action
-    app.start_stop_btn = ttk.Button(
-        run_frame,
-        text=app.ui_lang.get_label("start_btn"),
-        command=app.toggle_translation,
-        style="Primary.TButton",
-    )
-    app.start_stop_btn.pack(fill=tk.X, pady=(0, 8), ipady=6)
-
-    # Store reference for the tab changed handler in app_logic.py
-    app.main_tab_start_button = app.start_stop_btn
-
-    ttk.Label(
-        run_frame,
-        text=app.ui_lang.get_label("maintenance_title", "Maintenance"),
-        style="SectionMuted.TLabel",
-    ).pack(fill=tk.X, pady=(4, 4))
-    maintenance_frame = ttk.Frame(run_frame, style="Surface.TFrame")
-    maintenance_frame.pack(fill=tk.X)
-    _pack_command_button(maintenance_frame, app.ui_lang.get_label("clear_cache_btn"), app.clear_cache)
-    _pack_command_button(maintenance_frame, app.ui_lang.get_label("clear_debug_log_btn"), app.clear_debug_log)
+    # Remove individual tab bindings and add a general binding in app_logic.py after tabs are created
+    app.main_tab_start_button = app.start_stop_btn  # Store reference for the tab changed handler in app_logic.py
+    ttk.Button(frame, text=app.ui_lang.get_label("hide_source_btn"), command=app.toggle_source_visibility, width=30).grid(row=4, column=0, padx=5, pady=5, sticky="w")
+    ttk.Button(frame, text=app.ui_lang.get_label("hide_target_btn"), command=app.toggle_target_visibility, width=30).grid(row=5, column=0, padx=5, pady=5, sticky="w")
+    ttk.Button(frame, text=app.ui_lang.get_label("clear_cache_btn"), command=app.clear_cache, width=30).grid(row=6, column=0, padx=5, pady=5, sticky="w")
+    ttk.Button(frame, text=app.ui_lang.get_label("clear_debug_log_btn"), command=app.clear_debug_log, width=30).grid(row=7, column=0, padx=5, pady=5, sticky="w")
 
     # Debug log toggle button
     if app.debug_logging_enabled_var.get():
         initial_debug_toggle_text = app.ui_lang.get_label("toggle_debug_log_disable_btn")
     else:
         initial_debug_toggle_text = app.ui_lang.get_label("toggle_debug_log_enable_btn")
-    app.debug_log_toggle_btn = _pack_command_button(maintenance_frame, initial_debug_toggle_text, app.toggle_debug_logging)
+    app.debug_log_toggle_btn = ttk.Button(frame, text=initial_debug_toggle_text, command=app.toggle_debug_logging, width=30)
+    app.debug_log_toggle_btn.grid(row=8, column=0, padx=5, pady=5, sticky="w")
 
     if app.KEYBOARD_AVAILABLE:
-        shortcuts_frame = _create_section(frame, app.ui_lang.get_label("keyboard_shortcuts_title"))
-        shortcuts_frame.grid(row=3, column=0, columnspan=2, padx=0, pady=(0, 10), sticky="ew")
-        shortcuts_frame.columnconfigure(0, weight=1)
-        shortcuts_frame.columnconfigure(1, weight=1)
-        # Left column
-        ttk.Label(shortcuts_frame, text="~  —  " + app.ui_lang.get_label("shortcut_start_stop", "Start/Stop Translation"), style="SectionMuted.TLabel").grid(row=0, column=0, padx=(2, 8), pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+1  —  " + app.ui_lang.get_label("shortcut_toggle_source", "Toggle Source Window"), style="SectionMuted.TLabel").grid(row=1, column=0, padx=(2, 8), pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+2  —  " + app.ui_lang.get_label("shortcut_toggle_target", "Toggle Target Window"), style="SectionMuted.TLabel").grid(row=2, column=0, padx=(2, 8), pady=2, sticky="w")
-        # Right column
-        ttk.Label(shortcuts_frame, text="Alt+S  —  " + app.ui_lang.get_label("shortcut_save_settings", "Save Settings"), style="SectionMuted.TLabel").grid(row=0, column=1, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+C  —  " + app.ui_lang.get_label("shortcut_clear_cache", "Clear Cache"), style="SectionMuted.TLabel").grid(row=1, column=1, padx=2, pady=2, sticky="w")
-        ttk.Label(shortcuts_frame, text="Alt+L  —  " + app.ui_lang.get_label("shortcut_clear_log", "Clear Debug Log"), style="SectionMuted.TLabel").grid(row=2, column=1, padx=2, pady=2, sticky="w")
-        status_row = 4
+        shortcuts_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("keyboard_shortcuts_title"))
+        shortcuts_frame.grid(row=9, column=0, columnspan=2, padx=5, pady=10, sticky="ew")
+        ttk.Label(shortcuts_frame, text="~ : " + app.ui_lang.get_label("shortcut_start_stop", "Start/Stop Translation")).grid(row=0, column=0, padx=10, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+1 : " + app.ui_lang.get_label("shortcut_toggle_source", "Toggle Source Window Visibility")).grid(row=1, column=0, padx=10, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+2 : " + app.ui_lang.get_label("shortcut_toggle_target", "Toggle Translation Window Visibility")).grid(row=2, column=0, padx=10, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+S : " + app.ui_lang.get_label("shortcut_save_settings", "Save Settings")).grid(row=3, column=0, padx=10, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+C : " + app.ui_lang.get_label("shortcut_clear_cache", "Clear Cache")).grid(row=4, column=0, padx=10, pady=2, sticky="w")
+        ttk.Label(shortcuts_frame, text="Alt+L : " + app.ui_lang.get_label("shortcut_clear_log", "Clear Debug Log")).grid(row=5, column=0, padx=10, pady=(2,8), sticky="w")
+        status_row = 10
         app.status_label = ttk.Label(frame, text=app.ui_lang.get_label("status_ready_hotkey"))
     else:
-        status_row = 3
+        status_row = 9
         app.status_label = ttk.Label(frame, text=app.ui_lang.get_label("status_ready"))
 
-    app.status_label.grid(row=status_row, column=0, columnspan=2, padx=0, pady=(0, 4), sticky="w")
+    app.status_label.grid(row=status_row, column=0, columnspan=2, padx=5, pady=5, sticky="w")
+    frame.columnconfigure(0, weight=1)
 
 
 def create_settings_tab(app):
@@ -816,24 +675,8 @@ def create_settings_tab(app):
     )
     app.tab_settings = scrollable_content
 
-    settings_summary = ttk.Frame(scrollable_content, style="StatusTrack.TFrame", padding=(12, 8))
-    settings_summary.pack(fill="x", padx=10, pady=(10, 0))
-    for index, label_key, fallback in (
-        (0, "settings_summary_ocr", "PaddleOCR"),
-        (1, "settings_summary_ai", "Custom AI"),
-        (2, "settings_summary_overlay", "Overlay"),
-    ):
-        settings_summary.columnconfigure(index, weight=1, uniform="settings-summary")
-        ttk.Label(
-            settings_summary,
-            text=app.ui_lang.get_label(label_key, fallback),
-            style="StatusTrackDone.TLabel",
-            anchor="center",
-        ).grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
-
     # Create the settings frame inside the scrollable area
-    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("settings_tab_title"),
-                           style="Section.TLabelframe", padding=(12, 10))
+    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("settings_tab_title"))
     frame.pack(fill="both", expand=True, padx=10, pady=10)
 
     def validate_int_range(P, min_val, max_val):
@@ -890,14 +733,8 @@ def create_settings_tab(app):
                 widget.after_idle(app.tab_settings.focus_set)
         return wrapper
 
-    app.settings_models_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_models", "Models and languages"),
-        0,
-    )
-
-    # Row 1: Translation Model Selection
-    ttk.Label(frame, text=app.ui_lang.get_label("translation_model_label")).grid(row=1, column=0, padx=5, pady=5, sticky="w")
+    # Row 0: Translation Model Selection
+    ttk.Label(frame, text=app.ui_lang.get_label("translation_model_label")).grid(row=0, column=0, padx=5, pady=5, sticky="w")
 
     translation_models_available_for_ui = [p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)]
     log_debug(f"GUI Builder: Available translation models for UI: {translation_models_available_for_ui}")
@@ -907,7 +744,7 @@ def create_settings_tab(app):
 
     app.translation_model_combobox = ttk.Combobox(frame, textvariable=app.translation_model_display_var,
                                            values=translation_models_available_for_ui, width=25, state='readonly')
-    app.translation_model_combobox.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+    app.translation_model_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
     active_translation_profile = app.custom_ai_profiles.get_active_profile("translation")
     app.translation_model_display_var.set(active_translation_profile["name"] if active_translation_profile else translation_models_available_for_ui[0])
@@ -922,8 +759,8 @@ def create_settings_tab(app):
     app.translation_model_combobox.bind('<<ComboboxSelected>>',
         create_combobox_handler_wrapper(handle_translation_model_selection))
 
-    # Row 2: OCR Model Selection
-    ttk.Label(frame, text=app.ui_lang.get_label("ocr_model_label", "OCR Model")).grid(row=2, column=0, padx=5, pady=5, sticky="w")
+    # Row 0.5: OCR Model Selection
+    ttk.Label(frame, text=app.ui_lang.get_label("ocr_model_label", "OCR Model")).grid(row=1, column=0, padx=5, pady=5, sticky="w")
 
     ocr_models_available_for_ui = build_ocr_model_display_options(app)
 
@@ -931,7 +768,7 @@ def create_settings_tab(app):
     app.ocr_model_combobox = ttk.Combobox(frame, textvariable=app.ocr_model_display_var,
                                         values=ocr_models_available_for_ui,
                                         width=25, state='readonly')
-    app.ocr_model_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+    app.ocr_model_combobox.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
     def on_ocr_model_changed(event):
         selected_display = app.ocr_model_display_var.get()
@@ -967,17 +804,19 @@ def create_settings_tab(app):
     app.ocr_model_options = ocr_models_available_for_ui
 
     app.source_lang_label = ttk.Label(frame, text=app.ui_lang.get_label("source_lang_label"))
-    app.source_lang_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+    app.source_lang_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
     app.source_lang_combobox = ttk.Combobox(frame, textvariable=app.source_display_var, width=25, state='readonly')
-    app.source_lang_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+    app.source_lang_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
 
     def on_source_lang_gui_changed(event):
         selected_display_name = app.source_display_var.get()
         active_model = app.translation_model_var.get()
 
-        ui_language_for_lookup = app.ui_interaction_handler.get_current_ui_language_for_lookup()
+        # Get current UI language - more robust detection
+        current_ui_language = app.ui_lang.current_lang
+        ui_language_for_lookup = 'polish' if current_ui_language == 'pol' else 'english'
 
-        log_debug(f"Source lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{app.ui_lang.current_lang}', lookup='{ui_language_for_lookup}'")
+        log_debug(f"Source lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{current_ui_language}', lookup='{ui_language_for_lookup}'")
 
         # Convert localized display name back to API code
         # Use the correct provider format for lookup
@@ -1041,17 +880,19 @@ def create_settings_tab(app):
 
 
     app.target_lang_label = ttk.Label(frame, text=app.ui_lang.get_label("target_lang_label"))
-    app.target_lang_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
+    app.target_lang_label.grid(row=3, column=0, padx=5, pady=5, sticky="w")
     app.target_lang_combobox = ttk.Combobox(frame, textvariable=app.target_display_var, width=25, state='readonly')
-    app.target_lang_combobox.grid(row=4, column=1, padx=5, pady=5, sticky="ew")
+    app.target_lang_combobox.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
     def on_target_lang_gui_changed(event):
         selected_display_name = app.target_display_var.get()
         active_model = app.translation_model_var.get()
 
-        ui_language_for_lookup = app.ui_interaction_handler.get_current_ui_language_for_lookup()
+        # Get current UI language - more robust detection
+        current_ui_language = app.ui_lang.current_lang
+        ui_language_for_lookup = 'polish' if current_ui_language == 'pol' else 'english'
 
-        log_debug(f"Target lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{app.ui_lang.current_lang}', lookup='{ui_language_for_lookup}'")
+        log_debug(f"Target lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{current_ui_language}', lookup='{ui_language_for_lookup}'")
 
         # Convert localized display name back to API code
         # Use the correct provider format for lookup
@@ -1129,10 +970,10 @@ def create_settings_tab(app):
 
 
     app.marian_model_label = ttk.Label(frame, text=app.ui_lang.get_label("marian_model_label"))
-    app.marian_model_label.grid(row=5, column=0, padx=5, pady=5, sticky="w")
+    app.marian_model_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
     app.marian_model_combobox = ttk.Combobox(frame, textvariable=app.marian_model_display_var,
                                              values=app.marian_models_list, width=25, state='readonly')
-    app.marian_model_combobox.grid(row=5, column=1, padx=5, pady=5, sticky="ew")
+    app.marian_model_combobox.grid(row=4, column=1, padx=5, pady=5, sticky="ew")
 
     def handle_marian_model_selection(event):
         # The marian_models_dict now contains localized display names as keys
@@ -1141,52 +982,46 @@ def create_settings_tab(app):
     app.marian_model_combobox.bind('<<ComboboxSelected>>',
         create_combobox_handler_wrapper(handle_marian_model_selection))
 
-    app.settings_provider_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_providers", "Provider access and quality"),
-        6,
-    )
-
     app.google_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("google_api_key_label"))
-    app.google_api_key_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
+    app.google_api_key_label.grid(row=5, column=0, padx=5, pady=5, sticky="w")
     app.google_api_key_entry = ttk.Entry(frame, textvariable=app.google_api_key_var, width=40, show="*")
-    app.google_api_key_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
+    app.google_api_key_entry.grid(row=5, column=1, padx=5, pady=5, sticky="ew")
     # Set initial button text based on visibility
     initial_google_text = app.ui_lang.get_label("show_btn", "Show")
     if hasattr(app, 'google_api_key_visible') and app.google_api_key_visible:
         initial_google_text = app.ui_lang.get_label("hide_btn", "Hide")
     app.google_api_key_button = ttk.Button(frame, text=initial_google_text, width=5,
                                           command=lambda: app.toggle_api_key_visibility("google"))
-    app.google_api_key_button.grid(row=7, column=2, padx=5, pady=5, sticky="w")
+    app.google_api_key_button.grid(row=5, column=2, padx=5, pady=5, sticky="w")
 
     app.deepl_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_api_key_label"))
-    app.deepl_api_key_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
+    app.deepl_api_key_label.grid(row=6, column=0, padx=5, pady=5, sticky="w")
     app.deepl_api_key_entry = ttk.Entry(frame, textvariable=app.deepl_api_key_var, width=40, show="*")
-    app.deepl_api_key_entry.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
+    app.deepl_api_key_entry.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
     # Set initial button text based on visibility
     initial_deepl_text = app.ui_lang.get_label("show_btn", "Show")
     if hasattr(app, 'deepl_api_key_visible') and app.deepl_api_key_visible:
         initial_deepl_text = app.ui_lang.get_label("hide_btn", "Hide")
     app.deepl_api_key_button = ttk.Button(frame, text=initial_deepl_text, width=5,
                                          command=lambda: app.toggle_api_key_visibility("deepl"))
-    app.deepl_api_key_button.grid(row=8, column=2, padx=5, pady=5, sticky="w")
+    app.deepl_api_key_button.grid(row=6, column=2, padx=5, pady=5, sticky="w")
 
     # Gemini API Key input (only visible when Gemini is selected)
     app.gemini_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("gemini_api_key_label", "Gemini API Key"))
-    app.gemini_api_key_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
+    app.gemini_api_key_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
     app.gemini_api_key_entry = ttk.Entry(frame, textvariable=app.gemini_api_key_var, width=40, show="*")
-    app.gemini_api_key_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
+    app.gemini_api_key_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
     # Set initial button text based on visibility
     initial_gemini_text = app.ui_lang.get_label("show_btn", "Show")
     if hasattr(app, 'gemini_api_key_visible') and app.gemini_api_key_visible:
         initial_gemini_text = app.ui_lang.get_label("hide_btn", "Hide")
     app.gemini_api_key_button = ttk.Button(frame, text=initial_gemini_text, width=5,
                                           command=lambda: app.toggle_api_key_visibility("gemini"))
-    app.gemini_api_key_button.grid(row=9, column=2, padx=5, pady=5, sticky="w")
+    app.gemini_api_key_button.grid(row=7, column=2, padx=5, pady=5, sticky="w")
 
     # Gemini Context Window Setting (only visible when Gemini is selected)
     app.gemini_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("gemini_context_window_label", "Context Window"))
-    app.gemini_context_window_label.grid(row=10, column=0, padx=5, pady=5, sticky="w")
+    app.gemini_context_window_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
 
     context_window_options = [
         (0, app.ui_lang.get_label("gemini_context_window_0", "0 (Disabled)")),
@@ -1211,7 +1046,7 @@ def create_settings_tab(app):
     app.gemini_context_window_combobox = ttk.Combobox(frame, textvariable=app.gemini_context_window_display_var,
                                                      values=[display for _, display in context_window_options],
                                                      width=25, state='readonly')
-    app.gemini_context_window_combobox.grid(row=10, column=1, padx=5, pady=5, sticky="ew")
+    app.gemini_context_window_combobox.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
 
     def on_gemini_context_window_changed(event):
         selected_display = app.gemini_context_window_display_var.get()
@@ -1233,20 +1068,20 @@ def create_settings_tab(app):
 
     # OpenAI API Key input (only visible when OpenAI is selected)
     app.openai_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("openai_api_key_label", "OpenAI API Key"))
-    app.openai_api_key_label.grid(row=11, column=0, padx=5, pady=5, sticky="w")
+    app.openai_api_key_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
     app.openai_api_key_entry = ttk.Entry(frame, textvariable=app.openai_api_key_var, width=40, show="*")
-    app.openai_api_key_entry.grid(row=11, column=1, padx=5, pady=5, sticky="ew")
+    app.openai_api_key_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
     # Set initial button text based on visibility
     initial_openai_text = app.ui_lang.get_label("show_btn", "Show")
     if hasattr(app, 'openai_api_key_visible') and app.openai_api_key_visible:
         initial_openai_text = app.ui_lang.get_label("hide_btn", "Hide")
     app.openai_api_key_button = ttk.Button(frame, text=initial_openai_text, width=5,
                                           command=lambda: app.toggle_api_key_visibility("openai"))
-    app.openai_api_key_button.grid(row=11, column=2, padx=5, pady=5, sticky="w")
+    app.openai_api_key_button.grid(row=9, column=2, padx=5, pady=5, sticky="w")
 
     # OpenAI Context Window Setting (only visible when OpenAI is selected)
     app.openai_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("openai_context_window_label", "Context Window"))
-    app.openai_context_window_label.grid(row=12, column=0, padx=5, pady=5, sticky="w")
+    app.openai_context_window_label.grid(row=10, column=0, padx=5, pady=5, sticky="w")
 
     openai_context_window_options = [
         (0, app.ui_lang.get_label("openai_context_window_0", "0 (Disabled)")),
@@ -1271,7 +1106,7 @@ def create_settings_tab(app):
     app.openai_context_window_combobox = ttk.Combobox(frame, textvariable=app.openai_context_window_display_var,
                                                      values=[display for _, display in openai_context_window_options],
                                                      width=25, state='readonly')
-    app.openai_context_window_combobox.grid(row=12, column=1, padx=5, pady=5, sticky="ew")
+    app.openai_context_window_combobox.grid(row=10, column=1, padx=5, pady=5, sticky="ew")
 
     def on_openai_context_window_changed(event):
         selected_display = app.openai_context_window_display_var.get()
@@ -1293,7 +1128,7 @@ def create_settings_tab(app):
 
     # DeepL Model Type Selection (only visible when DeepL is selected)
     app.deepl_model_type_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_model_type_label", "Quality"))
-    app.deepl_model_type_label.grid(row=13, column=0, padx=5, pady=5, sticky="w")
+    app.deepl_model_type_label.grid(row=11, column=0, padx=5, pady=5, sticky="w")
 
     # Create model type options with user-friendly names
     deepl_model_options = [
@@ -1315,7 +1150,7 @@ def create_settings_tab(app):
     app.deepl_model_type_combobox = ttk.Combobox(frame, textvariable=app.deepl_model_display_var,
                                                values=[display for _, display in deepl_model_options],
                                                width=25, state='readonly')
-    app.deepl_model_type_combobox.grid(row=13, column=1, padx=5, pady=5, sticky="ew")
+    app.deepl_model_type_combobox.grid(row=11, column=1, padx=5, pady=5, sticky="ew")
 
     def on_deepl_model_type_changed(event):
         selected_display = app.deepl_model_display_var.get()
@@ -1336,7 +1171,7 @@ def create_settings_tab(app):
 
     # DeepL Context Window Setting (only visible when DeepL is selected)
     app.deepl_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_context_window_label", "Context Window"))
-    app.deepl_context_window_label.grid(row=14, column=0, padx=5, pady=5, sticky="w")
+    app.deepl_context_window_label.grid(row=12, column=0, padx=5, pady=5, sticky="w")
 
     deepl_context_window_options = [
         (0, app.ui_lang.get_label("deepl_context_window_0", "0 (Disabled)")),
@@ -1359,7 +1194,7 @@ def create_settings_tab(app):
     app.deepl_context_window_combobox = ttk.Combobox(frame, textvariable=app.deepl_context_window_display_var,
                                                      values=[display for _, display in deepl_context_window_options],
                                                      width=25, state='readonly')
-    app.deepl_context_window_combobox.grid(row=14, column=1, padx=5, pady=5, sticky="ew")
+    app.deepl_context_window_combobox.grid(row=12, column=1, padx=5, pady=5, sticky="ew")
 
     def on_deepl_context_window_changed(event):
         selected_display = app.deepl_context_window_display_var.get()
@@ -1553,26 +1388,20 @@ def create_settings_tab(app):
     # Store function reference for calling during language updates
     app.update_deepl_usage_for_language = update_deepl_usage_for_language
 
-    app.settings_marian_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_local_ocr", "Local OCR and offline models"),
-        15,
-    )
-
     app.models_file_label = ttk.Label(frame, text=app.ui_lang.get_label("models_file_label"))
-    app.models_file_label.grid(row=16, column=0, padx=5, pady=5, sticky="w")
+    app.models_file_label.grid(row=14, column=0, padx=5, pady=5, sticky="w")
     app.models_file_frame = ttk.Frame(frame)
-    app.models_file_frame.grid(row=16, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+    app.models_file_frame.grid(row=14, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
     app.models_file_entry = ttk.Entry(app.models_file_frame, textvariable=app.models_file_var)
     app.models_file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
     app.models_file_button = ttk.Button(app.models_file_frame, text=app.ui_lang.get_label("browse_btn"), command=app.browse_marian_models_file)
     app.models_file_button.pack(side=tk.RIGHT, padx=(5,0))
 
     app.beam_size_label = ttk.Label(frame, text=app.ui_lang.get_label("beam_size_label"))
-    app.beam_size_label.grid(row=17, column=0, padx=5, pady=5, sticky="w")
+    app.beam_size_label.grid(row=15, column=0, padx=5, pady=5, sticky="w")
     app.beam_spinbox = ttk.Spinbox(frame, from_=1, to=50, textvariable=app.num_beams_var, width=10,
                                   validate="key", validatecommand=(validate_beam_size, '%P'))
-    app.beam_spinbox.grid(row=17, column=1, padx=5, pady=5, sticky="w")
+    app.beam_spinbox.grid(row=15, column=1, padx=5, pady=5, sticky="w")
     def on_beam_spinbox_focus_out(event):
         try:
             value = int(app.num_beams_var.get())
@@ -1771,13 +1600,8 @@ def create_settings_tab(app):
         query = app.ai_profile_model_var.get()
         app.ai_profile_model_combobox.config(values=filter_model_values(models, query))
 
-    app.ai_profiles_frame = ttk.LabelFrame(
-        frame,
-        text=app.ui_lang.get_label("ai_model_profiles_title", "AI Model Profiles"),
-        style="Section.TLabelframe",
-        padding=(10, 8),
-    )
-    app.ai_profiles_frame.grid(row=18, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+    app.ai_profiles_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("ai_model_profiles_title", "AI Model Profiles"))
+    app.ai_profiles_frame.grid(row=16, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
     app.ai_profiles_frame.columnconfigure(1, weight=1)
 
     ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_name_label", "name")).grid(row=0, column=0, padx=5, pady=3, sticky="w")
@@ -1887,15 +1711,9 @@ def create_settings_tab(app):
 
     refresh_custom_profile_controls()
 
-    app.settings_custom_ai_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_custom_ai_runtime", "Custom AI runtime"),
-        19,
-    )
-
     app.marian_explanation_labels = []
-    app.custom_context_window_label = _settings_label(frame, app.ui_lang.get_label("custom_context_window_label", "Custom AI Context Window"))
-    app.custom_context_window_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
+    app.custom_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("custom_context_window_label", "Custom AI Context Window"))
+    app.custom_context_window_label.grid(row=17, column=0, padx=5, pady=5, sticky="w")
     app.custom_context_window_spinbox = ttk.Spinbox(
         frame,
         from_=0,
@@ -1905,7 +1723,7 @@ def create_settings_tab(app):
         validate="key",
         validatecommand=(validate_custom_context_window, '%P'),
     )
-    app.custom_context_window_spinbox.grid(row=20, column=1, padx=5, pady=5, sticky="w")
+    app.custom_context_window_spinbox.grid(row=17, column=1, padx=5, pady=5, sticky="w")
 
     def on_custom_context_window_focus_out(event):
         try:
@@ -1921,11 +1739,11 @@ def create_settings_tab(app):
 
     app.custom_context_window_spinbox.bind("<FocusOut>", on_custom_context_window_focus_out)
 
-    app.custom_ai_latency_mode_label = _settings_label(
+    app.custom_ai_latency_mode_label = ttk.Label(
         frame,
-        app.ui_lang.get_label("custom_ai_latency_mode_label", "Custom AI response mode:"),
+        text=app.ui_lang.get_label("custom_ai_latency_mode_label", "Custom AI response mode:"),
     )
-    app.custom_ai_latency_mode_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_latency_mode_label.grid(row=18, column=0, padx=5, pady=5, sticky="w")
     custom_ai_latency_mode_options = [
         ("none", app.ui_lang.get_label("custom_ai_latency_mode_none", "None")),
         ("safe", app.ui_lang.get_label("custom_ai_latency_mode_safe", "Stable low latency")),
@@ -1949,7 +1767,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_latency_mode_combobox.grid(row=21, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_latency_mode_combobox.grid(row=18, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_latency_mode_changed(event):
         selected_display = app.custom_ai_latency_mode_display_var.get()
@@ -1967,14 +1785,14 @@ def create_settings_tab(app):
     )
     app.custom_ai_latency_mode_options = custom_ai_latency_mode_options
 
-    app.custom_ai_submit_interval_label = _settings_label(
+    app.custom_ai_submit_interval_label = ttk.Label(
         frame,
-        app.ui_lang.get_label(
+        text=app.ui_lang.get_label(
             "custom_ai_submit_interval_label",
             "AI translation minimum interval (ms):",
         ),
     )
-    app.custom_ai_submit_interval_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_submit_interval_label.grid(row=19, column=0, padx=5, pady=5, sticky="w")
     app.custom_ai_submit_interval_spinbox = ttk.Spinbox(
         frame,
         from_=0,
@@ -1985,7 +1803,7 @@ def create_settings_tab(app):
         validate="key",
         validatecommand=(validate_custom_ai_submit_interval, '%P'),
     )
-    app.custom_ai_submit_interval_spinbox.grid(row=22, column=1, padx=5, pady=5, sticky="w")
+    app.custom_ai_submit_interval_spinbox.grid(row=19, column=1, padx=5, pady=5, sticky="w")
 
     def on_custom_ai_submit_interval_focus_out(event):
         try:
@@ -2000,11 +1818,11 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
-    app.custom_ai_ocr_image_format_label = _settings_label(
+    app.custom_ai_ocr_image_format_label = ttk.Label(
         frame,
-        app.ui_lang.get_label("custom_ai_ocr_image_format_label", "OCR image format:"),
+        text=app.ui_lang.get_label("custom_ai_ocr_image_format_label", "OCR image format:"),
     )
-    app.custom_ai_ocr_image_format_label.grid(row=23, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_format_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
     custom_ai_ocr_image_format_options = [
         ("webp", app.ui_lang.get_label("custom_ai_ocr_image_format_webp", "WebP")),
         ("png", app.ui_lang.get_label("custom_ai_ocr_image_format_png", "PNG")),
@@ -2025,7 +1843,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_ocr_image_format_combobox.grid(row=23, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_ocr_image_format_combobox.grid(row=20, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_ocr_image_format_changed(event):
         selected_display = app.custom_ai_ocr_image_format_display_var.get()
@@ -2038,11 +1856,11 @@ def create_settings_tab(app):
         create_combobox_handler_wrapper(on_custom_ai_ocr_image_format_changed),
     )
 
-    app.custom_ai_ocr_image_mode_label = _settings_label(
+    app.custom_ai_ocr_image_mode_label = ttk.Label(
         frame,
-        app.ui_lang.get_label("custom_ai_ocr_image_mode_label", "OCR image mode:"),
+        text=app.ui_lang.get_label("custom_ai_ocr_image_mode_label", "OCR image mode:"),
     )
-    app.custom_ai_ocr_image_mode_label.grid(row=24, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_mode_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
     custom_ai_ocr_image_mode_options = [
         ("lossless_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_lossless", "Lossless WebP")),
         ("balanced_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_balanced", "Balanced WebP")),
@@ -2063,7 +1881,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_ocr_image_mode_combobox.grid(row=24, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_ocr_image_mode_combobox.grid(row=21, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_ocr_image_mode_changed(event):
         selected_display = app.custom_ai_ocr_image_mode_display_var.get()
@@ -2076,11 +1894,11 @@ def create_settings_tab(app):
         create_combobox_handler_wrapper(on_custom_ai_ocr_image_mode_changed),
     )
 
-    app.custom_ai_ocr_image_quality_label = _settings_label(
+    app.custom_ai_ocr_image_quality_label = ttk.Label(
         frame,
-        app.ui_lang.get_label("custom_ai_ocr_image_quality_label", "OCR image quality:"),
+        text=app.ui_lang.get_label("custom_ai_ocr_image_quality_label", "OCR image quality:"),
     )
-    app.custom_ai_ocr_image_quality_label.grid(row=25, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_quality_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
     app.custom_ai_ocr_image_quality_spinbox = ttk.Spinbox(
         frame,
         from_=1,
@@ -2091,7 +1909,7 @@ def create_settings_tab(app):
         validate="key",
         validatecommand=(validate_custom_ai_ocr_image_quality, '%P'),
     )
-    app.custom_ai_ocr_image_quality_spinbox.grid(row=25, column=1, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_quality_spinbox.grid(row=22, column=1, padx=5, pady=5, sticky="w")
 
     def on_custom_ai_ocr_image_quality_focus_out(event):
         try:
@@ -2106,11 +1924,11 @@ def create_settings_tab(app):
         on_custom_ai_ocr_image_quality_focus_out,
     )
 
-    app.custom_ai_ocr_image_detail_label = _settings_label(
+    app.custom_ai_ocr_image_detail_label = ttk.Label(
         frame,
-        app.ui_lang.get_label("custom_ai_ocr_image_detail_label", "OCR image detail:"),
+        text=app.ui_lang.get_label("custom_ai_ocr_image_detail_label", "OCR image detail:"),
     )
-    app.custom_ai_ocr_image_detail_label.grid(row=26, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_ocr_image_detail_label.grid(row=23, column=0, padx=5, pady=5, sticky="w")
     custom_ai_ocr_image_detail_options = [
         ("auto", app.ui_lang.get_label("custom_ai_ocr_image_detail_auto", "Auto")),
         ("low", app.ui_lang.get_label("custom_ai_ocr_image_detail_low", "Low")),
@@ -2131,7 +1949,7 @@ def create_settings_tab(app):
         width=25,
         state='readonly',
     )
-    app.custom_ai_ocr_image_detail_combobox.grid(row=26, column=1, padx=5, pady=5, sticky="ew")
+    app.custom_ai_ocr_image_detail_combobox.grid(row=23, column=1, padx=5, pady=5, sticky="ew")
 
     def on_custom_ai_ocr_image_detail_changed(event):
         selected_display = app.custom_ai_ocr_image_detail_display_var.get()
@@ -2144,7 +1962,7 @@ def create_settings_tab(app):
         create_combobox_handler_wrapper(on_custom_ai_ocr_image_detail_changed),
     )
 
-    row_offset = 27
+    row_offset = 24
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),
@@ -2162,13 +1980,6 @@ def create_settings_tab(app):
         lbl.grid(row=row_offset + i, column=0, columnspan=3, padx=5, pady=0, sticky="w")
         app.marian_explanation_labels.append(lbl)
     current_row = row_offset + len(texts)
-
-    app.settings_capture_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_capture", "Capture timing"),
-        current_row,
-    )
-    current_row += 1
 
     app.keep_linebreaks_label = ttk.Label(frame, text=app.ui_lang.get_label("keep_linebreaks_label", "Keep Linebreaks"))
     app.keep_linebreaks_label.grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
@@ -2300,13 +2111,6 @@ def create_settings_tab(app):
     app.ocr_preview_button.pack(side=tk.LEFT, padx=(10,0))
     current_row += 1
 
-    app.settings_overlay_group = _settings_group_heading(
-        frame,
-        app.ui_lang.get_label("settings_group_overlay", "Overlay appearance"),
-        current_row,
-    )
-    current_row += 1
-
     color_options = [
         (app.ui_lang.get_label("source_color_label"), app.source_colour_var, 'source'),
         (app.ui_lang.get_label("target_color_label"), app.target_colour_var, 'target'),
@@ -2393,12 +2197,7 @@ def create_settings_tab(app):
     text_opacity_spinbox.bind("<FocusOut>", on_text_opacity_focus_out)
     current_row += 1
 
-    file_cache_frame_outer = ttk.LabelFrame(
-        frame,
-        text=app.ui_lang.get_label("file_cache_frame_title"),
-        style="Section.TLabelframe",
-        padding=(10, 8),
-    )
+    file_cache_frame_outer = ttk.LabelFrame(frame, text=app.ui_lang.get_label("file_cache_frame_title"))
     file_cache_frame_outer.grid(row=current_row, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
     ttk.Label(
         file_cache_frame_outer,
@@ -2424,8 +2223,7 @@ def create_debug_tab(app):
     app.tab_debug = scrollable_content
 
     # Create the debug frame inside the scrollable area
-    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("debug_tab_title"),
-                           style="Section.TLabelframe", padding=(12, 10))
+    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("debug_tab_title"))
     frame.pack(fill="both", expand=True, padx=10, pady=10)
 
     image_frame = ttk.Frame(frame)
@@ -2457,8 +2255,6 @@ def create_debug_tab(app):
     diagnostics_frame = ttk.LabelFrame(
         frame,
         text=app.ui_lang.get_label("performance_diagnostics_title", "Performance Diagnostics"),
-        style="Section.TLabelframe",
-        padding=(10, 8),
     )
     diagnostics_frame.pack(fill="both", expand=False, padx=5, pady=5)
 
@@ -2487,8 +2283,7 @@ def create_debug_tab(app):
     _cancel_runtime_metrics_refresh(app)
     _refresh_runtime_metrics_panel(app)
 
-    log_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("app_log_label"),
-                               style="Section.TLabelframe", padding=(10, 8))
+    log_frame = ttk.LabelFrame(frame, text=app.ui_lang.get_label("app_log_label"))
     log_frame.pack(fill="both", expand=True, padx=5, pady=5)
 
     app.log_text = tk.Text(log_frame, wrap=tk.WORD)
@@ -2506,8 +2301,7 @@ def create_custom_prompt_tab(app):
     app.tab_custom_prompt = scrollable_content
 
     # Create the main frame inside the scrollable area
-    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("custom_prompt_tab_title", "Custom Prompt"),
-                           style="Section.TLabelframe", padding=(12, 10))
+    frame = ttk.LabelFrame(scrollable_content, text=app.ui_lang.get_label("custom_prompt_tab_title", "Custom Prompt"))
     frame.pack(fill="both", expand=True, padx=10, pady=10)
 
     # Info label
