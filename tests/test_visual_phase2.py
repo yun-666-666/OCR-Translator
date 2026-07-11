@@ -43,8 +43,7 @@ def _save_screenshot(root, name: str) -> str:
         return ""
 
     os.makedirs(_OUT_DIR, exist_ok=True)
-    root.update_idletasks()
-    root.update()
+    _prepare_for_capture(root)
 
     x = root.winfo_rootx()
     y = root.winfo_rooty()
@@ -61,9 +60,25 @@ def _build_minimal_window(title: str, width: int = 600, height: int = 480):
     """Return a themed Tk root at the requested size."""
     root = tk.Tk()
     root.title(title)
-    root.geometry(f"{width}x{height}")
+    # Pin the client area onto the primary screen. A size-only geometry lets
+    # Windows reuse an off-screen position from another Tk window/session;
+    # ImageGrab would then capture a clipped desktop region and fixed client
+    # coordinates would sample unrelated pixels.
+    root.geometry(f"{width}x{height}+80+80")
     apply_white_clean_theme(root)
     return root
+
+
+def _prepare_for_capture(root):
+    """Raise the test client above any always-on-top application window."""
+    root.deiconify()
+    root.update_idletasks()
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    root.lift()
+    root.update()
 
 
 def _add_pipeline_bar(root, palette):
@@ -144,8 +159,7 @@ class VisualPhase2Tests(unittest.TestCase):
 
     def _grab(self, root):
         from PIL import ImageGrab
-        root.update_idletasks()
-        root.update()
+        _prepare_for_capture(root)
         x, y = root.winfo_rootx(), root.winfo_rooty()
         w, h = root.winfo_width(), root.winfo_height()
         return ImageGrab.grab(bbox=(x, y, x+w, y+h))
