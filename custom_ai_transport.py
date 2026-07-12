@@ -2,9 +2,11 @@
 
 from html.parser import HTMLParser
 import json
+import re
 import sys
 import time
 
+from diagnostic_sanitizer import sanitize_error_text, sanitize_url
 from custom_ai_policy import (
     CUSTOM_AI_LATENCY_MODE_NONE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
@@ -131,10 +133,20 @@ class CustomAITransportMixin:
         for _attempt in range(4):
             if (
                 "prompt_cache_key" in request_payload
-                and self._response_rejects_prompt_cache_key(
+                and self._response_rejects_compatibility_feature(
                     response,
-                    url,
                     api_key,
+                    required_markers=("prompt_cache_key",),
+                    rejection_markers=(
+                        "unsupported",
+                        "not supported",
+                        "unknown",
+                        "unrecognized",
+                        "not permitted",
+                        "not allowed",
+                        "extra input",
+                        "extra field",
+                    ),
                 )
             ):
                 self._remember_unsupported_prompt_cache_key(profile)
@@ -151,11 +163,34 @@ class CustomAITransportMixin:
             if (
                 request_kind
                 and self._payload_has_reasoning_effort(request_payload)
-                and self._response_rejects_reasoning_effort(
+                and self._response_rejects_compatibility_feature(
                     response,
-                    profile,
-                    url,
                     api_key,
+                    required_markers=(
+                        "reasoning",
+                        "reasoning_effort",
+                        "thinking",
+                        "effort",
+                    ),
+                    rejection_markers=(
+                        "does not support parameter",
+                        "does not support",
+                        "doesn't support",
+                        "do not support",
+                        "not support",
+                        "unsupported parameter",
+                        "unknown parameter",
+                        "unknown field",
+                        "invalid field",
+                        "invalid parameter",
+                        "unsupported",
+                        "not supported",
+                        "unrecognized",
+                        "not permitted",
+                        "not allowed",
+                        "extra input",
+                        "extra field",
+                    ),
                 )
             ):
                 pending_reasoning_memory = (
@@ -174,11 +209,30 @@ class CustomAITransportMixin:
 
             if (
                 self._payload_has_structured_output(request_payload)
-                and self._response_rejects_structured_output(
+                and self._response_rejects_compatibility_feature(
                     response,
-                    profile,
-                    url,
                     api_key,
+                    required_markers=(
+                        "response_format",
+                        "json_schema",
+                        "json schema",
+                        "text.format",
+                        '"format"',
+                        "'format'",
+                        "structured",
+                    ),
+                    rejection_markers=(
+                        "unsupported",
+                        "not supported",
+                        "unknown",
+                        "unrecognized",
+                        "not permitted",
+                        "not allowed",
+                        "extra input",
+                        "extra field",
+                        "invalid parameter",
+                        "unknown parameter",
+                    ),
                 )
             ):
                 if (
@@ -201,11 +255,30 @@ class CustomAITransportMixin:
 
             if (
                 output_limit_field in request_payload
-                and self._response_rejects_output_limit(
+                and self._response_rejects_compatibility_feature(
                     response,
-                    profile,
-                    url,
                     api_key,
+                    required_markers=(output_limit_field.lower(),),
+                    rejection_markers=(
+                        "unsupported",
+                        "not supported",
+                        "unknown",
+                        "unrecognized",
+                        "not permitted",
+                        "not allowed",
+                        "extra input",
+                        "extra field",
+                    ),
+                    excluded_markers=(
+                        " must be ",
+                        "less than",
+                        "greater than",
+                        "maximum",
+                        "minimum",
+                        "between",
+                        "out of range",
+                        f"{output_limit_field.lower()} value ",
+                    ),
                 )
             ):
                 self._remember_unsupported_output_limit(profile)
@@ -229,6 +302,59 @@ class CustomAITransportMixin:
                 pending_reasoning_memory[1],
             )
         return response
+
+    def _response_classification_detail(self, response):
+        """Read provider detail only for private boolean classification."""
+        detail = ""
+        try:
+            payload = self._load_response_json(response)
+            if isinstance(payload, dict) and "error" in payload:
+                error = payload["error"]
+                if isinstance(error, dict):
+                    detail = error.get("message") or json.dumps(
+                        error,
+                        ensure_ascii=False,
+                    )
+                else:
+                    detail = str(error)
+            elif payload:
+                detail = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            response_text = str(getattr(response, "text", "") or "").strip()
+            detail = (
+                self._compact_html_error_detail(response, response_text)
+                or response_text
+            )
+        return detail
+
+    def _response_error_text_for_classification(self, response, api_key):
+        """Return sanitized text for private compatibility checks only."""
+        return sanitize_error_text(
+            self._response_classification_detail(response),
+            known_secrets=[api_key],
+            max_length=500,
+        ).lower()
+
+    def _response_rejects_compatibility_feature(
+        self,
+        response,
+        api_key,
+        required_markers,
+        rejection_markers,
+        excluded_markers=(),
+    ):
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code not in {400, 422}:
+            return False
+        error_text = self._response_error_text_for_classification(
+            response,
+            api_key,
+        )
+        if not any(marker in error_text for marker in required_markers):
+            return False
+        if any(marker in error_text for marker in excluded_markers):
+            return False
+        return any(marker in error_text for marker in rejection_markers)
 
     def _response_has_retry_after(self, response):
         headers = getattr(response, "headers", None) or {}
@@ -340,11 +466,13 @@ class CustomAITransportMixin:
 
     def _activate_rate_limit_cooldown(self, profile, response, detail=""):
         status_code = int(getattr(response, "status_code", 0) or 0)
+        is_rate_limit = self._looks_like_rate_limit_error(detail)
+        is_capacity = self._looks_like_capacity_error(detail)
         if (
             status_code not in {429, 503}
             and not self._response_has_retry_after(response)
-            and not self._looks_like_rate_limit_error(detail)
-            and not self._looks_like_capacity_error(detail)
+            and not is_rate_limit
+            and not is_capacity
         ):
             return 0.0
 
@@ -380,11 +508,18 @@ class CustomAITransportMixin:
         model_name = " ".join(
             str(profile_values.get("model") or "").split()
         )[:80] or "unknown"
+        classification = (
+            "rate_limit"
+            if is_rate_limit
+            else "capacity"
+            if is_capacity
+            else f"http_{status_code}"
+        )
         _log_debug(
             "LATENCY: custom_ai provider cooldown activated "
             f"provider={profile_values.get('name', 'Custom AI')} "
             f"scope={scope} model={model_name} "
-            f"seconds={cooldown_seconds:.1f} detail={str(detail or '').strip()[:160]}"
+            f"seconds={cooldown_seconds:.1f} classification={classification}"
         )
         return cooldown_seconds
 
@@ -712,7 +847,10 @@ class CustomAITransportMixin:
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
                 if attempt == 0:
-                    _log_debug(f"LATENCY: custom_ai models GET retry for transient error at {url}: {type(e).__name__}")
+                    _log_debug(
+                        "LATENCY: custom_ai models GET retry for transient "
+                        f"error at {sanitize_url(url)}: {type(e).__name__}"
+                    )
         raise last_error
 
     def _post(
@@ -780,18 +918,21 @@ class CustomAITransportMixin:
 
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_chat_urls, cache_key, url)
+                    classification_detail = self._response_classification_detail(
+                        response
+                    )
                     error_message = self._response_error_message(response, url, api_key)
                     cooldown_seconds = self._activate_rate_limit_cooldown(
                         profile,
                         response,
-                        error_message,
+                        classification_detail,
                     )
                     errors.append(error_message)
                     if (
                         cooldown_seconds > 0
                         or self._should_stop_endpoint_fallback(
                             status_code,
-                            error_message,
+                            classification_detail,
                         )
                     ):
                         break
@@ -810,7 +951,9 @@ class CustomAITransportMixin:
                 self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
-                errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+                errors.append(
+                    f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
+                )
 
         if len(errors) == 1:
             raise ValueError(errors[0])
@@ -864,18 +1007,21 @@ class CustomAITransportMixin:
                 )
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_responses_urls, cache_key, url)
+                    classification_detail = self._response_classification_detail(
+                        response
+                    )
                     error_message = self._response_error_message(response, url, api_key)
                     cooldown_seconds = self._activate_rate_limit_cooldown(
                         profile,
                         response,
-                        error_message,
+                        classification_detail,
                     )
                     errors.append(error_message)
                     if (
                         cooldown_seconds > 0
                         or self._should_stop_endpoint_fallback(
                             status_code,
-                            error_message,
+                            classification_detail,
                         )
                     ):
                         break
@@ -893,7 +1039,9 @@ class CustomAITransportMixin:
                 self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
-                errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+                errors.append(
+                    f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
+                )
 
         if len(errors) == 1:
             raise ValueError(errors[0])
@@ -970,18 +1118,21 @@ class CustomAITransportMixin:
                 )
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_chat_urls, cache_key, url)
+                    classification_detail = self._response_classification_detail(
+                        response
+                    )
                     error_message = self._response_error_message(response, url, api_key)
                     cooldown_seconds = self._activate_rate_limit_cooldown(
                         profile,
                         response,
-                        error_message,
+                        classification_detail,
                     )
                     errors.append(error_message)
                     if (
                         cooldown_seconds > 0
                         or self._should_stop_endpoint_fallback(
                             status_code,
-                            error_message,
+                            classification_detail,
                         )
                     ):
                         break
@@ -997,7 +1148,9 @@ class CustomAITransportMixin:
                 self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
-                errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+                errors.append(
+                    f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
+                )
 
         if len(errors) == 1:
             raise ValueError(errors[0])
@@ -1057,18 +1210,21 @@ class CustomAITransportMixin:
                 )
                 if status_code >= 400:
                     self._forget_successful_url(self._successful_responses_urls, cache_key, url)
+                    classification_detail = self._response_classification_detail(
+                        response
+                    )
                     error_message = self._response_error_message(response, url, api_key)
                     cooldown_seconds = self._activate_rate_limit_cooldown(
                         profile,
                         response,
-                        error_message,
+                        classification_detail,
                     )
                     errors.append(error_message)
                     if (
                         cooldown_seconds > 0
                         or self._should_stop_endpoint_fallback(
                             status_code,
-                            error_message,
+                            classification_detail,
                         )
                     ):
                         break
@@ -1084,7 +1240,9 @@ class CustomAITransportMixin:
                 self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
-                errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+                errors.append(
+                    f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
+                )
         if len(errors) == 1:
             raise ValueError(errors[0])
         raise ValueError("Unable to call streaming responses. Tried: " + "; ".join(errors))
@@ -1262,52 +1420,67 @@ class CustomAITransportMixin:
 
     def _response_error_message(self, response, url, api_key):
         status_code = int(getattr(response, "status_code", 0) or 0)
-        detail = ""
+        safe_url = sanitize_url(url)
+        details = []
         try:
             payload = self._load_response_json(response)
-            if isinstance(payload, dict) and "error" in payload:
-                error = payload["error"]
-                if isinstance(error, dict):
-                    detail = error.get("message") or json.dumps(error, ensure_ascii=False)
-                else:
-                    detail = str(error)
-            elif payload:
-                detail = json.dumps(payload, ensure_ascii=False)
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                for field_name in ("type", "code"):
+                    value = error.get(field_name)
+                    if not isinstance(value, (str, int, float, bool)):
+                        continue
+                    safe_value = self._safe_error_identifier(
+                        value,
+                        api_key,
+                    )
+                    if safe_value:
+                        details.append(f"{field_name}={safe_value}")
         except Exception:
-            response_text = str(getattr(response, "text", "") or "").strip()
-            detail = (
-                self._compact_html_error_detail(response, response_text)
-                or response_text
-            )
+            pass
 
-        detail = self._sanitize_error(detail, api_key)
-        if len(detail) > 500:
-            detail = detail[:500] + "..."
-        if detail:
-            return f"Chat completions request failed (HTTP {status_code}) at {url}: {detail}"
-        return f"Chat completions request failed (HTTP {status_code}) at {url}"
+        message = (
+            f"Chat completions request failed (HTTP {status_code}) at {safe_url}"
+        )
+        if details:
+            return f"{message}: {', '.join(details)}"
+        return message
+
+    def _safe_error_identifier(self, value, api_key):
+        sanitized = sanitize_error_text(
+            value,
+            known_secrets=[api_key],
+            max_length=0,
+        )
+        if re.fullmatch(r"[A-Za-z0-9_.:]{1,80}", sanitized):
+            return sanitized
+        return ""
 
     def _non_json_response_message(self, response, url, api_key):
         text = str(getattr(response, "text", "") or "").strip()
-        text = self._compact_html_error_detail(response, text) or text
-        text = self._sanitize_error(text, api_key)
-        if len(text) > 300:
-            text = text[:300] + "..."
-        if text:
-            return f"Chat completions response from {url} was non-JSON or empty. Response: {text}"
-        return f"Chat completions response from {url} was non-JSON or empty."
+        safe_url = sanitize_url(url)
+        if self._compact_html_error_detail(response, text) is not None:
+            return (
+                f"Chat completions response from {safe_url} was non-JSON. "
+                "Upstream returned an HTML error page."
+            )
+        return (
+            f"Chat completions response from {safe_url} was non-JSON or empty."
+        )
 
     def _sanitize_error(self, message, api_key):
-        message = str(message)
-        if api_key:
-            message = message.replace(str(api_key), "[redacted]")
+        safe_message = sanitize_error_text(
+            message,
+            known_secrets=[api_key],
+            max_length=500,
+        )
         if self._is_tls_eof_error(message):
             return (
                 "TLS/SSL connection was closed by the server or proxy before a response was received. "
                 "This usually means the API URL, network route, or relay endpoint rejected the HTTPS connection. "
-                f"Original error: {message}"
+                f"Sanitized error: {safe_message}"
             )
-        return message
+        return safe_message
 
     def _is_tls_eof_error(self, message):
         lowered = str(message).lower()
@@ -1332,4 +1505,3 @@ class CustomAITransportMixin:
         self.close()
         _log_debug(f"LATENCY: discarded Custom AI HTTP session after transport error: {type(error).__name__}")
         return True
-

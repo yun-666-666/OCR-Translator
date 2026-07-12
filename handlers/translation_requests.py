@@ -16,6 +16,7 @@ from custom_ai import (
     normalize_custom_ai_structured_output_mode,
     normalize_custom_ai_wire_api,
 )
+from diagnostic_sanitizer import sanitize_error_text
 from logger import summarize_text_for_log
 
 CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
@@ -166,6 +167,11 @@ class TranslationRequestsMixin:
         return None
 
     def _sanitize_custom_ai_profile_error(self, error, profile):
+        api_key = (
+            profile.get("api_key", "")
+            if isinstance(profile, dict)
+            else ""
+        )
         error_text = str(error)
         sanitizer = getattr(
             self.custom_ai_provider,
@@ -176,15 +182,15 @@ class TranslationRequestsMixin:
             try:
                 error_text = sanitizer(
                     error_text,
-                    (
-                        profile.get("api_key", "")
-                        if isinstance(profile, dict)
-                        else ""
-                    ),
+                    api_key,
                 )
             except Exception:
                 pass
-        return error_text
+        return sanitize_error_text(
+            error_text,
+            known_secrets=[api_key],
+            max_length=500,
+        )
 
     def perform_ocr(self, image_data, source_lang, image_mime_type="image/webp"):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
@@ -926,9 +932,13 @@ class TranslationRequestsMixin:
                 self.app.custom_ai_profiles.list_profiles(enabled_only=True)
             )
         except Exception as error:
+            error_text = self._sanitize_custom_ai_profile_error(
+                error,
+                active_profile,
+            )
             _log_debug(
                 "Custom AI failover profile lookup failed: "
-                f"{type(error).__name__} - {error}"
+                f"{type(error).__name__} - {error_text}"
             )
 
         candidates = []

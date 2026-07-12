@@ -720,6 +720,45 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
 
 class CustomAIProviderTests(unittest.TestCase):
+    def test_models_get_retry_log_sanitizes_url(self):
+        class Client:
+            def __init__(self):
+                self.calls = 0
+                self.closed = False
+
+            def get(self, url, headers=None, timeout=None):
+                self.calls += 1
+                raise RuntimeError("transient models failure")
+
+            def close(self):
+                self.closed = True
+
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        unsafe_url = (
+            "https://url-user:url-pass@Example.COM:443/v1/models"
+            "?token=UNIQUE_MODELS_QUERY_D83D#UNIQUE_MODELS_FRAGMENT_BCD9"
+        )
+
+        with patch("custom_ai.log_debug") as debug_log:
+            with self.assertRaises(RuntimeError):
+                provider._get_with_light_retry(client, unsafe_url, {})
+
+        logged = "\n".join(
+            str(call.args[0])
+            for call in debug_log.call_args_list
+            if call.args
+        )
+        self.assertEqual(client.calls, 2)
+        self.assertIn("https://example.com/v1/models", logged)
+        for marker in (
+            "url-user",
+            "url-pass",
+            "UNIQUE_MODELS_QUERY_D83D",
+            "UNIQUE_MODELS_FRAGMENT_BCD9",
+        ):
+            self.assertNotIn(marker, logged)
+
     def test_provider_base_url_key_canonicalizes_network_equivalence(self):
         provider = CustomAIProvider()
 
@@ -2683,7 +2722,7 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertNotIn("JSONDecodeError", message)
         self.assertNotIn("super-secret", message)
 
-    def test_post_reports_json_error_body(self):
+    def test_post_reports_json_error_status_without_message_body(self):
         class Response:
             status_code = 400
             text = '{"error":{"message":"bad model"}}'
@@ -2706,10 +2745,13 @@ class CustomAIProviderTests(unittest.TestCase):
                 {"model": "demo", "messages": []},
             )
 
-        self.assertIn("bad model", str(ctx.exception))
-        self.assertNotIn("super-secret", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("HTTP 400", message)
+        self.assertIn("https://host.example/v1/chat/completions", message)
+        self.assertNotIn("bad model", message)
+        self.assertNotIn("super-secret", message)
 
-    def test_html_error_response_is_compacted_to_title(self):
+    def test_html_error_response_uses_generic_summary_without_title(self):
         class Response:
             status_code = 502
             headers = {"Content-Type": "text/html; charset=UTF-8"}
@@ -2730,10 +2772,9 @@ class CustomAIProviderTests(unittest.TestCase):
             "super-secret",
         )
 
-        self.assertIn(
-            "Upstream HTML error page: wanfeng.me | 502: Bad gateway",
-            message,
-        )
+        self.assertIn("HTTP 502", message)
+        self.assertIn("https://gateway.example/v1/responses", message)
+        self.assertNotIn("wanfeng.me", message)
         self.assertNotIn("<!DOCTYPE", message)
         self.assertNotIn("<html", message)
         self.assertNotIn("diagnostic body", message)
@@ -2781,7 +2822,10 @@ class CustomAIProviderTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             provider._post(profile, {"model": "demo", "messages": []})
 
-        self.assertIn("Rate limit exceeded", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("HTTP 429", message)
+        self.assertIn("https://host.example/v1/chat/completions", message)
+        self.assertNotIn("Rate limit exceeded", message)
         self.assertEqual(provider.http_client.calls, 1)
         self.assertGreater(provider.get_cooldown_remaining(profile), 0)
 
@@ -2817,7 +2861,10 @@ class CustomAIProviderTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             provider._post(profile, {"model": "demo", "messages": []})
 
-        self.assertIn("temporarily unavailable", str(ctx.exception).lower())
+        message = str(ctx.exception)
+        self.assertIn("HTTP 503", message)
+        self.assertIn("https://host.example/v1/chat/completions", message)
+        self.assertNotIn("temporarily unavailable", message.lower())
         self.assertEqual(provider.http_client.calls, 1)
         self.assertGreater(provider.get_cooldown_remaining(profile), 0)
 
@@ -2826,6 +2873,252 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertIn("cooldown", str(cooldown_ctx.exception).lower())
         self.assertEqual(provider.http_client.calls, 1)
+
+    def test_post_uses_private_rate_limit_detail_for_transport_cooldown(self):
+        class Response:
+            status_code = 400
+            headers = {}
+            text = '{"error":{"message":"rate limit exceeded"}}'
+
+            def json(self):
+                return {"error": {"message": "rate limit exceeded"}}
+
+            def close(self):
+                return None
+
+        class Client:
+            def __init__(self):
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.urls.append(url)
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        message = str(ctx.exception)
+        self.assertIn("HTTP 400", message)
+        self.assertNotIn("rate limit exceeded", message.lower())
+        self.assertEqual(len(set(provider.http_client.urls)), 1)
+        self.assertIn(
+            provider._rate_limit_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+
+    def test_post_uses_private_capacity_detail_for_request_cooldown(self):
+        class Response:
+            status_code = 502
+            headers = {}
+            text = '{"error":{"message":"server overloaded"}}'
+
+            def json(self):
+                return {"error": {"message": "server overloaded"}}
+
+            def close(self):
+                return None
+
+        class Client:
+            def __init__(self):
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.urls.append(url)
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        message = str(ctx.exception)
+        self.assertIn("HTTP 502", message)
+        self.assertNotIn("server overloaded", message.lower())
+        self.assertEqual(len(set(provider.http_client.urls)), 1)
+        self.assertIn(
+            provider._request_cooldown_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+        self.assertNotIn(
+            provider._rate_limit_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+
+    def test_private_classification_prefers_error_message_over_type(self):
+        class Response:
+            status_code = 400
+            headers = {}
+            text = ""
+
+            def json(self):
+                return {
+                    "error": {
+                        "message": "bad request",
+                        "type": "rate_limit_error",
+                    }
+                }
+
+            def close(self):
+                return None
+
+        class Client:
+            def post(self, url, headers=None, json=None, timeout=None):
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        self.assertEqual(
+            provider._response_classification_detail(Response()),
+            "bad request",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        self.assertNotIn("bad request", str(ctx.exception).lower())
+        self.assertNotIn(
+            provider._rate_limit_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+
+    def test_private_classification_serializes_top_level_json_payload(self):
+        class Response:
+            status_code = 400
+            headers = {}
+            text = ""
+
+            def json(self):
+                return {"message": "rate limit exceeded"}
+
+            def close(self):
+                return None
+
+        class Client:
+            def post(self, url, headers=None, json=None, timeout=None):
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        self.assertEqual(
+            provider._response_classification_detail(Response()),
+            '{"message": "rate limit exceeded"}',
+        )
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        self.assertNotIn("rate limit exceeded", str(ctx.exception).lower())
+        self.assertIn(
+            provider._rate_limit_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+
+    def test_private_classification_serializes_error_dict_without_message(self):
+        class Response:
+            status_code = 502
+            headers = {}
+            text = ""
+
+            def json(self):
+                return {"error": {"reason": "server overloaded"}}
+
+            def close(self):
+                return None
+
+        class Client:
+            def __init__(self):
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.urls.append(url)
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        self.assertEqual(
+            provider._response_classification_detail(Response()),
+            '{"reason": "server overloaded"}',
+        )
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        self.assertNotIn("server overloaded", str(ctx.exception).lower())
+        self.assertEqual(len(set(provider.http_client.urls)), 1)
+        self.assertIn(
+            provider._request_cooldown_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
+
+    def test_private_classification_compacts_html_title_without_public_leak(self):
+        class Response:
+            status_code = 502
+            headers = {"Content-Type": "text/html; charset=UTF-8"}
+            text = (
+                "<html><head><title>server overloaded</title></head>"
+                "<body>UNIQUE_PRIVATE_HTML_BODY_057D</body></html>"
+            )
+
+            def json(self):
+                raise ValueError("not json")
+
+            def close(self):
+                return None
+
+        class Client:
+            def __init__(self):
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.urls.append(url)
+                return Response()
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        self.assertEqual(
+            provider._response_classification_detail(Response()),
+            "Upstream HTML error page: server overloaded",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            provider._post(profile, {"model": "demo", "messages": []})
+
+        message = str(ctx.exception)
+        self.assertNotIn("server overloaded", message.lower())
+        self.assertNotIn("UNIQUE_PRIVATE_HTML_BODY_057D", message)
+        self.assertEqual(len(set(provider.http_client.urls)), 1)
+        self.assertIn(
+            provider._request_cooldown_cache_key(profile),
+            provider._rate_limit_cooldowns,
+        )
 
     def test_capacity_cooldown_is_scoped_to_wire_api_and_model(self):
         class Response:
@@ -9180,6 +9473,77 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
                 ],
                 [primary["id"], fallback["id"]],
             )
+        finally:
+            handler.close()
+
+    def test_failover_sanitizes_logged_and_ui_returned_provider_error(self):
+        handler, _primary, fallback = self._make_handler()
+        fallback["enabled"] = False
+        error_marker = "UNIQUE_FAILOVER_UI_LOG_MARKER_C8A7"
+        try:
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=ValueError(
+                    f"response_body={error_marker}\n"
+                    "Authorization: Bearer UNIQUE_FAILOVER_AUTH_350D\n"
+                    "endpoint=https://url-user:url-pass@relay.example/v1"
+                    "?token=UNIQUE_FAILOVER_QUERY_704C#UNIQUE_FAILOVER_FRAGMENT_AE64"
+                )
+            )
+
+            with patch("handlers.translation_requests._log_debug") as debug_log:
+                result = handler._custom_ai_translate("source", time.monotonic())
+
+            logged = "\n".join(
+                str(call.args[0])
+                for call in debug_log.call_args_list
+                if call.args
+            )
+            for rendered in (result, logged):
+                self.assertNotIn(error_marker, rendered)
+                self.assertNotIn("UNIQUE_FAILOVER_AUTH_350D", rendered)
+                self.assertNotIn("url-user", rendered)
+                self.assertNotIn("url-pass", rendered)
+                self.assertNotIn("UNIQUE_FAILOVER_QUERY_704C", rendered)
+                self.assertNotIn("UNIQUE_FAILOVER_FRAGMENT_AE64", rendered)
+                self.assertNotIn("primary-secret", rendered)
+            self.assertIn("Primary relay", result)
+        finally:
+            handler.close()
+
+    def test_failover_profile_lookup_logs_only_sanitized_error(self):
+        handler, _primary, _fallback = self._make_handler()
+        lookup_marker = "UNIQUE_FAILOVER_LOOKUP_MARKER_D581"
+        try:
+            handler.app.custom_ai_profiles.list_profiles = Mock(
+                side_effect=ValueError(
+                    f"response_body={lookup_marker}\n"
+                    "api_key=primary-secret\n"
+                    "base_url=https://url-user:url-pass@relay.example/v1"
+                    "?token=UNIQUE_LOOKUP_QUERY_A788#UNIQUE_LOOKUP_FRAGMENT_10FA"
+                )
+            )
+            handler.custom_ai_provider.translate = Mock(
+                return_value=("primary translation", {}, 0.01)
+            )
+
+            with patch("handlers.translation_requests._log_debug") as debug_log:
+                result = handler._custom_ai_translate("source", time.monotonic())
+
+            logged = "\n".join(
+                str(call.args[0])
+                for call in debug_log.call_args_list
+                if call.args
+            )
+            self.assertEqual(result, "primary translation")
+            for marker in (
+                lookup_marker,
+                "primary-secret",
+                "url-user",
+                "url-pass",
+                "UNIQUE_LOOKUP_QUERY_A788",
+                "UNIQUE_LOOKUP_FRAGMENT_10FA",
+            ):
+                self.assertNotIn(marker, logged)
         finally:
             handler.close()
 
