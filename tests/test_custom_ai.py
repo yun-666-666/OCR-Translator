@@ -33,17 +33,30 @@ UPDATED_TEST_SECRET_KEY = "test-secret-key-updated"
 
 
 class FakeCredentialStore:
-    def __init__(self, fail_writes=False, fail_reads=False, fail_deletes=False):
+    def __init__(
+        self,
+        fail_writes=False,
+        fail_reads=False,
+        fail_deletes=False,
+        fail_write_at=None,
+        write_then_raise=False,
+    ):
         self.fail_writes = fail_writes
         self.fail_reads = fail_reads
         self.fail_deletes = fail_deletes
+        self.fail_write_at = fail_write_at
+        self.write_then_raise = write_then_raise
         self.values = {}
         self.deleted = []
+        self.set_calls = []
 
     def set_secret(self, credential_ref, secret):
-        if self.fail_writes:
+        self.set_calls.append(credential_ref)
+        if self.fail_writes or self.fail_write_at == len(self.set_calls):
             raise RuntimeError("credential backend unavailable")
         self.values[credential_ref] = secret
+        if self.write_then_raise:
+            raise RuntimeError("credential backend failed after write")
 
     def get_secret(self, credential_ref):
         if self.fail_reads:
@@ -175,7 +188,7 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertTrue(deleted)
             self.assertIn(credential_ref, store.deleted)
 
-    def test_unavailable_profile_credential_store_keeps_plaintext_and_logs_safely(self):
+    def test_legacy_profile_credential_failure_preserves_source_and_blocks_saves(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
             path.write_text(
@@ -193,20 +206,322 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
+            original_bytes = path.read_bytes()
             store = FakeCredentialStore(fail_writes=True)
 
             with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
                 with patch("custom_ai.log_debug") as log_debug:
                     manager = CustomAIProfileManager(path)
-                    manager.save()
+                    runtime_profile = manager.get_profile("legacy-profile")
+                    with self.assertRaises(RuntimeError) as save_error:
+                        manager.save()
+                    with self.assertRaises(RuntimeError) as update_error:
+                        manager.update_profile("legacy-profile", name="Blocked")
 
-            persisted_text = path.read_text(encoding="utf-8")
             messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
 
-            self.assertTrue(manager.get_profile("legacy-profile").get("api_key") == TEST_SECRET_KEY, "runtime fallback lost API key")
-            self.assertTrue(TEST_SECRET_KEY in persisted_text, "plaintext fallback should preserve the key when credentials are unavailable")
-            self.assertTrue(messages, "credential fallback did not log a diagnostic")
+            self.assertEqual(runtime_profile.get("api_key"), TEST_SECRET_KEY)
+            self.assertEqual(runtime_profile.get("name"), "Legacy")
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(type(save_error.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(type(update_error.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(str(save_error.exception), "API key could not be stored securely")
+            self.assertEqual(manager.get_profile("legacy-profile").get("name"), "Legacy")
+            self.assertTrue(messages, "credential failure did not log a diagnostic")
             self.assertFalse(any(TEST_SECRET_KEY in message for message in messages), "diagnostic log leaked API key")
+
+    def test_new_profile_credential_failure_does_not_publish_or_create_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore(fail_writes=True)
+            manager = CustomAIProfileManager(path, credential_store=store)
+
+            with patch("custom_ai.log_debug") as log_debug:
+                with self.assertRaises(RuntimeError) as raised:
+                    manager.add_profile(
+                        name="Rejected",
+                        base_url="https://proxy.example/v1",
+                        api_key=TEST_SECRET_KEY,
+                        model="qwen",
+                    )
+
+            messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+            self.assertEqual(type(raised.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(str(raised.exception), "API key could not be stored securely")
+            self.assertFalse(path.exists())
+            self.assertEqual(manager.list_profiles(), [])
+            self.assertEqual(store.values, {})
+            self.assertEqual(set(store.deleted), set(store.set_calls))
+            self.assertFalse(any(TEST_SECRET_KEY in message for message in messages))
+
+    def test_new_profile_write_then_raise_cleans_staged_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore(write_then_raise=True)
+            manager = CustomAIProfileManager(path, credential_store=store)
+
+            with patch("custom_ai.log_debug") as log_debug:
+                with self.assertRaises(RuntimeError) as raised:
+                    manager.add_profile(
+                        name="Rejected",
+                        base_url="https://proxy.example/v1",
+                        api_key=TEST_SECRET_KEY,
+                        model="qwen",
+                    )
+
+            messages = [
+                str(call.args[0])
+                for call in log_debug.call_args_list
+                if call.args
+            ]
+            self.assertEqual(
+                type(raised.exception).__name__,
+                "CredentialPersistenceError",
+            )
+            self.assertEqual(
+                str(raised.exception),
+                "API key could not be stored securely",
+            )
+            self.assertFalse(path.exists())
+            self.assertEqual(manager.list_profiles(), [])
+            self.assertEqual(store.values, {})
+            self.assertEqual(set(store.deleted), set(store.set_calls))
+            self.assertFalse(
+                any(TEST_SECRET_KEY in message for message in messages)
+            )
+
+    def test_profile_update_credential_failure_preserves_previous_reference(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key=TEST_SECRET_KEY,
+                model="qwen",
+            )
+            profile_id = profile["id"]
+            previous_ref = profile["api_key_ref"]
+            original_bytes = path.read_bytes()
+            original_values = dict(store.values)
+            store.fail_writes = True
+
+            with patch("custom_ai.log_debug") as log_debug:
+                with self.assertRaises(RuntimeError) as raised:
+                    manager.update_profile(
+                        profile_id,
+                        name="Unpublished",
+                        api_key=UPDATED_TEST_SECRET_KEY,
+                    )
+
+            messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+            restored = manager.get_profile(profile_id)
+            self.assertEqual(type(raised.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(restored["name"], "Original")
+            self.assertEqual(restored["api_key"], TEST_SECRET_KEY)
+            self.assertEqual(restored["api_key_ref"], previous_ref)
+            self.assertEqual(store.values, original_values)
+            self.assertNotIn(previous_ref, store.deleted)
+            self.assertFalse(any(UPDATED_TEST_SECRET_KEY in message for message in messages))
+
+    def test_profile_update_write_then_raise_cleans_only_new_reference(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key=TEST_SECRET_KEY,
+                model="qwen",
+            )
+            previous_ref = profile["api_key_ref"]
+            original_bytes = path.read_bytes()
+            original_profile = manager.get_profile(profile["id"])
+            store.write_then_raise = True
+
+            with patch("custom_ai.log_debug") as log_debug:
+                with self.assertRaises(RuntimeError) as raised:
+                    manager.update_profile(
+                        profile["id"],
+                        name="Unpublished",
+                        api_key=UPDATED_TEST_SECRET_KEY,
+                    )
+
+            messages = [
+                str(call.args[0])
+                for call in log_debug.call_args_list
+                if call.args
+            ]
+            staged_ref = store.set_calls[-1]
+            self.assertEqual(
+                type(raised.exception).__name__,
+                "CredentialPersistenceError",
+            )
+            self.assertEqual(
+                str(raised.exception),
+                "API key could not be stored securely",
+            )
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(
+                manager.get_profile(profile["id"]),
+                original_profile,
+            )
+            self.assertEqual(
+                store.values,
+                {previous_ref: TEST_SECRET_KEY},
+            )
+            self.assertEqual(store.deleted, [staged_ref])
+            self.assertNotEqual(staged_ref, previous_ref)
+            self.assertNotIn(previous_ref, store.deleted)
+            self.assertFalse(
+                any(UPDATED_TEST_SECRET_KEY in message for message in messages)
+            )
+
+    def test_add_profile_blocked_save_removes_staged_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            path.write_text(
+                json.dumps({
+                    "profiles": [{
+                        "id": "blocked-legacy",
+                        "name": "Blocked Legacy",
+                        "base_url": "https://legacy.example/v1",
+                        "api_key": TEST_SECRET_KEY,
+                        "model": "legacy-model",
+                        "enabled": True,
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            store = FakeCredentialStore(fail_writes=True)
+            manager = CustomAIProfileManager(path, credential_store=store)
+            blocked_before = manager.get_profile("blocked-legacy")
+            legacy_ref = blocked_before["api_key_ref"]
+            store.fail_writes = False
+
+            with self.assertRaises(RuntimeError) as raised:
+                manager.add_profile(
+                    name="Unpublished",
+                    base_url="https://proxy.example/v1",
+                    api_key=UPDATED_TEST_SECRET_KEY,
+                    model="qwen",
+                )
+
+            self.assertEqual(type(raised.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(str(raised.exception), "API key could not be stored securely")
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(manager.list_profiles(), [blocked_before])
+            self.assertEqual(store.values, {})
+            self.assertEqual(len(store.deleted), 1)
+            self.assertNotEqual(store.deleted[0], legacy_ref)
+            self.assertEqual(
+                manager.get_profile("blocked-legacy")["api_key"],
+                TEST_SECRET_KEY,
+            )
+            self.assertEqual(
+                manager.get_profile("blocked-legacy")["api_key_ref"],
+                legacy_ref,
+            )
+
+    def test_update_profile_blocked_save_removes_only_new_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            previous_ref = "custom-ai:persistable:api_key"
+            path.write_text(
+                json.dumps({
+                    "profiles": [
+                        {
+                            "id": "persistable",
+                            "name": "Persistable",
+                            "base_url": "https://proxy.example/v1",
+                            "api_key_ref": previous_ref,
+                            "model": "old-model",
+                            "enabled": True,
+                        },
+                        {
+                            "id": "blocked-legacy",
+                            "name": "Blocked Legacy",
+                            "base_url": "https://legacy.example/v1",
+                            "api_key": TEST_SECRET_KEY,
+                            "model": "legacy-model",
+                            "enabled": True,
+                        },
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            store = FakeCredentialStore(fail_writes=True)
+            store.values[previous_ref] = "old-secret"
+            manager = CustomAIProfileManager(path, credential_store=store)
+            persistable_before = manager.get_profile("persistable")
+            blocked_before = manager.get_profile("blocked-legacy")
+            legacy_ref = blocked_before["api_key_ref"]
+            store.fail_writes = False
+
+            with self.assertRaises(RuntimeError) as raised:
+                manager.update_profile(
+                    "persistable",
+                    name="Unpublished",
+                    api_key=UPDATED_TEST_SECRET_KEY,
+                    model="new-model",
+                )
+
+            self.assertEqual(type(raised.exception).__name__, "CredentialPersistenceError")
+            self.assertEqual(str(raised.exception), "API key could not be stored securely")
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(manager.get_profile("persistable"), persistable_before)
+            self.assertEqual(manager.get_profile("blocked-legacy"), blocked_before)
+            self.assertEqual(store.values, {previous_ref: "old-secret"})
+            self.assertEqual(len(store.deleted), 1)
+            self.assertNotEqual(store.deleted[0], previous_ref)
+            self.assertNotEqual(store.deleted[0], legacy_ref)
+            self.assertNotIn(previous_ref, store.deleted)
+
+    def test_serialize_for_disk_rejects_plaintext_key_without_credential_ref(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            path.write_text('{"profiles": []}', encoding="utf-8")
+            original_bytes = path.read_bytes()
+            manager = CustomAIProfileManager(
+                path,
+                credential_store=FakeCredentialStore(),
+            )
+            for private_fallback in (False, True):
+                with self.subTest(private_fallback=private_fallback):
+                    staged_data = {
+                        "profiles": [{
+                            "id": "profile",
+                            "name": "Profile",
+                            "base_url": "https://proxy.example/v1",
+                            "api_key": TEST_SECRET_KEY,
+                            "_api_key_plaintext_fallback": private_fallback,
+                            "model": "qwen",
+                            "enabled": True,
+                        }],
+                    }
+                    with self.assertRaises(RuntimeError) as raised:
+                        manager.serialize_for_disk(staged_data)
+                    self.assertEqual(
+                        type(raised.exception).__name__,
+                        "CredentialPersistenceError",
+                    )
+                    self.assertEqual(
+                        str(raised.exception),
+                        "API key could not be stored securely",
+                    )
+
+            with self.assertRaises(RuntimeError) as raised:
+                manager.save(staged_data)
+            self.assertEqual(
+                type(raised.exception).__name__,
+                "CredentialPersistenceError",
+            )
+            self.assertEqual(path.read_bytes(), original_bytes)
 
     def test_provider_config_save_moves_api_keys_to_credential_refs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -255,6 +570,167 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
             assert_secret_not_in_text(self, persisted_text, "ocr_translator_config.ini")
             self.assertTrue(resolved_key == TEST_SECRET_KEY, "provider key did not resolve from credential store")
+
+    def test_provider_config_save_credential_failure_preserves_original_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            path = Path(tmp_dir) / "ocr_translator_config.ini"
+            path.write_text(
+                "[Settings]\ngoogle_translate_api_key = test-secret-key\n",
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            config = configparser.ConfigParser()
+            config.read(path, encoding="utf-8")
+            store = FakeCredentialStore(fail_writes=True)
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch("config_manager.create_default_credential_store", return_value=store, create=True):
+                    with patch("config_manager.log_debug") as log_debug:
+                        with self.assertRaises(RuntimeError) as raised:
+                            config_manager.save_app_config(config)
+            finally:
+                os.chdir(original_cwd)
+
+            messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+            self.assertEqual(type(raised.exception).__name__, "ProviderCredentialPersistenceError")
+            self.assertEqual(str(raised.exception), "API key could not be stored securely")
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(config["Settings"]["google_translate_api_key"], TEST_SECRET_KEY)
+            self.assertNotIn("google_translate_api_key_ref", config["Settings"])
+            self.assertFalse(any(TEST_SECRET_KEY in message for message in messages))
+
+    def test_provider_multi_key_write_failure_cleans_staged_refs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            path = Path(tmp_dir) / "ocr_translator_config.ini"
+            old_google_ref = "provider:google:old"
+            old_gemini_ref = "provider:gemini:old"
+            path.write_text(
+                "[Settings]\n"
+                "google_translate_api_key = test-secret-key\n"
+                f"google_translate_api_key_ref = {old_google_ref}\n"
+                "gemini_api_key = test-secret-key-updated\n"
+                f"gemini_api_key_ref = {old_gemini_ref}\n",
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            config = configparser.ConfigParser()
+            config.read(path, encoding="utf-8")
+            original_settings = dict(config["Settings"])
+            store = FakeCredentialStore(fail_write_at=2)
+            store.values = {
+                old_google_ref: "old-google-secret",
+                old_gemini_ref: "old-gemini-secret",
+            }
+            original_values = dict(store.values)
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch(
+                    "config_manager.create_default_credential_store",
+                    return_value=store,
+                    create=True,
+                ):
+                    with self.assertRaises(RuntimeError) as raised:
+                        config_manager.save_app_config(config)
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(
+                type(raised.exception).__name__,
+                "ProviderCredentialPersistenceError",
+            )
+            self.assertEqual(
+                str(raised.exception),
+                "API key could not be stored securely",
+            )
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(dict(config["Settings"]), original_settings)
+            self.assertEqual(store.values, original_values)
+            self.assertEqual(set(store.deleted), set(store.set_calls))
+            self.assertNotIn(old_google_ref, store.deleted)
+            self.assertNotIn(old_gemini_ref, store.deleted)
+            self.assertTrue(
+                all(
+                    ref not in {old_google_ref, old_gemini_ref}
+                    for ref in store.set_calls
+                )
+            )
+
+    def test_provider_config_write_failure_rolls_back_staged_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            path = Path(tmp_dir) / "ocr_translator_config.ini"
+            old_ref = "provider:google:old"
+            path.write_text(
+                "[Settings]\n"
+                "google_translate_api_key = test-secret-key-updated\n"
+                f"google_translate_api_key_ref = {old_ref}\n",
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            config = configparser.ConfigParser()
+            config.read(path, encoding="utf-8")
+            original_settings = dict(config["Settings"])
+            store = FakeCredentialStore()
+            store.values[old_ref] = "old-google-secret"
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch(
+                    "config_manager.create_default_credential_store",
+                    return_value=store,
+                    create=True,
+                ):
+                    with patch.object(
+                        config,
+                        "write",
+                        side_effect=OSError("config write unavailable"),
+                    ):
+                        saved = config_manager.save_app_config(config)
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertFalse(saved)
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(dict(config["Settings"]), original_settings)
+            self.assertEqual(store.values, {old_ref: "old-google-secret"})
+            self.assertEqual(len(store.deleted), 1)
+            self.assertNotIn(old_ref, store.deleted)
+            self.assertEqual(
+                list(path.parent.glob(".ocr_translator_config.ini.*.tmp")),
+                [],
+            )
+
+    def test_provider_config_load_credential_failure_keeps_runtime_key_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            original_cwd = os.getcwd()
+            path = Path(tmp_dir) / "ocr_translator_config.ini"
+            path.write_text(
+                "[Settings]\ngemini_api_key = test-secret-key\napi_key = obsolete\n",
+                encoding="utf-8",
+            )
+            original_bytes = path.read_bytes()
+            store = FakeCredentialStore(fail_writes=True)
+            try:
+                os.chdir(tmp_dir)
+                import config_manager
+
+                with patch("config_manager.create_default_credential_store", return_value=store, create=True):
+                    with patch("config_manager.log_debug") as log_debug:
+                        loaded = config_manager.load_app_config()
+            finally:
+                os.chdir(original_cwd)
+
+            messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+            self.assertEqual(path.read_bytes(), original_bytes)
+            self.assertEqual(loaded["Settings"]["gemini_api_key"], TEST_SECRET_KEY)
+            self.assertFalse(any(TEST_SECRET_KEY in message for message in messages))
 
     def test_profile_manager_persists_unified_profiles_and_active_ids(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

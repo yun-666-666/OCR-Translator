@@ -40,6 +40,10 @@ def _create_default_credential_store(*args, **kwargs):
     return factory(*args, **kwargs)
 
 
+class CredentialPersistenceError(RuntimeError):
+    """Raised when a secret cannot be stored without plaintext fallback."""
+
+
 class CustomAIProfileManager:
     """Persist and manage user-defined OpenAI-compatible AI endpoint profiles."""
 
@@ -131,6 +135,8 @@ class CustomAIProfileManager:
     def _save_staged_data(self, staged_data):
         try:
             return bool(self.save(staged_data))
+        except CredentialPersistenceError:
+            raise
         except Exception as error:
             _log_debug(
                 "Custom AI profiles staged save failed: "
@@ -141,6 +147,7 @@ class CustomAIProfileManager:
     def save(self, data=None):
         temporary_path = None
         try:
+            serialized_data = self.serialize_for_disk(data)
             if self.path.parent and str(self.path.parent) != ".":
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary_path = self.path.with_name(
@@ -148,7 +155,7 @@ class CustomAIProfileManager:
             )
             with temporary_path.open("x", encoding="utf-8", newline="\n") as f:
                 json.dump(
-                    self.serialize_for_disk(data),
+                    serialized_data,
                     f,
                     indent=2,
                     ensure_ascii=False,
@@ -158,6 +165,8 @@ class CustomAIProfileManager:
             os.replace(temporary_path, self.path)
             temporary_path = None
             return True
+        except CredentialPersistenceError:
+            raise
         except Exception as e:
             _log_debug(f"Custom AI profiles save failed: {e}")
             return False
@@ -173,6 +182,24 @@ class CustomAIProfileManager:
 
     def serialize_for_disk(self, data=None):
         data = self._snapshot_data() if data is None else data
+        for profile in data.get("profiles", []):
+            if (
+                isinstance(profile, dict)
+                and (
+                    profile.get("_credential_persistence_error")
+                    or (
+                        str(profile.get("api_key") or "")
+                        and not str(
+                            profile.get("api_key_ref")
+                            or profile.get("credential_ref")
+                            or ""
+                        ).strip()
+                    )
+                )
+            ):
+                raise CredentialPersistenceError(
+                    "API key could not be stored securely"
+                )
         serialized_profiles = []
         for profile in data.get("profiles", []):
             if not isinstance(profile, dict):
@@ -191,9 +218,6 @@ class CustomAIProfileManager:
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
             if credential_ref:
                 serialized["api_key_ref"] = credential_ref
-            api_key = str(profile.get("api_key") or "")
-            if api_key and (profile.get("_api_key_plaintext_fallback") or not credential_ref):
-                serialized["api_key"] = api_key
             serialized["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
                 profile.get("reasoning_effort")
                 or profile.get("model_reasoning_effort")
@@ -211,28 +235,29 @@ class CustomAIProfileManager:
     def _versioned_credential_ref(self, profile_id):
         return f"{self._credential_ref(profile_id)}:{uuid.uuid4().hex}"
 
-    def _log_credential_issue(self, action, credential_ref, error, fallback=False):
-        fallback_text = "; plaintext fallback retained" if fallback else ""
+    def _log_credential_issue(self, action, credential_ref, error):
         _log_debug(
             "Custom AI credential "
-            f"{action} failed for {credential_ref}: {type(error).__name__}{fallback_text}"
+            f"{action} failed for {credential_ref}: {type(error).__name__}"
         )
 
     def _store_profile_api_key(self, profile, api_key, action):
         credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
         if not credential_ref:
             credential_ref = self._credential_ref(profile["id"])
-        profile["api_key_ref"] = credential_ref
         try:
             self.credential_store.set_secret(credential_ref, str(api_key))
+            profile["api_key_ref"] = credential_ref
             profile["api_key"] = str(api_key)
             profile.pop("_api_key_plaintext_fallback", None)
+            profile.pop("_credential_persistence_error", None)
             return True
         except Exception as e:
-            profile["api_key"] = str(api_key)
-            profile["_api_key_plaintext_fallback"] = True
-            self._log_credential_issue(action, credential_ref, e, fallback=True)
-            return False
+            profile.pop("_api_key_plaintext_fallback", None)
+            self._log_credential_issue(action, credential_ref, e)
+            raise CredentialPersistenceError(
+                "API key could not be stored securely"
+            ) from None
 
     def _resolve_profile_api_key(self, profile, credential_ref):
         try:
@@ -260,6 +285,7 @@ class CustomAIProfileManager:
         profiles = []
         seen_ids = set()
         should_save = False
+        credential_migration_failed = False
         for profile in self.data.get("profiles", []):
             if not isinstance(profile, dict):
                 continue
@@ -280,12 +306,25 @@ class CustomAIProfileManager:
             }
             plaintext_key = str(profile.get("api_key") or "")
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
+            profile_should_save = False
+            profile_credential_migration_failed = False
             if plaintext_key:
                 if not credential_ref:
                     credential_ref = self._credential_ref(profile_id)
                 sanitized["api_key_ref"] = credential_ref
-                if self._store_profile_api_key(sanitized, plaintext_key, "migration"):
-                    should_save = True
+                try:
+                    if self._store_profile_api_key(
+                        sanitized,
+                        plaintext_key,
+                        "migration",
+                    ):
+                        profile_should_save = True
+                except CredentialPersistenceError:
+                    sanitized["api_key"] = plaintext_key
+                    sanitized["api_key_ref"] = credential_ref
+                    sanitized["_credential_persistence_error"] = True
+                    profile_credential_migration_failed = True
+                    credential_migration_failed = True
             elif credential_ref:
                 sanitized["api_key_ref"] = credential_ref
                 sanitized["api_key"] = self._resolve_profile_api_key(sanitized, credential_ref)
@@ -299,11 +338,13 @@ class CustomAIProfileManager:
             )
             sanitized["reasoning_effort"] = reasoning_effort
             if reasoning_source != reasoning_effort:
+                profile_should_save = True
+            if profile_should_save and not profile_credential_migration_failed:
                 should_save = True
             profiles.append(sanitized)
         self.data["profiles"] = profiles
         self._repair_active_ids()
-        return should_save
+        return should_save and not credential_migration_failed
 
     def _first_available_profile_id(self, data=None):
         data = self.data if data is None else data
@@ -412,15 +453,25 @@ class CustomAIProfileManager:
         self._validate_profile(profile)
         with self._transaction_lock:
             staged_data = self._snapshot_data()
-            self._store_profile_api_key(profile, str(api_key), "write")
-            staged_data["profiles"].append(profile)
-            for active_kind in ACTIVE_PROFILE_KINDS:
-                active_key = self._active_key(active_kind)
-                if not staged_data.get(active_key):
-                    staged_data[active_key] = profile["id"]
-            if not self._save_staged_data(staged_data):
+            profile["api_key_ref"] = self._credential_ref(profile["id"])
+            try:
+                self._store_profile_api_key(profile, str(api_key), "write")
+            except CredentialPersistenceError:
                 self._delete_profile_api_key(profile)
-                raise RuntimeError("Failed to persist new Custom AI profile")
+                raise
+            try:
+                staged_data["profiles"].append(profile)
+                for active_kind in ACTIVE_PROFILE_KINDS:
+                    active_key = self._active_key(active_kind)
+                    if not staged_data.get(active_key):
+                        staged_data[active_key] = profile["id"]
+                if not self._save_staged_data(staged_data):
+                    raise RuntimeError(
+                        "Failed to persist new Custom AI profile"
+                    )
+            except Exception:
+                self._delete_profile_api_key(profile)
+                raise
             self._publish_data(staged_data)
             return self.get_profile(profile["id"])
 
@@ -492,16 +543,25 @@ class CustomAIProfileManager:
                     profile_id
                 )
                 staged_profile.pop("credential_ref", None)
-                self._store_profile_api_key(
-                    staged_profile,
-                    str(updates.get("api_key") or ""),
-                    "write",
-                )
+                try:
+                    self._store_profile_api_key(
+                        staged_profile,
+                        str(updates.get("api_key") or ""),
+                        "write",
+                    )
+                except CredentialPersistenceError:
+                    self._delete_profile_api_key(staged_profile)
+                    raise
 
-            if not self._save_staged_data(staged_data):
+            try:
+                if not self._save_staged_data(staged_data):
+                    raise RuntimeError(
+                        "Failed to persist Custom AI profile update"
+                    )
+            except Exception:
                 if staged_new_credential:
                     self._delete_profile_api_key(staged_profile)
-                raise RuntimeError("Failed to persist Custom AI profile update")
+                raise
 
             self._publish_data(staged_data)
             if staged_new_credential and previous_ref:
@@ -541,5 +601,3 @@ class CustomAIProfileManager:
             raise ValueError("API key is required")
         if not profile.get("model"):
             raise ValueError("Model name is required")
-
-

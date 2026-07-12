@@ -2,6 +2,7 @@
 import configparser
 import os
 import sys
+import uuid
 from credential_store import create_default_credential_store
 from logger import log_debug
 from ocr_utils import (
@@ -123,12 +124,96 @@ def _settings_from_config(config_or_settings):
     return config_or_settings
 
 
-def _log_provider_credential_issue(action, setting_key, error, fallback=False):
-    fallback_text = "; plaintext fallback retained" if fallback else ""
+class ProviderCredentialPersistenceError(RuntimeError):
+    """Raised when a provider API key cannot be stored securely."""
+
+
+def _log_provider_credential_issue(action, setting_key, error):
     log_debug(
         "Provider credential "
-        f"{action} failed for {setting_key}: {type(error).__name__}{fallback_text}"
+        f"{action} failed for {setting_key}: {type(error).__name__}"
     )
+
+
+class _ProviderCredentialMigration:
+    def __init__(self, settings, credential_store):
+        self.settings = settings
+        self.credential_store = credential_store
+        self.entries = []
+        self.published = False
+
+    def stage(self, setting_key):
+        ref_setting = _provider_api_key_ref_setting(setting_key)
+        staged_ref = f"{_provider_api_key_ref(setting_key)}:{uuid.uuid4().hex}"
+        entry = {
+            "setting_key": setting_key,
+            "setting_existed": setting_key in self.settings,
+            "setting_value": str(self.settings.get(setting_key, "") or ""),
+            "ref_setting": ref_setting,
+            "ref_existed": ref_setting in self.settings,
+            "ref_value": str(self.settings.get(ref_setting, "") or ""),
+            "staged_ref": staged_ref,
+        }
+        self.entries.append(entry)
+        self.credential_store.set_secret(staged_ref, entry["setting_value"])
+
+    def publish(self):
+        for entry in self.entries:
+            self.settings[entry["ref_setting"]] = entry["staged_ref"]
+            self.settings[entry["setting_key"]] = ""
+        self.published = True
+
+    def rollback(self):
+        if self.published:
+            for entry in self.entries:
+                self._restore_setting(
+                    entry["setting_key"],
+                    entry["setting_existed"],
+                    entry["setting_value"],
+                )
+                self._restore_setting(
+                    entry["ref_setting"],
+                    entry["ref_existed"],
+                    entry["ref_value"],
+                )
+            self.published = False
+        for entry in self.entries:
+            self._delete_ref(entry["staged_ref"], entry["setting_key"], "rollback")
+
+    def commit(self):
+        current_refs = {
+            str(
+                self.settings.get(
+                    _provider_api_key_ref_setting(setting_key),
+                    "",
+                )
+                or ""
+            ).strip()
+            for setting_key in PROVIDER_API_KEY_SETTINGS
+        }
+        deleted_refs = set()
+        for entry in self.entries:
+            old_ref = str(entry["ref_value"] or "").strip()
+            if (
+                not old_ref
+                or old_ref in current_refs
+                or old_ref in deleted_refs
+            ):
+                continue
+            self._delete_ref(old_ref, entry["setting_key"], "retire")
+            deleted_refs.add(old_ref)
+
+    def _restore_setting(self, key, existed, value):
+        if existed:
+            self.settings[key] = value
+        else:
+            self.settings.pop(key, None)
+
+    def _delete_ref(self, credential_ref, setting_key, action):
+        try:
+            self.credential_store.delete_secret(credential_ref)
+        except Exception as error:
+            _log_provider_credential_issue(action, setting_key, error)
 
 
 def migrate_provider_api_keys_to_credentials(config_or_settings, credential_store=None):
@@ -141,19 +226,40 @@ def migrate_provider_api_keys_to_credentials(config_or_settings, credential_stor
     if not pending_keys:
         return False
     store = credential_store or create_default_credential_store(PROVIDER_CREDENTIAL_SERVICE)
-    changed = False
+    migration = _ProviderCredentialMigration(settings, store)
     for setting_key in pending_keys:
-        ref_setting = _provider_api_key_ref_setting(setting_key)
-        plaintext_key = str(settings.get(setting_key, "") or "")
-        credential_ref = str(settings.get(ref_setting, "") or "").strip() or _provider_api_key_ref(setting_key)
         try:
-            store.set_secret(credential_ref, plaintext_key)
-            settings[ref_setting] = credential_ref
-            settings[setting_key] = ""
-            changed = True
+            migration.stage(setting_key)
         except Exception as e:
-            _log_provider_credential_issue("write", setting_key, e, fallback=True)
-    return changed
+            _log_provider_credential_issue("write", setting_key, e)
+            migration.rollback()
+            raise ProviderCredentialPersistenceError(
+                "API key could not be stored securely"
+            ) from None
+    migration.publish()
+    return migration
+
+
+def _write_config_atomic(config_object, config_path):
+    absolute_path = os.path.abspath(config_path)
+    directory = os.path.dirname(absolute_path)
+    temporary_path = os.path.join(
+        directory,
+        f".{os.path.basename(config_path)}.{uuid.uuid4().hex}.tmp",
+    )
+    try:
+        with open(temporary_path, 'x', encoding='utf-8') as f:
+            config_object.write(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, absolute_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
 
 
 def get_provider_api_key(config_or_settings, setting_key, credential_store=None):
@@ -265,27 +371,49 @@ def load_app_config():
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
 
-    if migrate_provider_api_keys_to_credentials(config_settings):
-        settings_changed = True
+    skip_automatic_rewrite = False
+    credential_migration = False
+    try:
+        credential_migration = migrate_provider_api_keys_to_credentials(
+            config_settings
+        )
+        if credential_migration:
+            settings_changed = True
+    except ProviderCredentialPersistenceError:
+        skip_automatic_rewrite = True
+        log_debug(
+            "Provider credential migration deferred: "
+            "ProviderCredentialPersistenceError"
+        )
 
-    if settings_changed or not os.path.exists(config_path):
+    if not skip_automatic_rewrite and (
+        settings_changed or not os.path.exists(config_path)
+    ):
          try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                config.write(f)
+            _write_config_atomic(config, config_path)
+            if credential_migration:
+                credential_migration.commit()
             log_debug("Config file saved/updated with defaults.")
          except Exception as e:
+             if credential_migration:
+                 credential_migration.rollback()
              log_debug(f"Error writing config file {config_path}: {e}")
     return config
 
 def save_app_config(config_object):
     config_path = 'ocr_translator_config.ini'
+    credential_migration = migrate_provider_api_keys_to_credentials(
+        config_object
+    )
     try:
-        migrate_provider_api_keys_to_credentials(config_object)
-        with open(config_path, 'w', encoding='utf-8') as f:
-            config_object.write(f)
+        _write_config_atomic(config_object, config_path)
+        if credential_migration:
+            credential_migration.commit()
         log_debug(f"Settings saved successfully to {config_path}")
         return True
     except Exception as file_err:
+        if credential_migration:
+            credential_migration.rollback()
         log_debug(f"Error writing settings to file: {file_err}")
         return False
 
