@@ -61,6 +61,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'google_file_cache': 'True',
     'deepl_file_cache': 'True',
     'debug_logging_enabled': 'False',
+    'custom_ai_log_content_enabled': 'False',
     # Model-specific language defaults
     'google_source_lang': 'pl',
     'google_target_lang': 'en',

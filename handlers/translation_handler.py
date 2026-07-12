@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from logger import (
     append_rotating_text,
+    is_debug_logging_enabled,
     log_debug,
     log_debug_coalesced,
     summarize_text_for_log,

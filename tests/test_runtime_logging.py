@@ -390,22 +390,272 @@ class RotatingTextWriterTests(unittest.TestCase):
             "handlers.translation_handler.append_rotating_text",
             create=True,
         ) as append_text:
-            handler._log_custom_short_call(
-                "translation",
-                profile,
-                "translated",
-                {"prompt_tokens": 3, "completion_tokens": 2},
-                0.25,
-            )
-            handler.close()
+            with patch(
+                "handlers.translation_handler.is_debug_logging_enabled",
+                return_value=True,
+                create=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+                handler.close()
 
         append_text.assert_called_once()
         args, kwargs = append_text.call_args
         self.assertEqual(args[0], "CustomAI_Translation_Short_Log.txt")
         self.assertIn("SESSION 1 STARTED", args[1])
-        self.assertIn("translated", args[1])
+        self.assertIn("Result: chars=10 lines=1", args[1])
+        self.assertNotIn("translated", args[1])
         self.assertEqual(kwargs["max_bytes"], 2 * 1024 * 1024)
         self.assertEqual(kwargs["backup_count"], 2)
+
+    def test_custom_ai_short_log_includes_result_body_only_when_opted_in(self):
+        app = types.SimpleNamespace(
+            custom_ai_log_content_enabled=True,
+            custom_ai_log_content_enabled_var=types.SimpleNamespace(
+                get=lambda: True,
+            ),
+        )
+        handler = TranslationHandler(app)
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_handler.is_debug_logging_enabled",
+                return_value=True,
+                create=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+                handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn(
+            "Result: chars=10 lines=1\n"
+            "--------------------\ntranslated\n--------------------\n",
+            block,
+        )
+
+    def test_custom_ai_short_log_reads_plain_policy_snapshot_from_worker_thread(self):
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        for content_enabled in (False, True):
+            with self.subTest(content_enabled=content_enabled):
+                tk_getter = Mock(side_effect=AssertionError("Tk getter touched"))
+                app = types.SimpleNamespace(
+                    custom_ai_log_content_enabled=content_enabled,
+                    custom_ai_log_content_enabled_var=types.SimpleNamespace(
+                        get=tk_getter,
+                    ),
+                )
+                handler = TranslationHandler(app)
+                thread_errors = []
+
+                def log_from_worker():
+                    try:
+                        handler._log_custom_short_call(
+                            "translation",
+                            profile,
+                            "translated",
+                            {"prompt_tokens": 3, "completion_tokens": 2},
+                            0.25,
+                        )
+                    except Exception as error:
+                        thread_errors.append(error)
+
+                with patch(
+                    "handlers.translation_handler.append_rotating_text",
+                    create=True,
+                ) as append_text:
+                    with patch(
+                        "handlers.translation_handler.is_debug_logging_enabled",
+                        return_value=True,
+                        create=True,
+                    ):
+                        worker = threading.Thread(target=log_from_worker)
+                        worker.start()
+                        worker.join()
+                        handler.close()
+
+                self.assertEqual(thread_errors, [])
+                tk_getter.assert_not_called()
+                append_text.assert_called_once()
+                block = append_text.call_args.args[1]
+                self.assertIn("Result: chars=10 lines=1", block)
+                if content_enabled:
+                    self.assertIn("\ntranslated\n", block)
+                else:
+                    self.assertNotIn("translated", block)
+
+    def test_custom_ai_short_log_skips_writer_when_debug_logging_is_disabled(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_handler.is_debug_logging_enabled",
+                return_value=False,
+                create=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+                handler.close()
+
+        append_text.assert_not_called()
+
+    def test_custom_ai_short_log_updates_metrics_when_disk_logging_is_disabled(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Test Provider", "model": "test-model"}
+        handler._record_custom_prompt_cache_usage = Mock(return_value=0.5)
+        handler._record_custom_ai_latency_observation = Mock()
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_handler.is_debug_logging_enabled",
+                return_value=False,
+                create=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+                handler.close()
+
+        handler._record_custom_prompt_cache_usage.assert_called_once_with(
+            "translation",
+            {"prompt_tokens": 3, "completion_tokens": 2},
+            profile=profile,
+        )
+        handler._record_custom_ai_latency_observation.assert_called_once_with(
+            0.25,
+            success=True,
+            profile=profile,
+        )
+        append_text.assert_not_called()
+
+    def test_custom_ai_short_log_content_setting_defaults_false_and_is_persisted(self):
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        self.assertEqual(
+            DEFAULT_CONFIG_SETTINGS.get("custom_ai_log_content_enabled"),
+            "False",
+        )
+        app_source = Path("app_logic.py").read_text(encoding="utf-8-sig")
+        save_source = Path("handlers/ui_interaction_handler.py").read_text(
+            encoding="utf-8-sig"
+        )
+        self.assertIn(
+            "content_logging_enabled = self.config.getboolean(",
+            app_source,
+        )
+        self.assertIn("'custom_ai_log_content_enabled'", app_source)
+        self.assertIn("fallback=False", app_source)
+        self.assertIn(
+            "self.custom_ai_log_content_enabled = content_logging_enabled",
+            app_source,
+        )
+        self.assertIn(
+            "self.custom_ai_log_content_enabled_var = "
+            "tk.BooleanVar(value=content_logging_enabled)",
+            app_source,
+        )
+        self.assertIn(
+            "cfg['custom_ai_log_content_enabled'] = "
+            "str(self.app.custom_ai_log_content_enabled_var.get())",
+            save_source,
+        )
+
+    def test_content_logging_checkbox_helper_updates_snapshot_then_saves_once(self):
+        import gui_diagnostics_builder
+
+        helper = getattr(
+            gui_diagnostics_builder,
+            "_apply_custom_ai_log_content_policy",
+            None,
+        )
+        self.assertTrue(callable(helper))
+        tk_getter = Mock(return_value=True)
+        app = types.SimpleNamespace(
+            custom_ai_log_content_enabled=False,
+            custom_ai_log_content_enabled_var=types.SimpleNamespace(
+                get=tk_getter,
+            ),
+            save_settings=Mock(),
+        )
+
+        helper(app)
+
+        self.assertTrue(app.custom_ai_log_content_enabled)
+        tk_getter.assert_called_once_with()
+        app.save_settings.assert_called_once_with()
+
+    def test_debug_tab_has_one_content_logging_checkbox_in_existing_layout(self):
+        source = Path("gui_diagnostics_builder.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        create_debug_tab = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "create_debug_tab"
+        )
+        checkbuttons = [
+            node
+            for node in ast.walk(create_debug_tab)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ttk"
+            and node.func.attr == "Checkbutton"
+        ]
+        scrollable_tabs = [
+            node
+            for node in ast.walk(create_debug_tab)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "create_scrollable_tab"
+        ]
+
+        self.assertEqual(len(checkbuttons), 1)
+        self.assertEqual(len(scrollable_tabs), 1)
+        checkbox_source = ast.unparse(checkbuttons[0])
+        self.assertIn("ttk.Checkbutton(button_frame", checkbox_source)
+        self.assertIn(
+            "'Write recognized/translated content to diagnostic logs'",
+            checkbox_source,
+        )
+        self.assertIn(
+            "variable=getattr(app, 'custom_ai_log_content_enabled_var', None)",
+            checkbox_source,
+        )
+        self.assertIn(
+            "command=lambda: _apply_custom_ai_log_content_policy(app)",
+            checkbox_source,
+        )
 
     def test_ui_clear_debug_log_uses_shared_writer(self):
         handler = object.__new__(UIInteractionHandler)

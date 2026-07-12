@@ -14,6 +14,13 @@ from modern_ui import style_tk_text_widget
 from ui_elements import create_scrollable_tab
 
 
+def _apply_custom_ai_log_content_policy(app):
+    app.custom_ai_log_content_enabled = bool(
+        app.custom_ai_log_content_enabled_var.get()
+    )
+    return app.save_settings()
+
+
 def create_debug_tab(app):
     # Create a scrollable tab content frame
     scrollable_content = create_scrollable_tab(app.tab_control, app.ui_lang.get_label("debug_tab_title"))
@@ -48,6 +55,15 @@ def create_debug_tab(app):
     button_frame.pack(fill="x", padx=5, pady=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("save_debug_images_btn"), command=app.save_debug_images).pack(side=tk.LEFT, padx=5)
     ttk.Button(button_frame, text=app.ui_lang.get_label("refresh_log_btn"), command=app.refresh_debug_log).pack(side=tk.LEFT, padx=5)
+    ttk.Checkbutton(
+        button_frame,
+        text=app.ui_lang.get_label(
+            "custom_ai_log_content_enabled_label",
+            "Write recognized/translated content to diagnostic logs",
+        ),
+        variable=getattr(app, "custom_ai_log_content_enabled_var", None),
+        command=lambda: _apply_custom_ai_log_content_policy(app),
+    ).pack(side=tk.LEFT, padx=5)
 
     diagnostics_frame = ttk.LabelFrame(
         frame,

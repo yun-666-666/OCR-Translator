@@ -1250,6 +1250,7 @@ class UIInteractionHandler:
             cfg['clear_translation_timeout'] = str(self.app.clear_translation_timeout_var.get())
             cfg['ocr_debugging'] = str(self.app.ocr_debugging_var.get())
             cfg['debug_logging_enabled'] = str(self.app.debug_logging_enabled_var.get())
+            cfg['custom_ai_log_content_enabled'] = str(self.app.custom_ai_log_content_enabled_var.get())
             cfg['source_area_colour'] = self.app.source_colour_var.get()
             cfg['target_area_colour'] = self.app.target_colour_var.get()
             cfg['target_text_colour'] = self.app.target_text_colour_var.get()

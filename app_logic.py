@@ -264,6 +264,13 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.target_colour_var = tk.StringVar(value=self.config['Settings'].get('target_area_colour', '#663399'))
         self.target_text_colour_var = tk.StringVar(value=self.config['Settings'].get('target_text_colour', '#FFFFFF'))
         self.debug_logging_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'debug_logging_enabled', fallback=True))
+        content_logging_enabled = self.config.getboolean(
+            'Settings',
+            'custom_ai_log_content_enabled',
+            fallback=False,
+        )
+        self.custom_ai_log_content_enabled = content_logging_enabled
+        self.custom_ai_log_content_enabled_var = tk.BooleanVar(value=content_logging_enabled)
         self.gui_language_var = tk.StringVar(value=saved_language_display)
         self.keep_linebreaks_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'keep_linebreaks', fallback=False))
         self.capture_backend_var = tk.StringVar(value=self.config['Settings'].get('capture_backend', 'auto'))

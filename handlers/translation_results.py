@@ -26,6 +26,13 @@ def _append_rotating_text(*args, **kwargs):
         return facade.append_rotating_text(*args, **kwargs)
 
 
+def _is_debug_logging_enabled():
+    facade = sys.modules.get("handlers.translation_handler")
+    if facade is not None:
+        return facade.is_debug_logging_enabled()
+    return False
+
+
 class TranslationResultsMixin:
     def _initialize_deepl_log_file(self):
         """Initialize DeepL translation log file with header if it doesn't exist."""
@@ -108,6 +115,29 @@ Call Duration: {call_duration:.3f} seconds
     # === UNIFIED TRANSLATE METHOD ===
     def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
         try:
+            cached_input_ratio = self._record_custom_prompt_cache_usage(
+                call_type,
+                usage,
+                profile=profile,
+            )
+            if call_type == "translation":
+                self._record_custom_ai_latency_observation(
+                    duration,
+                    success=True,
+                    profile=profile,
+                )
+
+            if not _is_debug_logging_enabled():
+                return
+
+            content_logging_enabled = bool(
+                getattr(
+                    self.app,
+                    "custom_ai_log_content_enabled",
+                    False,
+                )
+            )
+
             with self._custom_log_state_lock:
                 log_executor = self._custom_log_executor
                 if log_executor is None:
@@ -146,16 +176,12 @@ Call Duration: {call_duration:.3f} seconds
                     "cached_input_tokens",
                     "cached_prompt_tokens",
                 ))
-                cached_input_ratio = self._record_custom_prompt_cache_usage(
-                    call_type,
-                    usage,
-                    profile=profile,
-                )
-                if call_type == "translation":
-                    self._record_custom_ai_latency_observation(
-                        duration,
-                        success=True,
-                        profile=profile,
+                result_summary = summarize_text_for_log(result_text)
+                result_section = f"Result: {result_summary}\n"
+                if content_logging_enabled:
+                    result_section += (
+                        f"--------------------\n{result_text}\n"
+                        "--------------------\n"
                     )
                 block = (
                     f"{session_header}"
@@ -168,7 +194,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"cached_input_ratio={cached_input_ratio:.2f}\n"
                     f"Output Tokens: {completion_tokens}\n"
                     f"Cost: ${cost:.8f}\n"
-                    f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
+                    f"{result_section}\n"
                 )
                 log_executor.submit(
                     self._write_custom_short_log,
