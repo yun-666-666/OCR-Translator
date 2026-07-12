@@ -113,6 +113,9 @@ custom_ai_translation_cache.sqlite3.tmp
 # Codex session backups are local rollback artifacts
 .codex/backups/
 
+# Isolated implementation worktrees
+/.worktrees/
+
 # Download statistics files
 downloads.py
 downloads.html
