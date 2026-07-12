@@ -101,14 +101,14 @@ force_update.bat
 sync_to_github_fixed.bat
 
 # Configuration files (user-generated)
-ocr_translator_config.ini
-!ocr_translator_config.example.ini
-custom_ai_profiles.json
-.custom_ai_profiles.json.*.tmp
-custom_ai_translation_cache.json
-custom_ai_translation_cache.json.tmp
-custom_ai_translation_cache.sqlite3
-custom_ai_translation_cache.sqlite3.tmp
+/ocr_translator_config*.ini
+!/ocr_translator_config.example.ini
+/.ocr_translator_config*.tmp
+/custom_ai_profiles*.json
+/.custom_ai_profiles*.tmp
+/custom_ai_translation_cache*.json
+/custom_ai_translation_cache*.json.tmp
+/custom_ai_translation_cache*.sqlite3*
 
 # Codex session backups are local rollback artifacts
 .codex/backups/

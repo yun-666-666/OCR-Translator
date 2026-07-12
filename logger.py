@@ -10,6 +10,10 @@ from pathlib import Path
 DEBUG_LOG_FILENAME = "translator_debug.log"
 DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEBUG_LOG_BACKUP_COUNT = 3
+CUSTOM_AI_OCR_SHORT_LOG_FILENAME = "CustomAI_OCR_Short_Log.txt"
+CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME = "CustomAI_Translation_Short_Log.txt"
+CUSTOM_AI_SHORT_LOG_MAX_BYTES = 2 * 1024 * 1024
+CUSTOM_AI_SHORT_LOG_BACKUP_COUNT = 2
 
 _debug_logging_enabled = True
 _writer_registry = {}
@@ -144,17 +148,46 @@ class _RotatingTextWriter:
         with self._lock:
             self._close_locked()
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._stream = self.path.open(
-                "w",
-                encoding="utf-8-sig",
-                buffering=1,
-            )
-            self._size_bytes = 0
-            if marker:
-                marker = str(marker)
-                self._stream.write(str(marker))
-                self._stream.flush()
-                self._size_bytes = self._encoded_write_size(marker)
+            temporary_path = None
+            temporary_fd = None
+            try:
+                temporary_fd, temporary_name = tempfile.mkstemp(
+                    prefix=f".{self.path.name}.",
+                    suffix=".tmp",
+                    dir=str(self.path.parent),
+                )
+                temporary_path = Path(temporary_name)
+                with os.fdopen(
+                    temporary_fd,
+                    "w",
+                    encoding="utf-8-sig",
+                    buffering=1,
+                ) as stream:
+                    temporary_fd = None
+                    if marker:
+                        stream.write(str(marker))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_path, self.path)
+                temporary_path = None
+                self._size_bytes = self.path.stat().st_size
+                self._ensure_open_locked()
+            except Exception:
+                self._stream = None
+                self._size_bytes = None
+                if temporary_fd is not None:
+                    try:
+                        os.close(temporary_fd)
+                    except OSError:
+                        pass
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        pass
+                raise
 
     def read_tail(self, max_lines=200, block_size=8192):
         with self._lock:
@@ -376,14 +409,50 @@ def log_debug_coalesced(event_key, message, interval_seconds=5.0):
 def clear_debug_log():
     """Safely clear the active debug log while preserving the shared writer."""
     marker = f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Debug log cleared by user.\n"
-    path = resolve_runtime_log_path(DEBUG_LOG_FILENAME)
-    writer = _get_writer(
-        path,
+    clear_rotating_log_family(
+        DEBUG_LOG_FILENAME,
         DEBUG_LOG_MAX_BYTES,
         DEBUG_LOG_BACKUP_COUNT,
+        marker=marker,
     )
-    writer.clear(marker)
     _debug_log_coalescer.clear()
+
+
+def clear_rotating_log_family(
+    filename,
+    max_bytes,
+    backup_count,
+    marker="",
+):
+    """Clear one registered runtime log and remove its rotated backups."""
+    filename_path = Path(filename)
+    if filename_path.is_absolute() or filename_path.name != str(filename_path):
+        raise ValueError("Runtime log filename must be a basename")
+    path = resolve_runtime_log_path(filename_path)
+    writer = _get_writer(path, max_bytes, backup_count)
+    with writer._lock:
+        writer.clear(marker)
+        for index in range(1, writer.backup_count + 1):
+            rotated_path = Path(f"{writer.path}.{index}")
+            try:
+                rotated_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def clear_runtime_diagnostic_logs():
+    """Clear every user-facing runtime diagnostic log family."""
+    clear_debug_log()
+    clear_rotating_log_family(
+        CUSTOM_AI_OCR_SHORT_LOG_FILENAME,
+        CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+        CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+    )
+    clear_rotating_log_family(
+        CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
+        CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+        CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+    )
 
 
 ensure_test_log_environment()

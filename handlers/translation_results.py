@@ -8,7 +8,12 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
-from logger import log_debug_coalesced, summarize_text_for_log
+from logger import (
+    CUSTOM_AI_OCR_SHORT_LOG_FILENAME,
+    CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
+    log_debug_coalesced,
+    summarize_text_for_log,
+)
 from translation_utils import is_translation_error_result
 
 REQUESTS_AVAILABLE = False
@@ -145,9 +150,9 @@ Call Duration: {call_duration:.3f} seconds
                     return
 
                 log_file = (
-                    "CustomAI_OCR_Short_Log.txt"
+                    CUSTOM_AI_OCR_SHORT_LOG_FILENAME
                     if call_type == "ocr"
-                    else "CustomAI_Translation_Short_Log.txt"
+                    else CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME
                 )
                 session_header = ""
                 if call_type not in self._custom_session_started:

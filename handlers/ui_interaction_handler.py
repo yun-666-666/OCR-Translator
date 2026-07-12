@@ -6,7 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, colorchooser
 from config_manager import save_app_config
 from logger import (
-    clear_debug_log as clear_runtime_debug_log,
+    clear_runtime_diagnostic_logs,
     log_debug,
     read_debug_log_tail,
 )
@@ -1364,7 +1364,7 @@ class UIInteractionHandler:
 
     def clear_debug_log(self):
         try:
-            clear_runtime_debug_log()
+            clear_runtime_diagnostic_logs()
             self.refresh_debug_log()
             if hasattr(self.app, 'status_label') and self.app.status_label.winfo_exists():
                 original_status_text = self.app.status_label.cget("text")

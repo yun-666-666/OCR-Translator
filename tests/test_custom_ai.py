@@ -2,6 +2,7 @@ import json
 import importlib.util
 import configparser
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -832,12 +833,52 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertFalse(stale_profile_temp.exists())
             self.assertTrue(unrelated_temp.exists())
 
-    def test_default_profile_atomic_temp_family_is_gitignored(self):
-        gitignore = (
-            Path(__file__).resolve().parents[1] / ".gitignore"
-        ).read_text(encoding="utf-8")
+    def test_runtime_secret_file_families_are_gitignored(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        ignored_paths = {
+            ".ocr_translator_config.ini.deadbeef.tmp",
+            ".ocr_translator_config.local.ini.deadbeef.tmp",
+            "ocr_translator_config.local.ini",
+            "custom_ai_profiles.local.json",
+            ".custom_ai_profiles.local.tmp",
+            ".custom_ai_profiles.json.deadbeef.tmp",
+            "custom_ai_translation_cache.local.json",
+            "custom_ai_translation_cache.json.tmp",
+            "custom_ai_translation_cache.local.sqlite3",
+            "custom_ai_translation_cache.local.sqlite3-wal",
+            "custom_ai_translation_cache.sqlite3-journal",
+            "custom_ai_translation_cache.sqlite3-shm",
+            "custom_ai_translation_cache.sqlite3.tmp",
+            "custom_ai_translation_cache.sqlite3-wal",
+        }
+        check_ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", "-z", "--stdin"],
+            cwd=repo_root,
+            input="\0".join(sorted(ignored_paths)) + "\0",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(check_ignored.returncode, 0, check_ignored.stderr)
+        self.assertEqual(
+            {path for path in check_ignored.stdout.split("\0") if path},
+            ignored_paths,
+        )
 
-        self.assertIn(".custom_ai_profiles.json.*.tmp", gitignore.splitlines())
+        check_example = subprocess.run(
+            [
+                "git",
+                "check-ignore",
+                "--no-index",
+                "--",
+                "ocr_translator_config.example.ini",
+            ],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(check_example.returncode, 0, check_example.stdout)
 
     def test_add_profile_save_failure_rolls_back_profile_and_credential(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

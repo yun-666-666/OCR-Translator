@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from logger import (
+    CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+    CUSTOM_AI_SHORT_LOG_MAX_BYTES,
     append_rotating_text,
     is_debug_logging_enabled,
     log_debug,
@@ -96,8 +98,8 @@ class TranslationHandler(TranslationContextMixin, TranslationRequestsMixin, Tran
             append_rotating_text(
                 log_file,
                 block,
-                max_bytes=2 * 1024 * 1024,
-                backup_count=2,
+                max_bytes=CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+                backup_count=CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
             )
         except Exception as e:
             _log_debug(f"Custom AI short log write failed: {e}")

@@ -1,4 +1,5 @@
 import ast
+import errno
 import os
 import tempfile
 import threading
@@ -212,6 +213,101 @@ class RotatingTextWriterTests(unittest.TestCase):
         if callable(close_writers):
             close_writers()
 
+    def _assert_link_safe_family_clear(self, link_factory):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            log_dir = root / "logs"
+            log_dir.mkdir()
+            external_path = root / "external.txt"
+            external_bytes = b"external-fixed-bytes\r\n"
+            external_path.write_bytes(external_bytes)
+            active_path = log_dir / "runtime.log"
+            link_factory(active_path, external_path)
+
+            with patch.dict(
+                os.environ,
+                {"OCR_TRANSLATOR_LOG_DIR": str(log_dir)},
+            ):
+                try:
+                    logger.clear_rotating_log_family(
+                        "runtime.log",
+                        max_bytes=1024,
+                        backup_count=2,
+                        marker="cleared\n",
+                    )
+                    self.assertEqual(external_path.read_bytes(), external_bytes)
+                    self.assertEqual(
+                        active_path.read_text(encoding="utf-8-sig"),
+                        "cleared\n",
+                    )
+
+                    logger.append_rotating_text(
+                        "runtime.log",
+                        "after\n",
+                        max_bytes=1024,
+                        backup_count=2,
+                    )
+                    self.assertEqual(
+                        active_path.read_text(encoding="utf-8-sig"),
+                        "cleared\nafter\n",
+                    )
+                    self.assertEqual(external_path.read_bytes(), external_bytes)
+                finally:
+                    logger.close_log_writers()
+
+    def test_clear_rotating_log_family_replaces_symlink_safely(self):
+        def create_symlink(active_path, external_path):
+            try:
+                os.symlink(external_path, active_path)
+            except OSError as error:
+                if error.errno in {errno.EACCES, errno.EPERM} or getattr(
+                    error,
+                    "winerror",
+                    None,
+                ) == 1314:
+                    self.skipTest("OS privilege does not permit symlink creation")
+                raise
+
+        self._assert_link_safe_family_clear(create_symlink)
+
+    def test_clear_rotating_log_family_replaces_hardlink_safely(self):
+        self._assert_link_safe_family_clear(
+            lambda active_path, external_path: os.link(
+                external_path,
+                active_path,
+            )
+        )
+
+    def test_writer_clear_replace_failure_cleans_temp_and_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            path.write_text("original\n", encoding="utf-8")
+            writer = logger._RotatingTextWriter(
+                path,
+                max_bytes=1024,
+                backup_count=2,
+            )
+            replace_error = PermissionError("replace denied")
+
+            try:
+                with patch.object(logger.os, "replace", side_effect=replace_error):
+                    with self.assertRaises(PermissionError) as raised:
+                        writer.clear("cleared\n")
+
+                self.assertIs(raised.exception, replace_error)
+                self.assertEqual(
+                    list(path.parent.glob(f".{path.name}.*.tmp")),
+                    [],
+                )
+                writer.write("after\n")
+            finally:
+                writer.close()
+
+            self.assertEqual(
+                path.read_text(encoding="utf-8-sig"),
+                "original\nafter\n",
+            )
+
     def test_writer_reuses_stream_and_remains_reusable_after_clear(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "runtime.log"
@@ -389,7 +485,19 @@ class RotatingTextWriterTests(unittest.TestCase):
         with patch(
             "handlers.translation_handler.append_rotating_text",
             create=True,
-        ) as append_text:
+        ) as append_text, patch(
+            "handlers.translation_results.CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME",
+            "central-translation.log",
+            create=True,
+        ), patch(
+            "handlers.translation_handler.CUSTOM_AI_SHORT_LOG_MAX_BYTES",
+            12345,
+            create=True,
+        ), patch(
+            "handlers.translation_handler.CUSTOM_AI_SHORT_LOG_BACKUP_COUNT",
+            4,
+            create=True,
+        ):
             with patch(
                 "handlers.translation_handler.is_debug_logging_enabled",
                 return_value=True,
@@ -406,12 +514,36 @@ class RotatingTextWriterTests(unittest.TestCase):
 
         append_text.assert_called_once()
         args, kwargs = append_text.call_args
-        self.assertEqual(args[0], "CustomAI_Translation_Short_Log.txt")
+        self.assertEqual(args[0], "central-translation.log")
         self.assertIn("SESSION 1 STARTED", args[1])
         self.assertIn("Result: chars=10 lines=1", args[1])
         self.assertNotIn("translated", args[1])
-        self.assertEqual(kwargs["max_bytes"], 2 * 1024 * 1024)
-        self.assertEqual(kwargs["backup_count"], 2)
+        self.assertEqual(kwargs["max_bytes"], 12345)
+        self.assertEqual(kwargs["backup_count"], 4)
+
+    def test_runtime_diagnostic_clear_uses_shared_short_log_constants(self):
+        with patch.object(logger, "clear_debug_log") as clear_debug, patch.object(
+            logger,
+            "clear_rotating_log_family",
+        ) as clear_family:
+            logger.clear_runtime_diagnostic_logs()
+
+        clear_debug.assert_called_once_with()
+        self.assertEqual(
+            clear_family.call_args_list,
+            [
+                unittest.mock.call(
+                    logger.CUSTOM_AI_OCR_SHORT_LOG_FILENAME,
+                    logger.CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+                    logger.CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+                ),
+                unittest.mock.call(
+                    logger.CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
+                    logger.CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+                    logger.CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+                ),
+            ],
+        )
 
     def test_custom_ai_short_log_includes_result_body_only_when_opted_in(self):
         app = types.SimpleNamespace(
@@ -658,18 +790,87 @@ class RotatingTextWriterTests(unittest.TestCase):
         )
 
     def test_ui_clear_debug_log_uses_shared_writer(self):
-        handler = object.__new__(UIInteractionHandler)
-        handler.app = object()
-        handler.refresh_debug_log = Mock()
+        log_families = {
+            "translator_debug.log": 3,
+            "CustomAI_OCR_Short_Log.txt": 2,
+            "CustomAI_Translation_Short_Log.txt": 2,
+        }
 
-        with patch(
-            "handlers.ui_interaction_handler.clear_runtime_debug_log",
-            create=True,
-        ) as clear_log:
-            handler.clear_debug_log()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            for filename in log_families:
+                active_path = log_dir / filename
+                active_path.write_text("active content\n", encoding="utf-8")
+                for index in (1, 2):
+                    Path(f"{active_path}.{index}").write_text(
+                        f"rotated content {index}\n",
+                        encoding="utf-8",
+                    )
 
-        clear_log.assert_called_once_with()
+            handler = object.__new__(UIInteractionHandler)
+            handler.app = object()
+            handler.refresh_debug_log = Mock()
+
+            with patch.dict(
+                os.environ,
+                {"OCR_TRANSLATOR_LOG_DIR": tmp_dir},
+            ):
+                try:
+                    handler.clear_debug_log()
+
+                    debug_lines = (
+                        log_dir / "translator_debug.log"
+                    ).read_text(encoding="utf-8-sig").splitlines()
+                    self.assertEqual(len(debug_lines), 1)
+                    self.assertRegex(
+                        debug_lines[0],
+                        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}: Debug log cleared by user\.$",
+                    )
+                    for filename in (
+                        "CustomAI_OCR_Short_Log.txt",
+                        "CustomAI_Translation_Short_Log.txt",
+                    ):
+                        active_path = log_dir / filename
+                        self.assertTrue(
+                            not active_path.exists()
+                            or active_path.read_text(encoding="utf-8-sig") == ""
+                        )
+                    for filename, backup_count in log_families.items():
+                        active_path = log_dir / filename
+                        for index in range(1, backup_count + 1):
+                            self.assertFalse(
+                                Path(f"{active_path}.{index}").exists()
+                            )
+                finally:
+                    logger.close_log_writers()
+
         handler.refresh_debug_log.assert_called_once_with()
+
+    def test_clear_rotating_log_family_rejects_paths_outside_log_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            runtime_dir = root / "runtime"
+            outside_path = root / "outside.log"
+            outside_path.write_text("must remain\n", encoding="utf-8")
+
+            with patch.dict(
+                os.environ,
+                {"OCR_TRANSLATOR_LOG_DIR": str(runtime_dir)},
+            ):
+                try:
+                    with self.assertRaises(ValueError):
+                        logger.clear_rotating_log_family(
+                            outside_path,
+                            max_bytes=1024,
+                            backup_count=2,
+                        )
+                finally:
+                    logger.close_log_writers()
+
+            self.assertEqual(
+                outside_path.read_text(encoding="utf-8"),
+                "must remain\n",
+            )
 
     def test_ui_refresh_debug_log_uses_tail_reader(self):
         log_text = types.SimpleNamespace(
