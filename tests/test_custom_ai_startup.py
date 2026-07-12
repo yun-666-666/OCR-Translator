@@ -237,7 +237,7 @@ class StartupOptimizationTests(unittest.TestCase):
             "resources/gui_eng.csv",
             "resources/gui_pol.csv",
             "resources/gui_zh.csv",
-            "ocr_translator_config.ini",
+            "ocr_translator_config.example.ini",
         ]
 
         for relative_path in files_to_check:
