@@ -501,7 +501,7 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertNotIn("JSONDecodeError", message)
         self.assertNotIn("super-secret", message)
 
-    def test_post_reports_json_error_body(self):
+    def test_post_reports_content_free_json_error(self):
         class Response:
             status_code = 400
             text = '{"error":{"message":"bad model"}}'
@@ -524,8 +524,12 @@ class CustomAIProviderTests(unittest.TestCase):
                 {"model": "demo", "messages": []},
             )
 
-        self.assertIn("bad model", str(ctx.exception))
-        self.assertNotIn("super-secret", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("HTTP 400", message)
+        self.assertIn("https://host.example/v1/chat/completions", message)
+        self.assertNotIn("bad model", message)
+        self.assertNotIn('{"error"', message)
+        self.assertNotIn("super-secret", message)
 
     def test_build_translation_payload_contains_prompt_context_and_text(self):
         provider = CustomAIProvider()
