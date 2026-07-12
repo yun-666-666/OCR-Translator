@@ -2050,6 +2050,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 self.committed_modes = []
                 self.cooldown_modes = []
                 self.translate_modes = []
+                self.translate_timeouts = []
                 self.translate_snapshots = []
 
             def get_cached_translation_for_display(self, text):
@@ -2068,6 +2069,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                     "inflight_key": ("custom_ai", text, "resolved-stream"),
                     "latency_mode": "stream",
                     "reason": "p90_high",
+                    "timeout_seconds": 4.0,
+                    "timeout_reason": "fast_route_tail_guard",
                     "profile": {"id": "relay", "model": "original"},
                     "cache_params": {"model": "original"},
                 }
@@ -2093,6 +2096,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 request_snapshot=None,
             ):
                 self.translate_modes.append(latency_mode)
+                self.translate_timeouts.append(timeout_seconds)
                 self.translate_snapshots.append(request_snapshot)
                 if stream_callback:
                     stream_callback("translated")
@@ -2140,6 +2144,11 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         fn(*args)
 
         self.assertEqual(handler.translate_modes, ["stream"])
+        self.assertEqual(
+            handler.translate_timeouts,
+            [10.0],
+            "streaming requests must keep the full socket read deadline",
+        )
         self.assertIsNotNone(
             handler.translate_snapshots[0],
             "the resolved request snapshot must reach the worker handler",
@@ -2149,6 +2158,70 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             "original",
         )
         self.assertEqual(app.active_translation_inflight_keys, set())
+
+    def test_request_snapshot_timeout_is_validated_by_worker(self):
+        worker_threads = import_worker_threads_for_tests()
+        resolver = getattr(
+            worker_threads,
+            "_request_snapshot_timeout_seconds",
+            None,
+        )
+        self.assertTrue(
+            callable(resolver),
+            "the worker needs one boundary for snapshot timeout validation",
+        )
+
+        cases = (
+            ("safe", {"timeout_seconds": 4.0}, 4.0),
+            ("safe", {"timeout_seconds": "invalid"}, 10.0),
+            ("safe", {}, 10.0),
+            ("stream", {"timeout_seconds": 4.0}, 10.0),
+            ("race", {"timeout_seconds": 4.0}, 10.0),
+        )
+        for mode, snapshot, expected in cases:
+            with self.subTest(mode=mode, snapshot=snapshot):
+                self.assertEqual(resolver(snapshot, mode), expected)
+
+    def test_process_translation_async_passes_safe_snapshot_timeout(self):
+        worker_threads = import_worker_threads_for_tests()
+        received_timeouts = []
+        scheduled = []
+
+        class Handler:
+            def translate_text_with_timeout(
+                self,
+                _text,
+                timeout_seconds=10.0,
+                **_kwargs,
+            ):
+                received_timeouts.append(timeout_seconds)
+                return "translated"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            active_translation_calls={1},
+            active_translation_inflight_keys={("request",)},
+            active_translation_started_monotonic={1: time.monotonic()},
+            pending_translation_request=None,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "Hello",
+            1,
+            0,
+            inflight_key=("request",),
+            latency_mode="safe",
+            request_snapshot={"timeout_seconds": 4.0},
+        )
+
+        self.assertEqual(received_timeouts, [4.0])
+        self.assertEqual(len(scheduled), 1)
 
     def test_start_async_translation_queues_latest_request_during_submit_cooldown(self):
         worker_threads = import_worker_threads_for_tests()

@@ -6026,6 +6026,82 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
     def setUp(self):
         self.now = 100.0
 
+    def _resolve_request_timeout(
+        self,
+        advisor,
+        configured_timeout_seconds=10.0,
+        latency_mode="safe",
+    ):
+        resolver = getattr(advisor, "resolve_request_timeout", None)
+        self.assertTrue(
+            callable(resolver),
+            "the route advisor must expose a request-timeout decision",
+        )
+        return resolver(
+            configured_timeout_seconds,
+            latency_mode=latency_mode,
+        )
+
+    def test_fast_route_uses_conservative_four_second_read_deadline(self):
+        advisor = self._make_advisor()
+        for duration in (0.62, 0.66, 0.70, 0.72, 0.75, 0.78, 0.82, 0.90):
+            advisor.observe_request(duration, success=True)
+
+        decision = self._resolve_request_timeout(advisor)
+
+        self.assertEqual(decision.seconds, 4.0)
+        self.assertEqual(decision.reason, "fast_route_tail_guard")
+        self.assertEqual(decision.sample_count, 8)
+        self.assertAlmostEqual(decision.p90_seconds, 0.90)
+
+    def test_request_deadline_needs_eight_route_samples(self):
+        advisor = self._make_advisor()
+        for duration in (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80):
+            advisor.observe_request(duration, success=True)
+
+        decision = self._resolve_request_timeout(advisor)
+
+        self.assertEqual(decision.seconds, 10.0)
+        self.assertEqual(decision.reason, "insufficient_samples")
+
+    def test_slow_route_keeps_full_configured_deadline(self):
+        advisor = self._make_advisor()
+        for duration in (2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0):
+            advisor.observe_request(duration, success=True)
+
+        decision = self._resolve_request_timeout(advisor)
+
+        self.assertEqual(decision.seconds, 10.0)
+        self.assertEqual(decision.reason, "route_requires_full_timeout")
+
+    def test_recent_route_error_grants_one_full_timeout_probe(self):
+        advisor = self._make_advisor()
+        for duration in (0.62, 0.66, 0.70, 0.72, 0.75, 0.78, 0.82, 0.90):
+            advisor.observe_request(duration, success=True)
+        advisor.observe_request(10.0, success=False)
+
+        recovery = self._resolve_request_timeout(advisor)
+        advisor.observe_request(0.70, success=True)
+        recovered = self._resolve_request_timeout(advisor)
+
+        self.assertEqual(recovery.seconds, 10.0)
+        self.assertEqual(recovery.reason, "recent_error_probe")
+        self.assertEqual(recovered.seconds, 4.0)
+
+    def test_stream_and_race_modes_keep_full_deadline(self):
+        advisor = self._make_advisor()
+        for duration in (0.62, 0.66, 0.70, 0.72, 0.75, 0.78, 0.82, 0.90):
+            advisor.observe_request(duration, success=True)
+
+        for mode in ("stream", "race"):
+            with self.subTest(mode=mode):
+                decision = self._resolve_request_timeout(
+                    advisor,
+                    latency_mode=mode,
+                )
+                self.assertEqual(decision.seconds, 10.0)
+                self.assertEqual(decision.reason, "mode_uses_full_timeout")
+
     def test_explicit_latency_mode_is_not_overridden_by_adaptive_advisor(self):
         advisor = self._make_advisor()
         for duration in (3.2, 3.4, 3.6):
@@ -6191,6 +6267,95 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             called_profile = handler.custom_ai_provider.translate.call_args.args[0]
             self.assertEqual(called_profile["model"], "gpt-5.6-sol")
             self.assertEqual(result, "你好")
+        finally:
+            handler.close()
+
+    def test_translation_request_snapshot_freezes_route_adaptive_timeout(self):
+        fast_profile = {
+            "id": "fast",
+            "name": "Fast",
+            "base_url": "https://fast.example/v1",
+            "api_key": "fast-secret",
+            "model": "fast-model",
+            "wire_api": "chat_completions",
+        }
+        slow_profile = {
+            "id": "slow",
+            "name": "Slow",
+            "base_url": "https://slow.example/v1",
+            "api_key": "slow-secret",
+            "model": "slow-model",
+            "wire_api": "chat_completions",
+        }
+
+        class Profiles:
+            active = fast_profile
+
+            def get_active_profile(self, kind):
+                return self.active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [fast_profile, slow_profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+            translation_model_var=DummyVar("custom_ai"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            for duration in (
+                0.62,
+                0.66,
+                0.70,
+                0.72,
+                0.75,
+                0.78,
+                0.82,
+                0.90,
+            ):
+                handler._record_custom_ai_latency_observation(
+                    duration,
+                    success=True,
+                    profile=fast_profile,
+                )
+            for duration in (2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0):
+                handler._record_custom_ai_latency_observation(
+                    duration,
+                    success=True,
+                    profile=slow_profile,
+                )
+
+            fast_snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Fast subtitle",
+                commit=False,
+            )
+            app.custom_ai_profiles.active = slow_profile
+            slow_snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Slow subtitle",
+                commit=False,
+            )
+
+            self.assertIn(
+                "timeout_seconds",
+                fast_snapshot,
+                "request snapshots must freeze their route deadline",
+            )
+            self.assertEqual(fast_snapshot["timeout_seconds"], 4.0)
+            self.assertEqual(
+                fast_snapshot["timeout_reason"],
+                "fast_route_tail_guard",
+            )
+            self.assertEqual(slow_snapshot["timeout_seconds"], 10.0)
+            self.assertEqual(
+                slow_snapshot["timeout_reason"],
+                "route_requires_full_timeout",
+            )
         finally:
             handler.close()
 
@@ -7973,7 +8138,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         )
         handler.close()
 
-    def test_custom_ai_race_cooldown_uses_healthy_equivalent_profile(self):
+    def test_custom_ai_cooldown_uses_healthy_enabled_profile(self):
         active = {
             "id": "active",
             "base_url": "https://active.example/v1",
@@ -8013,7 +8178,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         mode.value = "safe"
         self.assertEqual(
             handler.get_translation_provider_cooldown_seconds(),
-            8.0,
+            0.0,
         )
         handler.close()
 
@@ -8759,6 +8924,326 @@ class ProfileNetworkTaskTests(unittest.TestCase):
 
         on_success.assert_called_once_with(("OK", 0.1))
         button.config.assert_any_call(state="normal")
+
+
+class RuntimeModuleSplitStructureTests(unittest.TestCase):
+    def test_gui_builder_uses_focused_builder_modules(self):
+        import gui_diagnostics_builder
+        import gui_profile_controls
+        import gui_settings_builder
+
+        self.assertTrue(callable(gui_profile_controls.filter_model_values))
+        self.assertTrue(callable(gui_settings_builder.create_settings_tab))
+        self.assertTrue(callable(gui_diagnostics_builder.create_debug_tab))
+        self.assertTrue(callable(gui_diagnostics_builder.create_custom_prompt_tab))
+        self.assertTrue(callable(gui_builder.create_settings_tab))
+        self.assertTrue(callable(gui_builder.create_debug_tab))
+        self.assertTrue(callable(gui_builder.create_custom_prompt_tab))
+
+    def test_extracted_settings_builder_resolves_nested_global_dependencies(self):
+        import builtins
+        import symtable
+        from pathlib import Path
+
+        import gui_settings_builder
+
+        source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+        module_table = symtable.symtable(source, "gui_settings_builder.py", "exec")
+        settings_table = next(
+            child
+            for child in module_table.get_children()
+            if child.get_name() == "create_settings_tab"
+        )
+
+        def referenced_globals(table):
+            names = {
+                name
+                for name in table.get_identifiers()
+                if table.lookup(name).is_global()
+            }
+            for child in table.get_children():
+                names.update(referenced_globals(child))
+            return names
+
+        unresolved = sorted(
+            name
+            for name in referenced_globals(settings_table)
+            if not hasattr(builtins, name)
+            and name not in vars(gui_settings_builder)
+        )
+        self.assertEqual([], unresolved)
+
+    def test_extracted_diagnostics_builder_resolves_nested_global_dependencies(self):
+        import builtins
+        import symtable
+        from pathlib import Path
+
+        import gui_diagnostics_builder
+
+        source = Path("gui_diagnostics_builder.py").read_text(encoding="utf-8-sig")
+        module_table = symtable.symtable(source, "gui_diagnostics_builder.py", "exec")
+
+        def referenced_globals(table):
+            names = {
+                name
+                for name in table.get_identifiers()
+                if table.lookup(name).is_global()
+            }
+            for child in table.get_children():
+                names.update(referenced_globals(child))
+            return names
+
+        unresolved = set()
+        for function_name in ("create_debug_tab", "create_custom_prompt_tab"):
+            function_table = next(
+                child
+                for child in module_table.get_children()
+                if child.get_name() == function_name
+            )
+            unresolved.update(
+                name
+                for name in referenced_globals(function_table)
+                if not hasattr(builtins, name)
+                and name not in vars(gui_diagnostics_builder)
+            )
+        self.assertEqual([], sorted(unresolved))
+
+    def test_app_logic_composes_focused_runtime_mixins(self):
+        from app_capture_ocr import AppCaptureOcrMixin
+        from app_configuration import AppConfigurationMixin
+        from app_lifecycle import AppLifecycleMixin
+        from app_logic import GameChangingTranslator
+
+        self.assertTrue(issubclass(GameChangingTranslator, AppCaptureOcrMixin))
+        self.assertTrue(issubclass(GameChangingTranslator, AppConfigurationMixin))
+        self.assertTrue(issubclass(GameChangingTranslator, AppLifecycleMixin))
+
+    def test_translation_handler_composes_focused_handler_mixins(self):
+        from handlers.translation_context import TranslationContextMixin
+        from handlers.translation_handler import TranslationHandler
+        from handlers.translation_requests import TranslationRequestsMixin
+        from handlers.translation_results import TranslationResultsMixin
+
+        self.assertTrue(issubclass(TranslationHandler, TranslationContextMixin))
+        self.assertTrue(issubclass(TranslationHandler, TranslationRequestsMixin))
+        self.assertTrue(issubclass(TranslationHandler, TranslationResultsMixin))
+
+    def test_worker_threads_reexports_focused_worker_modules(self):
+        import worker_capture
+        import worker_ocr
+        import worker_threads
+        import worker_translation
+
+        self.assertIs(
+            worker_threads.OcrStabilityGate,
+            worker_ocr.OcrStabilityGate,
+        )
+        self.assertIs(
+            worker_threads.get_paddleocr_settings_from_app,
+            worker_capture.get_paddleocr_settings_from_app,
+        )
+        self.assertIs(worker_threads.run_capture_thread, worker_capture.run_capture_thread)
+        self.assertIs(
+            worker_threads.reset_translation_scheduler_session_state,
+            worker_translation.reset_translation_scheduler_session_state,
+        )
+
+    def test_custom_ai_reexports_focused_provider_modules(self):
+        import custom_ai
+        import custom_ai_policy
+        import custom_ai_profiles
+        from custom_ai_capabilities import CustomAICapabilitiesMixin
+        from custom_ai_requests import CustomAIRequestsMixin
+        from custom_ai_transport import CustomAITransportMixin
+
+        self.assertIs(
+            custom_ai.CustomAILatencyModeAdvisor,
+            custom_ai_policy.CustomAILatencyModeAdvisor,
+        )
+        self.assertIs(
+            custom_ai.CustomAIProfileManager,
+            custom_ai_profiles.CustomAIProfileManager,
+        )
+        self.assertTrue(
+            issubclass(custom_ai.CustomAIProvider, CustomAICapabilitiesMixin)
+        )
+        self.assertTrue(issubclass(custom_ai.CustomAIProvider, CustomAIRequestsMixin))
+        self.assertTrue(issubclass(custom_ai.CustomAIProvider, CustomAITransportMixin))
+
+
+class CostProtectedProfileFailoverProviderTests(unittest.TestCase):
+    def test_non_stream_chat_response_accepts_forced_sse_with_text(self):
+        class Response:
+            content = (
+                b'data: {"choices":[{"delta":{"content":"translated"}}]}\n\n'
+                b'data: [DONE]\n'
+            )
+
+            def json(self):
+                raise ValueError("response is not JSON")
+
+            def iter_lines(self, decode_unicode=False):
+                return self.content.splitlines()
+
+        provider = CustomAIProvider(http_client=object())
+
+        response_json = provider._load_response_json(Response())
+
+        self.assertEqual(
+            response_json["choices"][0]["message"]["content"],
+            "translated",
+        )
+
+    def test_profile_unavailable_cooldown_is_scoped_to_failed_profile(self):
+        provider = CustomAIProvider(http_client=object())
+        failed = {
+            "id": "failed",
+            "name": "Failed relay",
+            "base_url": "https://failed.example/v1",
+            "model": "grok",
+        }
+        healthy = {
+            "id": "healthy",
+            "name": "Healthy relay",
+            "base_url": "https://healthy.example/v1",
+            "model": "grok",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider.mark_profile_unavailable(failed, "forced SSE had no text")
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(provider.get_cooldown_remaining(failed), 0.0)
+            self.assertEqual(provider.get_cooldown_remaining(healthy), 0.0)
+
+
+class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
+    def _make_handler(self):
+        primary = {
+            "id": "primary",
+            "name": "Primary relay",
+            "base_url": "https://primary.example/v1",
+            "api_key": "primary-secret",
+            "model": "grok",
+            "wire_api": "chat_completions",
+            "enabled": True,
+        }
+        fallback = {
+            "id": "fallback",
+            "name": "Fallback relay",
+            "base_url": "https://fallback.example/v1",
+            "api_key": "fallback-secret",
+            "model": "grok",
+            "wire_api": "chat_completions",
+            "enabled": True,
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return primary
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                profiles = [primary, fallback]
+                if enabled_only:
+                    return [profile for profile in profiles if profile["enabled"]]
+                return profiles
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+            translation_model_var=DummyVar("custom_ai"),
+        )
+        return TranslationHandler(app), primary, fallback
+
+    def test_custom_ai_translation_falls_through_once_to_next_enabled_profile(self):
+        handler, primary, fallback = self._make_handler()
+        try:
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=[
+                    ValueError("forced SSE did not contain content"),
+                    ("fallback translation", {}, 0.01),
+                ]
+            )
+
+            result = handler._custom_ai_translate("source", time.monotonic())
+
+            self.assertEqual(result, "fallback translation")
+            self.assertEqual(
+                [
+                    call.args[0]["id"]
+                    for call in handler.custom_ai_provider.translate.call_args_list
+                ],
+                [primary["id"], fallback["id"]],
+            )
+        finally:
+            handler.close()
+
+    def test_custom_ai_translation_uses_fallback_cache_without_network_call(self):
+        handler, _primary, fallback = self._make_handler()
+        try:
+            cache_params = handler._cache_params_for_profile(
+                fallback,
+                custom_prompt="",
+                keep_linebreaks=False,
+                context=[],
+                latency_mode="safe",
+            )
+            handler.unified_cache.store(
+                "source",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                "cached fallback translation",
+                **cache_params,
+            )
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+
+            result = handler._custom_ai_translate("source", time.monotonic())
+
+            self.assertEqual(result, "cached fallback translation")
+            handler.custom_ai_provider.translate.assert_not_called()
+        finally:
+            handler.close()
+
+    def test_translation_cooldown_is_zero_when_enabled_fallback_is_healthy(self):
+        handler, primary, fallback = self._make_handler()
+        try:
+            handler.custom_ai_provider.get_cooldown_remaining = Mock(
+                side_effect=lambda profile: (
+                    60.0 if profile["id"] == primary["id"] else 0.0
+                )
+            )
+
+            self.assertEqual(
+                handler.get_translation_provider_cooldown_seconds(),
+                0.0,
+            )
+        finally:
+            handler.close()
+
+    def test_translation_cooldown_uses_earliest_enabled_profile_expiry(self):
+        handler, primary, fallback = self._make_handler()
+        try:
+            handler.custom_ai_provider.get_cooldown_remaining = Mock(
+                side_effect=lambda profile: {
+                    primary["id"]: 60.0,
+                    fallback["id"]: 15.0,
+                }[profile["id"]]
+            )
+
+            self.assertEqual(
+                handler.get_translation_provider_cooldown_seconds(),
+                15.0,
+            )
+        finally:
+            handler.close()
 
 
 if __name__ == "__main__":

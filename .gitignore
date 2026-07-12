@@ -50,6 +50,7 @@ openai_cache*.txt
 *_LOG.txt
 *API*Log*.txt
 *API*log*.txt
+log_analysis.txt
 
 # API Keys and sensitive information
 api_keys.json

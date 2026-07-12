@@ -84,7 +84,7 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_detail"], "auto")
 
     def test_custom_ai_ocr_image_payload_controls_are_wired_to_settings(self):
-        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
         save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
 
         self.assertIn("custom_ai_ocr_image_format_var", gui_builder_source)
@@ -97,7 +97,7 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertIn("custom_ai_ocr_image_detail", save_source)
 
     def test_custom_ai_submit_interval_is_wired_to_settings_and_localizations(self):
-        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
         save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
 
         self.assertIn("custom_ai_submit_interval_ms_var", gui_builder_source)
@@ -115,7 +115,7 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertTrue(labels["custom_ai_submit_interval_label"].strip(), msg=path)
 
     def test_paddleocr_score_control_is_visible_and_legacy_threshold_controls_are_removed(self):
-        gui_builder_source = Path("gui_builder.py").read_text(encoding="utf-8-sig")
+        gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
         ui_handler_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
         legacy_confidence_key = "confidence" + "_threshold_label"
 
