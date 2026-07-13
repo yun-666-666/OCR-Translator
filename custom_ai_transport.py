@@ -1,12 +1,17 @@
 """HTTP recovery, cooldowns, streaming, and provider operations."""
 
 from html.parser import HTMLParser
+import inspect
 import json
 import re
 import sys
 import time
 
 from diagnostic_sanitizer import sanitize_error_text, sanitize_url
+from custom_ai_deadline import (
+    CustomAIRequestDeadline,
+    CustomAIRequestDeadlineExceeded,
+)
 from custom_ai_policy import (
     CUSTOM_AI_LATENCY_MODE_NONE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
@@ -44,6 +49,62 @@ def _log_debug(message):
 
 
 class CustomAITransportMixin:
+    def _resolve_request_deadline(
+        self,
+        deadline=None,
+        deadline_monotonic=None,
+        timeout_seconds=None,
+    ):
+        if deadline is not None:
+            return deadline
+        if deadline_monotonic is not None:
+            return CustomAIRequestDeadline.from_absolute(
+                deadline_monotonic
+            )
+        return CustomAIRequestDeadline.from_timeout(
+            timeout_seconds,
+            fallback_seconds=self.timeout,
+        )
+
+    def _post_accepts_deadline(self, post):
+        target = getattr(post, "side_effect", None)
+        if not callable(target):
+            target = post
+        try:
+            parameters = inspect.signature(target).parameters.values()
+        except (TypeError, ValueError):
+            return True
+        return any(
+            parameter.name == "deadline"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+
+    def _post_with_deadline_compatibility(
+        self,
+        profile,
+        payload,
+        latency_mode,
+        request_kind,
+        timeout_seconds,
+        deadline,
+    ):
+        kwargs = {
+            "latency_mode": latency_mode,
+            "request_kind": request_kind,
+            "timeout_seconds": timeout_seconds,
+        }
+        if deadline is None:
+            return self._post(profile, payload, **kwargs)
+        post = self._post
+        is_builtin_post = (
+            getattr(post, "__func__", None) is CustomAITransportMixin._post
+        )
+        if not is_builtin_post and not self._post_accepts_deadline(post):
+            return post(profile, payload, **kwargs)
+        kwargs["deadline"] = deadline
+        return post(profile, payload, **kwargs)
+
     def _get_http_client(self, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         if latency_mode == CUSTOM_AI_LATENCY_MODE_NONE and self._owns_http_client:
@@ -91,6 +152,7 @@ class CustomAITransportMixin:
         stream=False,
         request_kind=None,
         timeout_seconds=None,
+        deadline=None,
     ):
         request_payload = payload
         request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
@@ -121,7 +183,11 @@ class CustomAITransportMixin:
             kwargs = {
                 "headers": headers,
                 "json": current_payload,
-                "timeout": self._request_timeout(timeout_seconds),
+                "timeout": (
+                    deadline.http_timeout()
+                    if deadline is not None
+                    else self._request_timeout(timeout_seconds)
+                ),
             }
             if stream:
                 kwargs["stream"] = True
@@ -401,6 +467,7 @@ class CustomAITransportMixin:
         latency_mode,
         request_kind=None,
         timeout_seconds=None,
+        deadline=None,
     ):
         current_client = http_client
         for attempt in range(2):
@@ -414,7 +481,10 @@ class CustomAITransportMixin:
                     api_key,
                     request_kind=request_kind,
                     timeout_seconds=timeout_seconds,
+                    deadline=deadline,
                 )
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as error:
                 if (
                     attempt == 0
@@ -611,8 +681,16 @@ class CustomAITransportMixin:
         latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
         stream_callback=None,
         timeout_seconds=None,
+        *,
+        deadline_monotonic=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        deadline = None
+        if latency_mode != CUSTOM_AI_LATENCY_MODE_STREAM:
+            deadline = self._resolve_request_deadline(
+                deadline_monotonic=deadline_monotonic,
+                timeout_seconds=timeout_seconds,
+            )
         payload = self.build_translation_payload(
             profile,
             text,
@@ -650,12 +728,13 @@ class CustomAITransportMixin:
                     request_kind="translation",
                     **stream_kwargs,
                 )
-            return self._post(
+            return self._post_with_deadline_compatibility(
                 profile,
                 current_payload,
-                latency_mode=latency_mode,
-                request_kind="translation",
-                timeout_seconds=timeout_seconds,
+                latency_mode,
+                "translation",
+                timeout_seconds,
+                deadline,
             )
 
         active_request = request
@@ -689,12 +768,13 @@ class CustomAITransportMixin:
             )
 
             def active_request(current_payload):
-                return self._post(
+                return self._post_with_deadline_compatibility(
                     profile,
                     current_payload,
-                    latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
-                    request_kind="translation",
-                    timeout_seconds=timeout_seconds,
+                    CUSTOM_AI_LATENCY_MODE_SAFE,
+                    "translation",
+                    timeout_seconds,
+                    deadline,
                 )
 
             response_latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
@@ -809,7 +889,13 @@ class CustomAITransportMixin:
         image_detail="auto",
         image_mime_type="image/webp",
         timeout_seconds=None,
+        *,
+        deadline_monotonic=None,
     ):
+        deadline = self._resolve_request_deadline(
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         payload = self.build_ocr_payload(
             profile,
             image_data,
@@ -818,12 +904,13 @@ class CustomAITransportMixin:
             image_detail=image_detail,
             image_mime_type=image_mime_type,
         )
-        response_json, duration = self._post(
+        response_json, duration = self._post_with_deadline_compatibility(
             profile,
             payload,
-            latency_mode=latency_mode,
-            request_kind="ocr",
-            timeout_seconds=timeout_seconds,
+            latency_mode,
+            "ocr",
+            timeout_seconds,
+            deadline,
         )
         result = self._parse_response_text(profile, response_json)
         if keep_linebreaks:
@@ -860,8 +947,15 @@ class CustomAITransportMixin:
         latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE,
         request_kind="translation",
         timeout_seconds=None,
+        deadline_monotonic=None,
+        deadline=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        deadline = self._resolve_request_deadline(
+            deadline=deadline,
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
         headers = {
@@ -882,6 +976,7 @@ class CustomAITransportMixin:
                 latency_mode,
                 request_kind=request_kind,
                 timeout_seconds=timeout_seconds,
+                deadline=deadline,
             )
         errors = []
         api_key = profile.get("api_key", "")
@@ -905,6 +1000,7 @@ class CustomAITransportMixin:
                     latency_mode,
                     request_kind=request_kind,
                     timeout_seconds=timeout_seconds,
+                    deadline=deadline,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -947,6 +1043,8 @@ class CustomAITransportMixin:
                     self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                     errors.append(self._non_json_response_message(response, url, api_key))
                     continue
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as e:
                 self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
@@ -968,6 +1066,7 @@ class CustomAITransportMixin:
         latency_mode,
         request_kind=None,
         timeout_seconds=None,
+        deadline=None,
     ):
         api_key = profile.get("api_key", "")
         self._raise_if_rate_limited(profile)
@@ -997,6 +1096,7 @@ class CustomAITransportMixin:
                     latency_mode,
                     request_kind=request_kind,
                     timeout_seconds=timeout_seconds,
+                    deadline=deadline,
                 )
                 duration = time.monotonic() - start
                 status_code = int(getattr(response, "status_code", 200) or 200)
@@ -1035,6 +1135,8 @@ class CustomAITransportMixin:
                     self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                     errors.append(self._non_json_response_message(response, url, api_key))
                     continue
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as e:
                 self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):

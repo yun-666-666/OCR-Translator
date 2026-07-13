@@ -1236,7 +1236,476 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             )
 
 
+class CustomAIDeadlineTests(unittest.TestCase):
+    def _deadline_module(self):
+        return importlib.import_module("custom_ai_deadline")
+
+    def test_deadline_reports_remaining_budget_and_expires_safely(self):
+        deadline_module = self._deadline_module()
+        deadline = deadline_module.CustomAIRequestDeadline.from_timeout(
+            4.0,
+            now=100.0,
+        )
+
+        self.assertEqual(deadline.deadline_monotonic, 104.0)
+        self.assertEqual(deadline.remaining_seconds(now=100.0), 4.0)
+        self.assertEqual(deadline.remaining_seconds(now=102.5), 1.5)
+        self.assertEqual(deadline.remaining_seconds(now=104.0), 0.0)
+        with self.assertRaisesRegex(
+            deadline_module.CustomAIRequestDeadlineExceeded,
+            r"^Custom AI request deadline expired$",
+        ):
+            deadline.http_timeout(now=104.0)
+
+    def test_deadline_validation_uses_only_finite_positive_budgets(self):
+        deadline_module = self._deadline_module()
+
+        self.assertEqual(
+            deadline_module.CustomAIRequestDeadline.from_timeout(
+                "not-a-number",
+                now=0.0,
+                fallback_seconds=6.0,
+            ).deadline_monotonic,
+            6.0,
+        )
+        self.assertEqual(
+            deadline_module.CustomAIRequestDeadline.from_timeout(
+                0.0,
+                now=0.0,
+                fallback_seconds=6.0,
+            ).deadline_monotonic,
+            6.0,
+        )
+        self.assertEqual(
+            deadline_module.CustomAIRequestDeadline.from_timeout(
+                10 ** 400,
+                now=1.0,
+                fallback_seconds=2.0,
+            ).deadline_monotonic,
+            3.0,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Custom AI request timeout must be positive$",
+        ):
+            deadline_module.CustomAIRequestDeadline.from_timeout(
+                float("inf"),
+                now=0.0,
+                fallback_seconds=0.0,
+            )
+        for invalid_absolute in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(invalid_absolute=invalid_absolute):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"^Custom AI request deadline must be finite$",
+                ):
+                    deadline_module.CustomAIRequestDeadline.from_absolute(
+                        invalid_absolute
+                    )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Custom AI request deadline must be finite$",
+        ):
+            deadline_module.CustomAIRequestDeadline.from_absolute(10 ** 400)
+
+    def test_deadline_rejects_nonfinite_construction_and_overflow(self):
+        deadline_module = self._deadline_module()
+
+        for invalid_absolute in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(invalid_absolute=invalid_absolute):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"^Custom AI request deadline must be finite$",
+                ):
+                    deadline_module.CustomAIRequestDeadline(invalid_absolute)
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^Custom AI request deadline must be finite$",
+        ):
+            deadline_module.CustomAIRequestDeadline.from_timeout(
+                1e308,
+                now=1e308,
+            )
+
+
 class CustomAIProviderTests(unittest.TestCase):
+    def test_deadline_uses_current_remaining_budget_on_first_post(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            def __init__(self, values):
+                self.values = iter(values)
+                self.last = None
+
+            def monotonic(self):
+                try:
+                    self.last = next(self.values)
+                except StopIteration:
+                    pass
+                return self.last
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return {"choices": [{"message": {"content": "OK"}}]}
+
+        class Client:
+            def __init__(self):
+                self.timeouts = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.timeouts.append(timeout)
+                return Response()
+
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "test-secret-key",
+            "model": "demo",
+            "structured_output_mode": "off",
+        }
+        for clock_values, expected_timeout in (
+            ((100.0,), 10.0),
+            ((100.0, 101.5), 8.5),
+        ):
+            with self.subTest(clock_values=clock_values):
+                clock = Clock(clock_values)
+                client = Client()
+                provider = CustomAIProvider(http_client=client, timeout=30.0)
+                with patch.object(
+                    deadline_module.time,
+                    "monotonic",
+                    clock.monotonic,
+                ):
+                    translated, _usage, _duration = provider.translate(
+                        profile,
+                        "Hello",
+                        "en",
+                        "zh-CN",
+                        timeout_seconds=10.0,
+                    )
+
+                self.assertEqual(translated, "OK")
+                self.assertEqual(client.timeouts, [expected_timeout])
+
+    def test_deadline_rejects_invalid_absolute_value_without_posting(self):
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                raise AssertionError("invalid absolute deadline must not post")
+
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "test-secret-key",
+            "model": "demo",
+            "structured_output_mode": "off",
+        }
+        for invalid_absolute in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(invalid_absolute=invalid_absolute):
+                client = Client()
+                provider = CustomAIProvider(http_client=client)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"^Custom AI request deadline must be finite$",
+                ):
+                    provider.translate(
+                        profile,
+                        "Hello",
+                        "en",
+                        "zh-CN",
+                        timeout_seconds=10.0,
+                        deadline_monotonic=invalid_absolute,
+                    )
+                self.assertEqual(client.calls, 0)
+
+    def test_deadline_uses_remaining_budget_for_compatibility_retry(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            headers = {}
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.timeouts = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    self.clock.now = 102.5
+                    return Response(
+                        400,
+                        {"error": {"message": "Unsupported parameter: max_tokens"}},
+                    )
+                return Response(200, {"choices": [{"message": {"content": "OK"}}]})
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "test-secret-key",
+            "model": "demo",
+        }
+
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            response_json, _duration = provider._post(
+                profile,
+                {"model": "demo", "messages": [], "max_tokens": 64},
+                deadline_monotonic=104.0,
+            )
+
+        self.assertEqual(response_json["choices"][0]["message"]["content"], "OK")
+        self.assertEqual(client.timeouts, [4.0, 1.5])
+
+    def test_deadline_uses_remaining_budget_for_transient_retry(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            headers = {}
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.timeouts = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    self.clock.now = 102.5
+                    return Response(502, {"error": {"message": "Bad gateway"}})
+                return Response(200, {"choices": [{"message": {"content": "OK"}}]})
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            response_json, _duration = provider._post(
+                {"base_url": "https://host.example/v1", "api_key": "test-secret-key"},
+                {"model": "demo", "messages": []},
+                deadline_monotonic=104.0,
+            )
+
+        self.assertEqual(response_json["choices"][0]["message"]["content"], "OK")
+        self.assertEqual(client.timeouts, [4.0, 1.5])
+
+    def test_deadline_uses_remaining_budget_for_next_endpoint(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            headers = {}
+
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self.payload
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.timeouts = []
+                self.urls = []
+
+            def post(self, url, headers=None, json=None, timeout=None):
+                self.urls.append(url)
+                self.timeouts.append(timeout)
+                if len(self.timeouts) == 1:
+                    self.clock.now = 102.5
+                    return Response(404, {"error": {"message": "Not found"}})
+                return Response(200, {"choices": [{"message": {"content": "OK"}}]})
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            response_json, _duration = provider._post(
+                {"base_url": "https://host.example", "api_key": "test-secret-key"},
+                {"model": "demo", "messages": []},
+                deadline_monotonic=104.0,
+            )
+
+        self.assertEqual(response_json["choices"][0]["message"]["content"], "OK")
+        self.assertEqual(client.timeouts, [4.0, 1.5])
+        self.assertEqual(len(client.urls), 2)
+
+    def test_deadline_expiry_blocks_retry_with_one_safe_error(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            status_code = 502
+            headers = {}
+            text = '{"error":{"message":"body must not leak"}}'
+
+            def json(self):
+                return {"error": {"message": "body must not leak"}}
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.calls = 0
+                self.timeouts = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.calls += 1
+                self.timeouts.append(timeout)
+                self.clock.now = 104.0
+                return Response()
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "test-secret-key",
+            "model": "demo",
+            "structured_output_mode": "off",
+        }
+
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            with self.assertRaisesRegex(
+                deadline_module.CustomAIRequestDeadlineExceeded,
+                r"^Custom AI request deadline expired$",
+            ) as raised:
+                provider.translate(
+                    profile,
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    timeout_seconds=4.0,
+                )
+
+        self.assertEqual(str(raised.exception), "Custom AI request deadline expired")
+        self.assertEqual(client.timeouts, [4.0])
+        self.assertEqual(client.calls, 1)
+
+    def test_recognize_accepts_an_absolute_deadline(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            status_code = 200
+            headers = {}
+
+            def json(self):
+                return {"choices": [{"message": {"content": "detected"}}]}
+
+        class Client:
+            def __init__(self):
+                self.timeouts = []
+
+            def post(self, _url, headers=None, json=None, timeout=None):
+                self.timeouts.append(timeout)
+                return Response()
+
+        clock = Clock()
+        client = Client()
+        provider = CustomAIProvider(http_client=client)
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            recognized, _usage, _duration = provider.recognize(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "test-secret-key",
+                    "model": "vision-demo",
+                },
+                b"encoded-image",
+                "en",
+                deadline_monotonic=104.0,
+            )
+
+        self.assertEqual(recognized, "detected")
+        self.assertEqual(client.timeouts, [4.0])
+
+    def test_deadline_compatibility_does_not_retry_internal_type_errors(self):
+        class Provider(CustomAIProvider):
+            def __init__(self):
+                super().__init__(http_client=object())
+                self.calls = 0
+
+            def _post(
+                self,
+                profile,
+                payload,
+                latency_mode="safe",
+                request_kind="translation",
+                timeout_seconds=None,
+                deadline=None,
+            ):
+                self.calls += 1
+                raise TypeError("unexpected keyword argument 'deadline'")
+
+        provider = Provider()
+        with self.assertRaisesRegex(
+            TypeError,
+            r"^unexpected keyword argument 'deadline'$",
+        ):
+            provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "test-secret-key",
+                    "model": "demo",
+                    "structured_output_mode": "off",
+                },
+                "Hello",
+                "en",
+                "zh-CN",
+            )
+
+        self.assertEqual(provider.calls, 1)
+
     def test_models_get_retry_log_sanitizes_url(self):
         class Client:
             def __init__(self):
@@ -5065,7 +5534,9 @@ class CustomAIProviderTests(unittest.TestCase):
                 )
 
                 self.assertEqual(translated, "Hello")
-                self.assertEqual(client.timeouts, [10.0])
+                self.assertEqual(len(client.timeouts), 1)
+                self.assertGreater(client.timeouts[0], 0.0)
+                self.assertLessEqual(client.timeouts[0], 10.0)
                 self.assertEqual(client.stream_flags, [expected_stream])
 
     def test_chat_translation_and_ocr_payloads_include_reasoning_effort(self):
