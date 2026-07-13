@@ -82,6 +82,9 @@ class ApiOcrRequestSnapshotTests(unittest.TestCase):
             "image_mode": " BALANCED_WEBP ",
             "image_quality": "87",
             "mime_type": " IMAGE/JPEG ",
+            "frame_hash": "frame-default",
+            "region_size": (320, 120),
+            "region_origin": (10, 20),
         }
         values.update(overrides)
         return ApiOcrRequestSnapshot.create(**values)
@@ -107,6 +110,29 @@ class ApiOcrRequestSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.image_quality, 87)
         self.assertEqual(snapshot.mime_type, "image/jpeg")
         self.assertEqual(snapshot.profile_copy()["api_key"], secret)
+
+    def test_snapshot_owns_non_secret_frame_cache_key(self):
+        ocr_utils = import_ocr_utils_for_tests()
+        snapshot = self._make_snapshot(
+            frame_hash="frozen-frame-hash",
+            region_size=(640, 180),
+            region_origin=(34, 56),
+        )
+
+        self.assertEqual(
+            snapshot.frame_cache_key,
+            ocr_utils.build_ocr_frame_cache_key(
+                "frozen-frame-hash",
+                snapshot.cache_model_identity,
+                snapshot.source_language,
+                snapshot.cache_mode_identity,
+                (640, 180),
+                region_origin=(34, 56),
+            ),
+        )
+        rendered = repr(snapshot)
+        self.assertNotIn("sk-ocr-snapshot-secret", rendered)
+        self.assertNotIn("relay.example", rendered.lower())
 
     def test_snapshot_and_stored_profile_are_immutable_defensive_copies(self):
         profile = self._profile()
@@ -1797,6 +1823,219 @@ class TranslationInactivityClearTests(unittest.TestCase):
 
 
 class LatencyTranslationCacheTests(unittest.TestCase):
+    def test_custom_ai_submission_freezes_contract_before_cache_encoding_and_worker(self):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
+        profile_a = {
+            "id": "profile-a",
+            "name": "Profile A",
+            "base_url": "https://a.example/v1",
+            "api_key": "secret-a",
+            "model": "vision-a",
+            "wire_api": "responses",
+            "reasoning_effort": "low",
+        }
+        profile_b = {
+            "id": "profile-b",
+            "name": "Profile B",
+            "base_url": "https://b.example/v1",
+            "api_key": "secret-b",
+            "model": "vision-b",
+            "wire_api": "chat_completions",
+            "reasoning_effort": "none",
+        }
+
+        class MutableVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class Profiles:
+            def __init__(self):
+                self.active = profile_a
+                self.calls = 0
+                self.requested_kinds = []
+
+            def get_active_profile(self, kind):
+                self.calls += 1
+                self.requested_kinds.append(kind)
+                return self.active
+
+        class Provider:
+            def __init__(self):
+                self.request_kinds = []
+
+            def reasoning_effort_request_contract(self, profile, request_kind):
+                self.request_kinds.append(request_kind)
+                return "medium"
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Cache:
+            def __init__(self, expected_snapshot):
+                self.expected_snapshot = expected_snapshot
+                self.lookups = []
+                self.writes = []
+
+            def get(self, key):
+                self.lookups.append(key)
+                self.assertEqual(key, self.expected_snapshot.frame_cache_key)
+                self.assertEqual(app.batch_sequence_counter, 1)
+                return None
+
+            def put(self, key, value):
+                self.writes.append((key, value))
+
+            def assertEqual(self, left, right):
+                if left != right:
+                    raise AssertionError((left, right))
+
+        expected_snapshot = ApiOcrRequestSnapshot.create(
+            generation=0,
+            sequence=1,
+            provider="custom_ai",
+            profile=profile_a,
+            source_language="ja",
+            keep_linebreaks=True,
+            latency_mode="safe",
+            reasoning_effort="medium",
+            image_detail="high",
+            image_format="png",
+            image_mode="small_grayscale_webp",
+            image_quality=77,
+            mime_type="image/png",
+            frame_hash="frozen-frame",
+            region_size=(32, 16),
+            region_origin=(0, 0),
+        )
+        pool = Pool()
+        encoder_calls = []
+        received_snapshots = []
+        scheduled = []
+
+        class Handler:
+            def __init__(self):
+                self.custom_ai_provider = Provider()
+
+            def perform_ocr(self, image_data, source_lang=None, *, request_snapshot=None, **kwargs):
+                received_snapshots.append(request_snapshot)
+                provider_profile = request_snapshot.profile_copy()
+                provider_profile["api_key"] = "provider-mutated"
+                self.assertEqual(image_data, b"png-a")
+                self.assertEqual(source_lang, None)
+                self.assertEqual(kwargs, {})
+                return "Frozen OCR text"
+
+            def assertEqual(self, left, right):
+                if left != right:
+                    raise AssertionError((left, right))
+
+        profiles = Profiles()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            custom_ai_profiles=profiles,
+            custom_source_lang="ja",
+            source_lang_var=MutableVar("en"),
+            keep_linebreaks_var=MutableVar(True),
+            custom_ai_latency_mode_var=MutableVar("safe"),
+            custom_ai_ocr_image_format_var=MutableVar("png"),
+            custom_ai_ocr_image_mode_var=MutableVar("small_grayscale_webp"),
+            custom_ai_ocr_image_quality_var=MutableVar(77),
+            custom_ai_ocr_image_detail_var=MutableVar("high"),
+            translation_handler=Handler(),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda _model: False,
+            is_openai_model=lambda _model: False,
+            ocr_thread_pool=pool,
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle=None,
+            reset_clear_timeout=Mock(),
+            update_translation_text=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda _delay, callback, *args: scheduled.append((callback, args))
+            ),
+            convert_to_api_ocr_image=lambda _image, **kwargs: (
+                encoder_calls.append(kwargs)
+                or types.SimpleNamespace(
+                    data=b"png-a", mime_type="image/png", image_format="png"
+                )
+            ),
+        )
+        app.ocr_frame_cache = Cache(expected_snapshot)
+        screenshot = Image.new("RGB", (32, 16), (1, 2, 3))
+        screenshot._gct_frame_hash = "frozen-frame"
+
+        worker_threads = import_worker_threads_for_tests()
+        with patch.object(worker_threads, "start_async_translation"):
+            worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(len(pool.submissions), 1)
+            submit_function, submit_args = pool.submissions[0]
+            self.assertIs(
+                submit_function,
+                worker_threads.process_api_ocr_snapshot_async,
+            )
+            self.assertEqual(submit_args[:2], (app, b"png-a"))
+            self.assertEqual(len(submit_args), 3)
+            self.assertEqual(submit_args[2].frame_cache_key, expected_snapshot.frame_cache_key)
+
+            profiles.active = profile_b
+            profile_a.update(
+                api_key="mutated-a",
+                base_url="https://mutated.example/v2",
+                model="mutated-model",
+                wire_api="chat_completions",
+            )
+            app.custom_source_lang = "ko"
+            app.source_lang_var.value = "ko"
+            app.keep_linebreaks_var.value = False
+            app.custom_ai_latency_mode_var.value = "none"
+            app.custom_ai_ocr_image_format_var.value = "webp"
+            app.custom_ai_ocr_image_mode_var.value = "balanced_webp"
+            app.custom_ai_ocr_image_quality_var.value = 12
+            app.custom_ai_ocr_image_detail_var.value = "low"
+
+            submit_function(*submit_args)
+            callback, callback_args = scheduled.pop()
+            self.assertIs(
+                callback,
+                worker_threads.process_api_ocr_snapshot_response,
+            )
+            self.assertEqual(callback_args[0], app)
+            self.assertEqual(callback_args[2], submit_args[2])
+            callback(*callback_args)
+
+        self.assertEqual(profiles.calls, 1)
+        self.assertEqual(profiles.requested_kinds, ["ocr"])
+        self.assertEqual(
+            app.translation_handler.custom_ai_provider.request_kinds,
+            ["ocr"],
+        )
+        self.assertEqual(encoder_calls, [{
+            "image_format": "png",
+            "mode": "small_grayscale_webp",
+            "quality": 77,
+            "detail": "high",
+            "mime_type": "image/png",
+        }])
+        self.assertEqual(len(received_snapshots), 1)
+        self.assertEqual(received_snapshots[0].profile_copy()["api_key"], "secret-a")
+        self.assertEqual(received_snapshots[0].cache_model_identity, expected_snapshot.cache_model_identity)
+        self.assertEqual(received_snapshots[0].cache_mode_identity, expected_snapshot.cache_mode_identity)
+        self.assertEqual(app.ocr_frame_cache.writes, [
+            (app.ocr_frame_cache.lookups[0], "Frozen OCR text")
+        ])
+
     def test_api_ocr_cache_hit_reuses_cached_text_without_webp_or_submit(self):
         worker_threads = import_worker_threads_for_tests()
         ocr_utils = import_ocr_utils_for_tests()
@@ -2157,6 +2396,61 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertIn("duration=", log_text)
         self.assertNotIn(encoded_base64, log_text)
         self.assertNotIn("data:image", log_text)
+
+    def test_snapshot_backed_encoder_uses_frozen_contract_and_rejects_mime_drift(self):
+        from app_capture_ocr import AppCaptureOcrMixin
+
+        image = Image.new("RGB", (16, 8), (1, 2, 3))
+        app = types.SimpleNamespace()
+        captured = []
+
+        with patch(
+            "app_capture_ocr.encode_image_for_api_ocr_payload",
+            side_effect=lambda _image, **kwargs: (
+                captured.append(kwargs)
+                or types.SimpleNamespace(
+                    data=b"png-bytes",
+                    image_format="png",
+                    mime_type="image/png",
+                )
+            ),
+        ):
+            encoded = AppCaptureOcrMixin.convert_to_api_ocr_image(
+                app,
+                image,
+                image_format="png",
+                mode="small_grayscale_webp",
+                quality=77,
+                detail="high",
+                mime_type="image/png",
+            )
+
+        self.assertEqual(captured, [{
+            "mode": "small_grayscale_webp",
+            "quality": 77,
+            "image_format": "png",
+        }])
+        self.assertEqual(encoded.mime_type, "image/png")
+
+        with patch(
+            "app_capture_ocr.encode_image_for_api_ocr_payload",
+            return_value=types.SimpleNamespace(
+                data=b"wrong-format-bytes",
+                image_format="webp",
+                mime_type="image/webp",
+            ),
+        ):
+            self.assertIsNone(
+                AppCaptureOcrMixin.convert_to_api_ocr_image(
+                    app,
+                    image,
+                    image_format="png",
+                    mode="small_grayscale_webp",
+                    quality=77,
+                    detail="high",
+                    mime_type="image/png",
+                )
+            )
 
     def test_custom_ai_api_ocr_uses_custom_source_language(self):
         worker_threads = import_worker_threads_for_tests()
@@ -3500,6 +3794,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         )
 
     def test_api_ocr_cache_hit_increments_runtime_metric(self):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
         worker_threads = import_worker_threads_for_tests()
         ocr_utils = import_ocr_utils_for_tests()
         metrics = RuntimeMetrics(clock=lambda: 200.0)
@@ -3513,11 +3809,26 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             "model": "vision",
         }
         cache = ocr_utils.OCRFrameCache(max_size=4)
+        snapshot = ApiOcrRequestSnapshot.create(
+            generation=0,
+            sequence=1,
+            provider="custom_ai",
+            profile=profile,
+            source_language="en",
+            keep_linebreaks=False,
+            latency_mode="safe",
+            reasoning_effort="low",
+            image_detail="auto",
+            image_format="webp",
+            image_mode="balanced_webp",
+            image_quality=85,
+            mime_type="image/webp",
+        )
         key = ocr_utils.build_ocr_frame_cache_key(
             "frame-hash",
-            "custom_ai|ocr_profile=ocr-profile|https://provider.example/v1|vision",
+            snapshot.cache_model_identity,
             "en",
-            "api|keep_linebreaks=False|reasoning_effort=low",
+            snapshot.cache_mode_identity,
             screenshot.size,
             region_origin=(10, 20),
         )
@@ -3543,6 +3854,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         worker_threads.run_api_ocr(app, screenshot)
 
+        self.assertEqual(app.batch_sequence_counter, 1)
         self.assertEqual(
             metrics.snapshot()["counters"]["ocr_frame_cache_hit"],
             1,

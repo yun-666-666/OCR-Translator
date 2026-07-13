@@ -328,6 +328,35 @@ def _stable_identity(namespace: str, values: Tuple[Any, ...]) -> str:
     return "api_ocr:{}:{}".format(namespace, digest)
 
 
+def _build_frame_cache_key(
+    frame_hash: Any,
+    cache_model_identity: str,
+    source_language: str,
+    cache_mode_identity: str,
+    region_size: Any,
+    region_origin: Any,
+) -> Tuple[str, str, str, str, int, int, int, int]:
+    """Match the public OCR frame-cache tuple without importing runtime helpers."""
+    try:
+        width, height = region_size
+        if region_origin is None:
+            origin_x, origin_y = 0, 0
+        else:
+            origin_x, origin_y = region_origin
+        return (
+            str(frame_hash),
+            str(cache_model_identity or "").lower(),
+            str(source_language or "").lower(),
+            str(cache_mode_identity or "").lower(),
+            int(origin_x),
+            int(origin_y),
+            int(width),
+            int(height),
+        )
+    except (TypeError, ValueError):
+        raise ValueError("Invalid API OCR frame cache inputs") from None
+
+
 @dataclass(frozen=True, repr=False, init=False)
 class ApiOcrRequestSnapshot:
     """Frozen request fields shared by API OCR execution and cache bookkeeping."""
@@ -350,6 +379,7 @@ class ApiOcrRequestSnapshot:
     image_mode: str
     image_quality: int
     mime_type: str
+    frame_cache_key: Tuple[str, str, str, str, int, int, int, int]
     _profile: Mapping[str, Any] = field(repr=False, compare=False, hash=False)
 
     @classmethod
@@ -376,6 +406,9 @@ class ApiOcrRequestSnapshot:
         image_mode: Any,
         image_quality: Any,
         mime_type: Any,
+        frame_hash: Any = "",
+        region_size: Any = (0, 0),
+        region_origin: Any = None,
     ) -> "ApiOcrRequestSnapshot":
         profile_data = dict(profile or {})
         normalized_reasoning = _normalized_token(reasoning_effort)
@@ -386,7 +419,7 @@ class ApiOcrRequestSnapshot:
         frozen_profile = _freeze_profile_value(profile_data)
         normalized_format = _normalize_image_format(image_format)
         normalized_mime = _normalize_mime_type(mime_type, normalized_format)
-        return cls._from_frozen(
+        snapshot = cls._from_frozen(
             generation=int(generation),
             sequence=int(sequence),
             provider=_normalize_provider(provider),
@@ -405,8 +438,22 @@ class ApiOcrRequestSnapshot:
             image_mode=_normalize_image_mode(image_mode),
             image_quality=_normalize_image_quality(image_quality),
             mime_type=normalized_mime,
+            frame_cache_key=(),
             _profile=frozen_profile,
         )
+        object.__setattr__(
+            snapshot,
+            "frame_cache_key",
+            _build_frame_cache_key(
+                frame_hash,
+                snapshot.cache_model_identity,
+                snapshot.source_language,
+                snapshot.cache_mode_identity,
+                region_size,
+                region_origin,
+            ),
+        )
+        return snapshot
 
     @property
     def request_token(self) -> Tuple[int, int]:

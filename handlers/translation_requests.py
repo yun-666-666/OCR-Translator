@@ -192,30 +192,57 @@ class TranslationRequestsMixin:
             max_length=500,
         )
 
-    def perform_ocr(self, image_data, source_lang, image_mime_type="image/webp"):
+    def perform_ocr(
+        self,
+        image_data,
+        source_lang=None,
+        image_mime_type="image/webp",
+        *,
+        request_snapshot=None,
+    ):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
-        profile = self.app.custom_ai_profiles.get_active_profile("ocr")
-        if not profile:
-            _log_debug("No active custom AI model profile configured for OCR")
-            return "<e>: AI model profile for OCR is missing"
+        profile = {}
         try:
-            latency_mode = self._get_custom_ai_latency_mode()
-            if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
-                latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+            if request_snapshot is not None:
+                profile = request_snapshot.profile_copy()
+                log_profile = request_snapshot.profile_copy()
+                source_lang = request_snapshot.source_language
+                keep_linebreaks = request_snapshot.keep_linebreaks
+                latency_mode = request_snapshot.latency_mode
+                image_detail = request_snapshot.image_detail
+                image_mime_type = request_snapshot.mime_type
+            else:
+                try:
+                    profile = self.app.custom_ai_profiles.get_active_profile("ocr")
+                except Exception as error:
+                    _log_debug(
+                        "Could not resolve active custom AI model profile for OCR: "
+                        f"{type(error).__name__}"
+                    )
+                    return "<e>: AI model profile for OCR is unavailable"
+                if not profile:
+                    _log_debug("No active custom AI model profile configured for OCR")
+                    return "<e>: AI model profile for OCR is missing"
+                log_profile = profile
+                keep_linebreaks = self.app.keep_linebreaks_var.get()
+                latency_mode = self._get_custom_ai_latency_mode()
+                if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+                    latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+                image_detail = (
+                    self.app.get_custom_ai_ocr_image_detail()
+                    if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
+                    else "auto"
+                )
             result, usage, duration = self.custom_ai_provider.recognize(
                 profile,
                 image_data,
                 source_lang,
-                keep_linebreaks=self.app.keep_linebreaks_var.get(),
+                keep_linebreaks=keep_linebreaks,
                 latency_mode=latency_mode,
-                image_detail=(
-                    self.app.get_custom_ai_ocr_image_detail()
-                    if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
-                    else "auto"
-                ),
+                image_detail=image_detail,
                 image_mime_type=image_mime_type,
             )
-            self._log_custom_short_call("ocr", profile, result, usage, duration)
+            self._log_custom_short_call("ocr", log_profile, result, usage, duration)
             return result
         except Exception as e:
             error_text = str(e)

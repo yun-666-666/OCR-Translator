@@ -8171,6 +8171,38 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         self.assertTrue(result.startswith("<e>: Custom AI OCR error: ValueError - vision failed"))
 
+    def test_perform_ocr_profile_lookup_failure_is_content_free_and_skips_provider(self):
+        sensitive_marker = "UNIQUE_OCR_PROFILE_LOOKUP_SECRET_4F2B"
+
+        class Profiles:
+            def get_active_profile(self, _kind):
+                raise RuntimeError(
+                    f"api_key={sensitive_marker} "
+                    "endpoint=https://user:pass@relay.example/v1?token=hidden"
+                )
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.recognize = Mock()
+
+        with patch("handlers.translation_requests._log_debug") as debug_log:
+            result = handler.perform_ocr(b"image", "en")
+
+        logged = "\n".join(
+            str(call.args[0])
+            for call in debug_log.call_args_list
+            if call.args
+        )
+        self.assertEqual(result, "<e>: AI model profile for OCR is unavailable")
+        self.assertNotIn("UnboundLocalError", result)
+        self.assertNotIn(sensitive_marker, result)
+        self.assertNotIn(sensitive_marker, logged)
+        self.assertNotIn("user:pass", logged)
+        handler.custom_ai_provider.recognize.assert_not_called()
+
     def test_perform_ocr_passes_image_mime_type_to_custom_ai_provider(self):
         class Profiles:
             def get_active_profile(self, kind):
@@ -8207,6 +8239,83 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 "image_mime_type"
             ],
             "image/png",
+        )
+
+    def test_perform_ocr_uses_frozen_snapshot_without_re_reading_profile_or_tk(self):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
+        snapshot = ApiOcrRequestSnapshot.create(
+            generation=3,
+            sequence=8,
+            provider="custom_ai",
+            profile={
+                "id": "profile-a",
+                "name": "Frozen Profile",
+                "base_url": "https://a.example/v1",
+                "api_key": "secret-a",
+                "model": "vision-a",
+                "wire_api": "responses",
+            },
+            source_language="ja",
+            keep_linebreaks=True,
+            latency_mode="safe",
+            reasoning_effort="medium",
+            image_detail="high",
+            image_format="png",
+            image_mode="small_grayscale_webp",
+            image_quality=77,
+            mime_type="image/png",
+        )
+
+        class ForbiddenProfiles:
+            def get_active_profile(self, _kind):
+                raise AssertionError("snapshot path must not re-read active profile")
+
+        class ForbiddenVar:
+            def get(self):
+                raise AssertionError("snapshot path must not read Tk variables")
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=ForbiddenProfiles(),
+            keep_linebreaks_var=ForbiddenVar(),
+            custom_ai_latency_mode_var=ForbiddenVar(),
+        )
+        handler = TranslationHandler(app)
+        handler._log_custom_short_call = Mock()
+        received = []
+
+        def recognize(profile, image_data, source_lang, **kwargs):
+            received.append((dict(profile), image_data, source_lang, kwargs))
+            profile["api_key"] = "provider-mutated"
+            return "recognized", {}, 0.01
+
+        handler.custom_ai_provider.recognize = recognize
+
+        result = handler.perform_ocr(
+            b"png-bytes",
+            "wrong-source-language",
+            image_mime_type="image/webp",
+            request_snapshot=snapshot,
+        )
+
+        self.assertEqual(result, "recognized")
+        profile, image_data, source_lang, kwargs = received[0]
+        self.assertEqual(profile["id"], "profile-a")
+        self.assertEqual(profile["base_url"], "https://a.example/v1")
+        self.assertEqual(profile["api_key"], "secret-a")
+        self.assertEqual(profile["model"], "vision-a")
+        self.assertEqual(profile["wire_api"], "responses")
+        self.assertEqual(profile["reasoning_effort"], "medium")
+        self.assertEqual(image_data, b"png-bytes")
+        self.assertEqual(source_lang, "ja")
+        self.assertTrue(kwargs["keep_linebreaks"])
+        self.assertEqual(kwargs["latency_mode"], "safe")
+        self.assertEqual(kwargs["image_detail"], "high")
+        self.assertEqual(kwargs["image_mime_type"], "image/png")
+        self.assertEqual(snapshot.profile_copy()["api_key"], "secret-a")
+        self.assertEqual(
+            handler._log_custom_short_call.call_args.args[1]["api_key"],
+            "secret-a",
         )
 
     def test_custom_ai_translation_uses_configured_context_window_size(self):

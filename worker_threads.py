@@ -15,6 +15,12 @@ import traceback
 from datetime import datetime
 
 from logger import log_debug, log_debug_coalesced, summarize_text_for_log
+from api_ocr_request import ApiOcrRequestSnapshot
+from custom_ai import (
+    CUSTOM_AI_LATENCY_MODE_ADAPTIVE,
+    CUSTOM_AI_LATENCY_MODE_SAFE,
+    normalize_custom_ai_latency_mode,
+)
 from ocr_utils import (
     capture_screen_region,
     build_capture_signature, build_ocr_frame_cache_key,
@@ -406,6 +412,149 @@ def run_translation_thread(app):
 
 # ==================== GENERIC ASYNC API OCR WORKFLOW ====================
 
+def _read_api_ocr_submit_value(app, getter_name, var_name, default):
+    """Read one UI setting on the API OCR submission thread only."""
+    getter = getattr(app, getter_name, None) if getter_name else None
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return default
+    variable = getattr(app, var_name, None)
+    getter = getattr(variable, 'get', None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            return default
+    return default
+
+
+def _build_api_ocr_request_snapshot(
+    app,
+    provider_name,
+    source_lang,
+    sequence,
+    frame_hash,
+    region_size,
+    region_origin,
+):
+    """Freeze Custom AI OCR inputs before cache lookup or image conversion."""
+    if str(provider_name or '').strip().lower() != 'custom_ai':
+        return None
+
+    profiles = getattr(app, 'custom_ai_profiles', None)
+    profile_getter = getattr(profiles, 'get_active_profile', None)
+    if not callable(profile_getter):
+        return None
+    try:
+        profile = profile_getter('ocr')
+    except Exception as error:
+        log_debug(
+            "Could not resolve active Custom AI OCR profile for request snapshot: "
+            f"{type(error).__name__}"
+        )
+        return None
+    if not isinstance(profile, dict) or not profile:
+        log_debug("No active custom AI model profile configured for OCR request snapshot")
+        return None
+
+    reasoning_effort = (
+        profile.get('reasoning_effort')
+        or profile.get('model_reasoning_effort')
+        or 'low'
+    )
+    provider = getattr(
+        getattr(app, 'translation_handler', None),
+        'custom_ai_provider',
+        None,
+    )
+    reasoning_getter = getattr(provider, 'reasoning_effort_request_contract', None)
+    if callable(reasoning_getter):
+        try:
+            reasoning_effort = reasoning_getter(profile, 'ocr')
+        except Exception as error:
+            log_debug(
+                "Could not resolve Custom AI OCR reasoning request contract: "
+                f"{type(error).__name__}"
+            )
+
+    latency_mode = normalize_custom_ai_latency_mode(
+        _read_api_ocr_submit_value(
+            app,
+            'get_custom_ai_latency_mode',
+            'custom_ai_latency_mode_var',
+            CUSTOM_AI_LATENCY_MODE_SAFE,
+        )
+    )
+    if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
+        latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+    image_format = normalize_api_ocr_image_format(
+        _read_api_ocr_submit_value(
+            app,
+            'get_custom_ai_ocr_image_format',
+            'custom_ai_ocr_image_format_var',
+            API_OCR_IMAGE_FORMAT_DEFAULT,
+        )
+    )
+    try:
+        return ApiOcrRequestSnapshot.create(
+            generation=getattr(app, 'api_ocr_request_generation', 0),
+            sequence=sequence,
+            provider=provider_name,
+            profile=profile,
+            source_language=source_lang,
+            keep_linebreaks=_read_api_ocr_submit_value(
+                app,
+                None,
+                'keep_linebreaks_var',
+                False,
+            ),
+            latency_mode=latency_mode,
+            reasoning_effort=_normalize_custom_ai_ocr_reasoning_contract(
+                reasoning_effort
+            ),
+            image_detail=normalize_api_ocr_image_detail(
+                _read_api_ocr_submit_value(
+                    app,
+                    'get_custom_ai_ocr_image_detail',
+                    'custom_ai_ocr_image_detail_var',
+                    API_OCR_IMAGE_DETAIL_DEFAULT,
+                )
+            ),
+            image_format=image_format,
+            image_mode=normalize_api_ocr_image_mode(
+                _read_api_ocr_submit_value(
+                    app,
+                    'get_custom_ai_ocr_image_mode',
+                    'custom_ai_ocr_image_mode_var',
+                    API_OCR_IMAGE_MODE_DEFAULT,
+                )
+            ),
+            image_quality=normalize_api_ocr_image_quality(
+                _read_api_ocr_submit_value(
+                    app,
+                    'get_custom_ai_ocr_image_quality',
+                    'custom_ai_ocr_image_quality_var',
+                    API_OCR_IMAGE_QUALITY_DEFAULT,
+                )
+            ),
+            mime_type={
+                'webp': 'image/webp',
+                'png': 'image/png',
+                'jpeg': 'image/jpeg',
+            }[image_format],
+            frame_hash=frame_hash,
+            region_size=region_size,
+            region_origin=region_origin,
+        )
+    except (TypeError, ValueError) as error:
+        log_debug(
+            "Could not create Custom AI OCR request snapshot: "
+            f"{type(error).__name__}"
+        )
+        return None
+
 def run_api_ocr(app, screenshot_pil):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
@@ -426,27 +575,65 @@ def run_api_ocr(app, screenshot_pil):
             else:
                 source_lang = app.source_lang_var.get()
 
-        ocr_cache_key = None
-        if hasattr(app, 'ocr_frame_cache'):
+        request_snapshot = None
+        is_custom_ai_provider = (
+            str(provider_name or '').strip().lower() == 'custom_ai'
+        )
+        if is_custom_ai_provider and hasattr(app, 'custom_ai_profiles'):
             frame_hash = _get_screenshot_frame_hash(screenshot_pil)
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
-            cache_model_key = _get_api_ocr_cache_model_key(app, provider_name)
-            ocr_cache_key = build_ocr_frame_cache_key(
-                frame_hash,
-                cache_model_key,
+            app.batch_sequence_counter += 1
+            sequence_number = app.batch_sequence_counter
+            request_snapshot = _build_api_ocr_request_snapshot(
+                app,
+                provider_name,
                 source_lang,
-                _get_api_ocr_cache_mode_key(app, provider_name),
+                sequence_number,
+                frame_hash,
                 screenshot_pil.size,
-                region_origin=region_origin,
+                region_origin,
             )
+            if request_snapshot is None:
+                return
+
+        ocr_cache_key = None
+        if hasattr(app, 'ocr_frame_cache'):
+            if request_snapshot is not None:
+                ocr_cache_key = request_snapshot.frame_cache_key
+            else:
+                frame_hash = _get_screenshot_frame_hash(screenshot_pil)
+                region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
+                ocr_cache_key = build_ocr_frame_cache_key(
+                    frame_hash,
+                    _get_api_ocr_cache_model_key(app, provider_name),
+                    source_lang,
+                    _get_api_ocr_cache_mode_key(app, provider_name),
+                    screenshot_pil.size,
+                    region_origin=region_origin,
+                )
             cached_ocr_text = app.ocr_frame_cache.get(ocr_cache_key)
             if cached_ocr_text is not None:
-                app.batch_sequence_counter += 1
-                sequence_number = app.batch_sequence_counter
+                if request_snapshot is None:
+                    app.batch_sequence_counter += 1
+                    sequence_number = app.batch_sequence_counter
                 log_debug(f"LATENCY: API OCR cache hit for {provider_name} batch {sequence_number}")
                 _increment_metric(app, "ocr_frame_cache_hit")
                 _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
-                process_api_ocr_response(app, cached_ocr_text, sequence_number, source_lang, provider_name, ocr_cache_key=ocr_cache_key)
+                if request_snapshot is not None:
+                    process_api_ocr_snapshot_response(
+                        app,
+                        cached_ocr_text,
+                        request_snapshot,
+                    )
+                else:
+                    process_api_ocr_response(
+                        app,
+                        cached_ocr_text,
+                        sequence_number,
+                        source_lang,
+                        provider_name,
+                        ocr_cache_key=ocr_cache_key,
+                    )
                 return
 
         if len(app.active_ocr_calls) >= app.max_concurrent_ocr_calls:
@@ -457,7 +644,17 @@ def run_api_ocr(app, screenshot_pil):
         encoded_image = None
         metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
         if callable(metadata_encoder):
-            encoded_image = metadata_encoder(screenshot_pil)
+            if request_snapshot is not None:
+                encoded_image = metadata_encoder(
+                    screenshot_pil,
+                    image_format=request_snapshot.image_format,
+                    mode=request_snapshot.image_mode,
+                    quality=request_snapshot.image_quality,
+                    detail=request_snapshot.image_detail,
+                    mime_type=request_snapshot.mime_type,
+                )
+            else:
+                encoded_image = metadata_encoder(screenshot_pil)
         else:
             legacy_bytes = app.convert_to_webp_for_api(screenshot_pil)
             if legacy_bytes:
@@ -471,22 +668,48 @@ def run_api_ocr(app, screenshot_pil):
                     },
                 )()
 
+        if request_snapshot is not None and (
+            str(getattr(encoded_image, 'image_format', '')).strip().lower()
+            != request_snapshot.image_format
+            or str(getattr(encoded_image, 'mime_type', '')).strip().lower()
+            != request_snapshot.mime_type
+        ):
+            log_debug(
+                f"Custom AI OCR batch {sequence_number} image contract mismatch; skipping provider call"
+            )
+            return
+
         if not encoded_image or not getattr(encoded_image, 'data', None):
             log_debug(f"Failed to convert image for {provider_name} OCR")
             return
         image_data = encoded_image.data
         image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
 
-        app.batch_sequence_counter += 1
-        sequence_number = app.batch_sequence_counter
+        if request_snapshot is None:
+            app.batch_sequence_counter += 1
+            sequence_number = app.batch_sequence_counter
 
         app.active_ocr_calls.add(sequence_number)
         _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
         try:
-            app.ocr_thread_pool.submit(
-                process_api_ocr_async,
-                app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key, image_mime_type
-            )
+            if request_snapshot is not None:
+                app.ocr_thread_pool.submit(
+                    process_api_ocr_snapshot_async,
+                    app,
+                    image_data,
+                    request_snapshot,
+                )
+            else:
+                app.ocr_thread_pool.submit(
+                    process_api_ocr_async,
+                    app,
+                    image_data,
+                    source_lang,
+                    sequence_number,
+                    provider_name,
+                    ocr_cache_key,
+                    image_mime_type,
+                )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
             raise
@@ -495,7 +718,74 @@ def run_api_ocr(app, screenshot_pil):
     except Exception as e:
         log_debug(f"Error starting API OCR batch: {type(e).__name__} - {e}")
 
-def process_api_ocr_async(app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key=None, image_mime_type="image/webp"):
+def process_api_ocr_snapshot_async(app, image_data, request_snapshot):
+    """Run one fully frozen Custom AI OCR request without configuration reads."""
+    sequence_number = request_snapshot.sequence
+    provider_name = request_snapshot.provider
+    try:
+        latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
+        if sequence_number < latest_started_sequence:
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} is stale (latest started: {latest_started_sequence}); "
+                "skipping provider call"
+            )
+            return
+
+        log_debug(f"Processing {provider_name} OCR batch {sequence_number}")
+        ocr_start_time = time.monotonic()
+        ocr_result = app.translation_handler.perform_ocr(
+            image_data,
+            request_snapshot=request_snapshot,
+        )
+        _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
+        log_debug(
+            f"{provider_name} OCR batch {sequence_number} completed, "
+            f"scheduling response {summarize_text_for_log(ocr_result)}"
+        )
+        app.root.after(
+            0,
+            process_api_ocr_snapshot_response,
+            app,
+            ocr_result,
+            request_snapshot,
+        )
+    except Exception as e:
+        log_debug(f"Error in async {provider_name} OCR batch {sequence_number}: {type(e).__name__} - {e}")
+        error_msg = f"<e>: OCR batch {sequence_number} error: {str(e)}"
+        app.root.after(
+            0,
+            process_api_ocr_snapshot_response,
+            app,
+            error_msg,
+            request_snapshot,
+        )
+    finally:
+        app.active_ocr_calls.discard(sequence_number)
+        _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
+        log_debug(f"{provider_name} OCR batch {sequence_number} finished (active calls: {len(app.active_ocr_calls)})")
+
+
+def process_api_ocr_snapshot_response(app, ocr_result, request_snapshot):
+    """Schedule response bookkeeping solely from an API OCR request snapshot."""
+    return process_api_ocr_response(
+        app,
+        ocr_result,
+        request_snapshot.sequence,
+        request_snapshot.source_language,
+        request_snapshot.provider,
+        ocr_cache_key=request_snapshot.frame_cache_key,
+    )
+
+
+def process_api_ocr_async(
+    app,
+    image_data,
+    source_lang,
+    sequence_number,
+    provider_name,
+    ocr_cache_key=None,
+    image_mime_type="image/webp",
+):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
@@ -520,19 +810,44 @@ def process_api_ocr_async(app, image_data, source_lang, sequence_number, provide
             f"{provider_name} OCR batch {sequence_number} completed, "
             f"scheduling response {summarize_text_for_log(ocr_result)}"
         )
-        app.root.after(0, process_api_ocr_response, app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key)
+        app.root.after(
+            0,
+            process_api_ocr_response,
+            app,
+            ocr_result,
+            sequence_number,
+            source_lang,
+            provider_name,
+            ocr_cache_key,
+        )
 
     except Exception as e:
         log_debug(f"Error in async {provider_name} OCR batch {sequence_number}: {type(e).__name__} - {e}")
         error_msg = f"<e>: OCR batch {sequence_number} error: {str(e)}"
-        app.root.after(0, process_api_ocr_response, app, error_msg, sequence_number, source_lang, provider_name, ocr_cache_key)
+        app.root.after(
+            0,
+            process_api_ocr_response,
+            app,
+            error_msg,
+            sequence_number,
+            source_lang,
+            provider_name,
+            ocr_cache_key,
+        )
 
     finally:
         app.active_ocr_calls.discard(sequence_number)
         _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
         log_debug(f"{provider_name} OCR batch {sequence_number} finished (active calls: {len(app.active_ocr_calls)})")
 
-def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key=None):
+def process_api_ocr_response(
+    app,
+    ocr_result,
+    sequence_number,
+    source_lang,
+    provider_name,
+    ocr_cache_key=None,
+):
     """Process any API OCR response with chronological order enforcement. This is the generic callback."""
     try:
         log_debug(

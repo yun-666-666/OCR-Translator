@@ -45,32 +45,67 @@ def _log_debug(message):
 
 
 class AppCaptureOcrMixin:
-    def convert_to_api_ocr_image(self, pil_image):
+    def convert_to_api_ocr_image(
+        self,
+        pil_image,
+        *,
+        image_format=None,
+        mode=None,
+        quality=None,
+        detail=None,
+        mime_type=None,
+    ):
         """Convert a PIL image to configured API OCR bytes plus MIME metadata."""
-        format_getter = getattr(self, 'get_custom_ai_ocr_image_format', None)
-        mode_getter = getattr(self, 'get_custom_ai_ocr_image_mode', None)
-        quality_getter = getattr(self, 'get_custom_ai_ocr_image_quality', None)
-        detail_getter = getattr(self, 'get_custom_ai_ocr_image_detail', None)
-        if callable(format_getter):
-            image_format = format_getter()
-        else:
-            format_var = getattr(self, 'custom_ai_ocr_image_format_var', None)
-            image_format = normalize_api_ocr_image_format(format_var.get() if format_var is not None else API_OCR_IMAGE_FORMAT_DEFAULT)
-        if callable(mode_getter):
-            mode = mode_getter()
-        else:
-            mode_var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
-            mode = normalize_api_ocr_image_mode(mode_var.get() if mode_var is not None else API_OCR_IMAGE_MODE_DEFAULT)
-        if callable(quality_getter):
-            quality = quality_getter()
-        else:
-            quality_var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
-            quality = normalize_api_ocr_image_quality(quality_var.get() if quality_var is not None else API_OCR_IMAGE_QUALITY_DEFAULT)
-        if callable(detail_getter):
-            detail = detail_getter()
-        else:
-            detail_var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
-            detail = normalize_api_ocr_image_detail(detail_var.get() if detail_var is not None else API_OCR_IMAGE_DETAIL_DEFAULT)
+        frozen_contract = any(
+            value is not None
+            for value in (image_format, mode, quality, detail, mime_type)
+        )
+        if image_format is None:
+            format_getter = getattr(self, 'get_custom_ai_ocr_image_format', None)
+            if callable(format_getter):
+                image_format = format_getter()
+            else:
+                format_var = getattr(self, 'custom_ai_ocr_image_format_var', None)
+                image_format = format_var.get() if format_var is not None else API_OCR_IMAGE_FORMAT_DEFAULT
+        image_format = normalize_api_ocr_image_format(image_format)
+        if mode is None:
+            mode_getter = getattr(self, 'get_custom_ai_ocr_image_mode', None)
+            if callable(mode_getter):
+                mode = mode_getter()
+            else:
+                mode_var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
+                mode = mode_var.get() if mode_var is not None else API_OCR_IMAGE_MODE_DEFAULT
+        mode = normalize_api_ocr_image_mode(mode)
+        if quality is None:
+            quality_getter = getattr(self, 'get_custom_ai_ocr_image_quality', None)
+            if callable(quality_getter):
+                quality = quality_getter()
+            else:
+                quality_var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
+                quality = quality_var.get() if quality_var is not None else API_OCR_IMAGE_QUALITY_DEFAULT
+        quality = normalize_api_ocr_image_quality(quality)
+        if detail is None:
+            detail_getter = getattr(self, 'get_custom_ai_ocr_image_detail', None)
+            if callable(detail_getter):
+                detail = detail_getter()
+            else:
+                detail_var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
+                detail = detail_var.get() if detail_var is not None else API_OCR_IMAGE_DETAIL_DEFAULT
+        detail = normalize_api_ocr_image_detail(detail)
+        expected_mime_type = {
+            'webp': 'image/webp',
+            'png': 'image/png',
+            'jpeg': 'image/jpeg',
+        }[image_format]
+        normalized_mime_type = str(mime_type or expected_mime_type).strip().lower()
+        if normalized_mime_type == 'image/jpg':
+            normalized_mime_type = 'image/jpeg'
+        if frozen_contract and normalized_mime_type != expected_mime_type:
+            _log_debug(
+                "API OCR frozen image contract rejected "
+                f"format={image_format} mime={normalized_mime_type} expected_mime={expected_mime_type}"
+            )
+            return None
         start = time.monotonic()
 
         try:
@@ -81,6 +116,13 @@ class AppCaptureOcrMixin:
                 image_format=image_format,
             )
         except Exception as e:
+            if frozen_contract:
+                _log_debug(
+                    "API OCR frozen image encoding failed "
+                    f"format={image_format} mode={mode} quality={quality} detail={detail}: "
+                    f"{type(e).__name__}"
+                )
+                return None
             _log_debug(
                 "API OCR image encoding failed "
                 f"format={image_format} mode={mode} quality={quality} detail={detail}: "
@@ -102,6 +144,17 @@ class AppCaptureOcrMixin:
                     f"{type(fallback_error).__name__} - {fallback_error}"
                 )
                 return None
+
+        if frozen_contract and (
+            str(getattr(encoded_image, 'image_format', '')).strip().lower() != image_format
+            or str(getattr(encoded_image, 'mime_type', '')).strip().lower() != expected_mime_type
+        ):
+            _log_debug(
+                "API OCR frozen image contract rejected encoder result "
+                f"format={getattr(encoded_image, 'image_format', '')} "
+                f"mime={getattr(encoded_image, 'mime_type', '')}"
+            )
+            return None
 
         duration = time.monotonic() - start
         _log_debug(
@@ -565,4 +618,3 @@ class AppCaptureOcrMixin:
     def toggle_target_visibility(self):
         toggle_target_visibility_om(self)
         self.save_settings()
-
