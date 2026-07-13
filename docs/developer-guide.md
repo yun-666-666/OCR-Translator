@@ -6,6 +6,8 @@ This guide provides information for developers who want to understand or modify 
 
 > **Current runtime note**: This fork currently routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local PaddleOCR or Custom AI OCR. Legacy provider modules and CSV files for Gemini, OpenAI, DeepL, Google Translate, and MarianMT remain in the tree, but they should not be treated as the active UI/runtime translation path unless that code is explicitly re-enabled.
 
+> **Release baseline:** The current source release is `3.10.2`. `requirements.txt` does not install PaddleOCR; local OCR is an optional backend with its own platform-specific installation procedure.
+
 ## Architecture Overview
 
 Game-Changing Translator follows a modular design with the following key components:
@@ -1101,47 +1103,51 @@ For traditional translation services (like Google Translate, DeepL):
 
 ## Packaging
 
-The application can be packaged as a standalone executable:
+The current source release is `3.10.2`. Build only from an **isolated virtual
+environment** so a packaging attempt cannot alter a developer's normal Python,
+PyTorch, or provider configuration.
 
-### Using PyInstaller
+### Prepare the isolated build environment
 
-1. Install PyInstaller:
-   ```
-   pip install pyinstaller
-   ```
+From the repository root on Windows:
 
-2. Use the appropriate spec file:
+```powershell
+py -3.12 -m venv .venv-build
+.\.venv-build\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install PyInstaller
+```
 
-   **For standard CPU-only builds:**
-   ```
-   pyinstaller GameChangingTranslator.spec
-   ```
+`requirements.txt` does not install PaddleOCR. To include local OCR, install
+the optional PaddleOCR backend separately by following the
+[official PaddleOCR installation instructions](https://www.paddleocr.ai/latest/en/version3.x/installation.html)
+for the selected Python version and hardware. Otherwise configure Custom AI
+OCR and do not add PaddleOCR to the build environment.
 
-   **For GPU/CUDA optimized builds:**
-   ```
-   pyinstaller GameChangingTranslator_GPU.spec
-   ```
+### Build an existing PyInstaller specification
 
-   **Alternative compilation using batch script:**
-   ```
-   run_python_compiler.bat
-   ```
+This repository has exactly two maintained build specifications:
 
-3. The executable will be in the `dist/GameChangingTranslator` directory
+- `GameChangingTranslator.spec` for the standard build.
+- `GameChangingTranslator_GPU.spec` for the GPU-oriented build.
 
-**Note:** The GPU version includes additional CUDA libraries and is optimized for systems with NVIDIA graphics cards. Both versions have been recently fixed to resolve numpy docstring compilation errors that previously caused PyInstaller crashes.
+Use the active isolated interpreter and one of those existing files:
 
-### Using cx_Freeze
+```powershell
+python -m PyInstaller GameChangingTranslator.spec
+# or
+python -m PyInstaller GameChangingTranslator_GPU.spec
+```
 
-1. Install cx_Freeze:
-   ```
-   pip install cx_freeze
-   ```
+`compile_app.py` presents the same two choices. Its normal path only verifies
+the active environment and runs PyInstaller; it never uninstalls, upgrades, or
+replaces PyTorch. If PyInstaller is missing, it refuses to install anything
+unless the explicit `--allow-environment-mutation` flag is supplied. Prefer
+installing it in the isolated virtual environment before running the script.
 
-2. Use the provided setup.py file:
-   ```
-   python setup.py build
-   ```
+The generated executable is placed by PyInstaller according to the selected
+specification. Do not treat historical batch scripts or cx_Freeze examples as
+supported packaging paths.
 
 ## Testing
 

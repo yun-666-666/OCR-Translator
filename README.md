@@ -4,6 +4,8 @@ Copyright (C) 2025-2026 Tomasz Kaminski
 
 This fork was modified with assistance from GPT-5.5.
 
+Current source release: **3.10.2**.
+
 ![Game-Changing Translator Logo](docs/screenshots/readme_screen.jpg)
 
 ## Overview
@@ -37,7 +39,7 @@ Older built-in provider modules and historical resources may still exist in the 
 - Windows 10 or Windows 11
 - Python 3.9-3.12 when running from source
 
-The bundled application does not require a separate OCR engine installation. Source users should install the Python dependencies and configure PaddleOCR or Custom AI from the app settings.
+The bundled application does not require a separate OCR engine installation. `requirements.txt` does not install PaddleOCR. Source users who want local OCR must install the optional PaddleOCR backend separately by following the [official PaddleOCR installation instructions](https://www.paddleocr.ai/latest/en/version3.x/installation.html) for their Python version and hardware, then configure its source directory in Settings. Custom AI OCR does not require PaddleOCR.
 
 ### Setup From Source
 
@@ -54,7 +56,9 @@ The bundled application does not require a separate OCR engine installation. Sou
    pip install -r requirements.txt
    ```
 
-3. Run the application:
+3. Optional local OCR: install the optional PaddleOCR backend separately using the official supported procedure linked above. Skip this step when using only Custom AI OCR.
+
+4. Run the application:
 
    ```bash
    python main.py

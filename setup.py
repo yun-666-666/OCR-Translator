@@ -41,7 +41,7 @@ setup(
     python_requires=">=3.9,<3.13",
     include_package_data=True,
     package_data={
-        "ocr_translator": ["*.csv"],
+        "resources": ["*.csv"],
     },
     entry_points={
         "console_scripts": [
