@@ -3,6 +3,8 @@ import configparser
 import os
 import sys
 import uuid
+from datetime import datetime
+from atomic_file_io import write_atomically, write_bytes_atomically
 from credential_store import create_default_credential_store
 from logger import log_debug
 from ocr_utils import (
@@ -241,25 +243,40 @@ def migrate_provider_api_keys_to_credentials(config_or_settings, credential_stor
 
 
 def _write_config_atomic(config_object, config_path):
-    absolute_path = os.path.abspath(config_path)
-    directory = os.path.dirname(absolute_path)
-    temporary_path = os.path.join(
-        directory,
-        f".{os.path.basename(config_path)}.{uuid.uuid4().hex}.tmp",
+    return write_atomically(
+        config_path,
+        config_object.write,
+        mode="x",
+        encoding="utf-8",
+        open_file=open,
+        replace_file=os.replace,
+        fsync_file=os.fsync,
+        remove_file=os.remove,
     )
-    try:
-        with open(temporary_path, 'x', encoding='utf-8') as f:
-            config_object.write(f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary_path, absolute_path)
-        temporary_path = None
-    finally:
-        if temporary_path is not None:
-            try:
-                os.remove(temporary_path)
-            except FileNotFoundError:
-                pass
+
+
+def _write_bytes_atomic(file_path, content):
+    return write_bytes_atomically(
+        file_path,
+        content,
+        open_file=open,
+        replace_file=os.replace,
+        fsync_file=os.fsync,
+        remove_file=os.remove,
+    )
+
+
+def _backup_malformed_config(config_path):
+    absolute_path = os.path.abspath(config_path)
+    with open(absolute_path, "rb") as config_file:
+        original_content = config_file.read()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    backup_path = os.path.join(
+        os.path.dirname(absolute_path),
+        f".corrupt-{os.path.basename(absolute_path)}-{timestamp}-{uuid.uuid4().hex}.bak",
+    )
+    _write_bytes_atomic(backup_path, original_content)
+    return backup_path
 
 
 def get_provider_api_key(config_or_settings, setting_key, credential_store=None):
@@ -290,14 +307,32 @@ def load_app_config():
     dynamic_defaults = DEFAULT_CONFIG_SETTINGS.copy()
     dynamic_defaults['marian_models_file'] = default_marian_models_path_val
 
+    malformed_config_backup_failed = False
     if os.path.exists(config_path):
         try:
             config.read(config_path, encoding='utf-8')
             if 'Settings' not in config:
                 log_debug("Config file loaded but missing [Settings] section. Adding.")
                 config['Settings'] = {}
-        except Exception as e:
-            log_debug(f"Error reading config file {config_path}: {e}. Using defaults.")
+        except (configparser.Error, UnicodeError):
+            try:
+                _backup_malformed_config(config_path)
+            except Exception as backup_error:
+                malformed_config_backup_failed = True
+                log_debug(
+                    "Malformed config backup failed: "
+                    f"{type(backup_error).__name__}"
+                )
+            else:
+                log_debug("Malformed config backed up before default recovery.")
+            config = configparser.ConfigParser()
+            config['Settings'] = {}
+        except Exception as error:
+            log_debug(
+                "Error reading config file: "
+                f"{type(error).__name__}; using defaults."
+            )
+            config = configparser.ConfigParser()
             config['Settings'] = {}
     else:
          log_debug(f"Config file {config_path} not found. Creating with defaults.")
@@ -371,7 +406,7 @@ def load_app_config():
         settings_changed = True
         log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
 
-    skip_automatic_rewrite = False
+    skip_automatic_rewrite = malformed_config_backup_failed
     credential_migration = False
     try:
         credential_migration = migrate_provider_api_keys_to_credentials(

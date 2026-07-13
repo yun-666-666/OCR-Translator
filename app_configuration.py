@@ -6,6 +6,7 @@ import sys
 import time
 from tkinter import messagebox
 
+from atomic_file_io import write_text_atomically
 from custom_ai import CUSTOM_AI_LATENCY_MODE_SAFE, normalize_custom_ai_latency_mode
 from gui_builder import (
     create_custom_prompt_tab,
@@ -36,6 +37,19 @@ def _log_debug(message):
     facade = sys.modules.get("app_logic")
     if facade is not None:
         return facade.log_debug(message)
+
+
+def _write_custom_prompt_atomic(prompt_path, text):
+    """Publish a UTF-8-SIG prompt only after its complete replacement is ready."""
+    return write_text_atomically(
+        prompt_path,
+        text,
+        encoding="utf-8-sig",
+        open_file=open,
+        replace_file=os.replace,
+        fsync_file=os.fsync,
+        remove_file=os.remove,
+    )
 
 
 class AppConfigurationMixin:
@@ -652,32 +666,41 @@ class AppConfigurationMixin:
         try:
             if os.path.exists(self.custom_prompt_file):
                 with open(self.custom_prompt_file, 'r', encoding='utf-8-sig') as f:
-                    self.custom_prompt_text = f.read()
-                if not self.custom_prompt_text.strip():
+                    loaded_prompt = f.read()
+                if not loaded_prompt.strip():
+                    _write_custom_prompt_atomic(
+                        self.custom_prompt_file,
+                        DEFAULT_CUSTOM_PROMPT,
+                    )
                     self.custom_prompt_text = DEFAULT_CUSTOM_PROMPT
-                    with open(self.custom_prompt_file, 'w', encoding='utf-8-sig') as f:
-                        f.write(self.custom_prompt_text)
                     _log_debug("Initialized empty custom prompt with default text")
                 else:
-                    _log_debug(f"Loaded custom prompt ({len(self.custom_prompt_text)} characters)")
+                    self.custom_prompt_text = loaded_prompt
+                    _log_debug(f"Loaded custom prompt ({len(loaded_prompt)} characters)")
             else:
+                _write_custom_prompt_atomic(
+                    self.custom_prompt_file,
+                    DEFAULT_CUSTOM_PROMPT,
+                )
                 self.custom_prompt_text = DEFAULT_CUSTOM_PROMPT
-                with open(self.custom_prompt_file, 'w', encoding='utf-8-sig') as f:
-                    f.write(self.custom_prompt_text)
                 _log_debug("Created custom prompt file with default text")
-        except Exception as e:
-            _log_debug(f"Error loading custom prompt: {e}")
+        except Exception as error:
+            _log_debug(
+                "Error loading custom prompt: "
+                f"{type(error).__name__}"
+            )
             self.custom_prompt_text = DEFAULT_CUSTOM_PROMPT
 
     def save_custom_prompt(self, text):
         """Saves the custom prompt text to file."""
         try:
+            _write_custom_prompt_atomic(self.custom_prompt_file, text)
             self.custom_prompt_text = text
-            with open(self.custom_prompt_file, 'w', encoding='utf-8-sig') as f:
-                f.write(text)
             _log_debug(f"Saved custom prompt ({len(text)} characters)")
             return True
-        except Exception as e:
-            _log_debug(f"Error saving custom prompt: {e}")
+        except Exception as error:
+            _log_debug(
+                "Error saving custom prompt: "
+                f"{type(error).__name__}"
+            )
             return False
-
