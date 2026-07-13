@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import hashlib
+import math
 import sys
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -17,6 +18,10 @@ from custom_ai import (
     normalize_custom_ai_wire_api,
 )
 from diagnostic_sanitizer import sanitize_error_text
+from custom_ai_deadline import (
+    CustomAIRequestDeadline,
+    CustomAIRequestDeadlineExceeded,
+)
 from logger import summarize_text_for_log
 
 CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
@@ -296,6 +301,19 @@ class TranslationRequestsMixin:
             _log_debug(f"Legacy translation model '{selected_model}' is disabled; using custom_ai route")
             selected_model = 'custom_ai'
 
+        if request_snapshot is None:
+            try:
+                request_snapshot = self.get_custom_ai_translation_request_snapshot(
+                    cleaned_text_main,
+                    commit=False,
+                    requested_at_monotonic=translation_start_monotonic,
+                )
+            except Exception as snapshot_error:
+                _log_debug(
+                    "Custom AI translation snapshot failed: "
+                    f"{type(snapshot_error).__name__}"
+                )
+
         return self._custom_ai_translate(
             cleaned_text_main,
             translation_start_monotonic,
@@ -404,6 +422,7 @@ class TranslationRequestsMixin:
         self,
         text_content,
         commit=False,
+        requested_at_monotonic=None,
     ):
         cleaned_text = text_content.strip() if text_content else ""
         if not cleaned_text or self.is_placeholder_text(cleaned_text):
@@ -431,6 +450,17 @@ class TranslationRequestsMixin:
                 10.0,
                 latency_mode=latency_mode,
             )
+        try:
+            request_arrival = float(requested_at_monotonic)
+        except (TypeError, ValueError, OverflowError):
+            request_arrival = time.monotonic()
+        if not math.isfinite(request_arrival):
+            request_arrival = time.monotonic()
+        request_deadline = CustomAIRequestDeadline.from_timeout(
+            timeout_decision.seconds,
+            now=request_arrival,
+            fallback_seconds=10.0,
+        )
         profile, source_lang, target_lang, cache_params = self._get_custom_ai_cache_profile_and_params(
             current_source=cleaned_text,
             latency_mode=latency_mode,
@@ -460,6 +490,8 @@ class TranslationRequestsMixin:
             "timeout_reason": timeout_decision.reason,
             "timeout_p90_seconds": timeout_decision.p90_seconds,
             "timeout_sample_count": timeout_decision.sample_count,
+            "requested_at_monotonic": request_arrival,
+            "deadline_monotonic": request_deadline.deadline_monotonic,
             "profile": dict(profile) if profile else None,
             "source_lang": source_lang,
             "target_lang": target_lang,
@@ -805,6 +837,20 @@ class TranslationRequestsMixin:
                 latency_mode=latency_mode,
                 profile=profile,
             )
+        if timeout_seconds is None and use_request_snapshot:
+            timeout_seconds = request_snapshot.get("timeout_seconds")
+        deadline_monotonic = None
+        if use_request_snapshot:
+            deadline_monotonic = request_snapshot.get("deadline_monotonic")
+        if deadline_monotonic is None:
+            deadline_monotonic = CustomAIRequestDeadline.from_timeout(
+                timeout_seconds,
+                fallback_seconds=10.0,
+            ).deadline_monotonic
+        else:
+            deadline_monotonic = CustomAIRequestDeadline.from_absolute(
+                deadline_monotonic
+            ).deadline_monotonic
         if not profile:
             return "AI model profile for translation is missing."
 
@@ -812,22 +858,34 @@ class TranslationRequestsMixin:
         keep_linebreaks = bool(cache_params.get("keep_linebreaks", False))
         custom_prompt = cache_params.get("custom_prompt", "")
         if latency_mode != CUSTOM_AI_LATENCY_MODE_RACE:
-            return self._custom_ai_translate_with_failover(
-                profile,
-                cleaned_text_main,
-                source_lang,
-                target_lang,
-                context,
-                keep_linebreaks,
-                custom_prompt=custom_prompt,
-                latency_mode=latency_mode,
-                stream_callback=stream_callback,
-                timeout_seconds=timeout_seconds,
-                translation_start_monotonic=translation_start_monotonic,
-                translation_sequence=translation_sequence,
-                context_generation=context_generation,
-                primary_cache_params=cache_params,
-            )
+            try:
+                return self._custom_ai_translate_with_failover(
+                    profile,
+                    cleaned_text_main,
+                    source_lang,
+                    target_lang,
+                    context,
+                    keep_linebreaks,
+                    custom_prompt=custom_prompt,
+                    latency_mode=latency_mode,
+                    stream_callback=stream_callback,
+                    timeout_seconds=timeout_seconds,
+                    translation_start_monotonic=translation_start_monotonic,
+                    translation_sequence=translation_sequence,
+                    context_generation=context_generation,
+                    primary_cache_params=cache_params,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except CustomAIRequestDeadlineExceeded as error:
+                self._record_custom_ai_latency_observation(
+                    time.monotonic() - translation_start_monotonic,
+                    success=False,
+                    profile=profile,
+                )
+                return (
+                    "Custom AI translation error: "
+                    f"{type(error).__name__} - {error}"
+                )
 
         cached_result = self._get_custom_ai_cached_translation(
             cleaned_text_main,
@@ -868,6 +926,7 @@ class TranslationRequestsMixin:
                     keep_linebreaks,
                     custom_prompt=custom_prompt,
                     timeout_seconds=timeout_seconds,
+                    deadline_monotonic=deadline_monotonic,
                 )
             else:
                 translated_api_text, usage, duration = self.custom_ai_provider.translate(
@@ -881,6 +940,7 @@ class TranslationRequestsMixin:
                     latency_mode=latency_mode,
                     stream_callback=stream_callback if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM else None,
                     timeout_seconds=timeout_seconds,
+                    deadline_monotonic=deadline_monotonic,
                 )
                 winning_profile = profile
                 cache_params = self._cache_params_for_profile(
@@ -1006,7 +1066,17 @@ class TranslationRequestsMixin:
         translation_sequence=None,
         context_generation=None,
         primary_cache_params=None,
+        deadline_monotonic=None,
     ):
+        if deadline_monotonic is None:
+            request_deadline = CustomAIRequestDeadline.from_timeout(
+                timeout_seconds,
+                fallback_seconds=10.0,
+            )
+        else:
+            request_deadline = CustomAIRequestDeadline.from_absolute(
+                deadline_monotonic
+            )
         failures = []
         primary_id = str(primary_profile.get("id") or "").strip()
         candidate_states = []
@@ -1046,6 +1116,7 @@ class TranslationRequestsMixin:
                 continue
 
             try:
+                request_deadline.http_timeout()
                 translated_text, usage, duration = self.custom_ai_provider.translate(
                     candidate,
                     text,
@@ -1061,7 +1132,10 @@ class TranslationRequestsMixin:
                         else None
                     ),
                     timeout_seconds=timeout_seconds,
+                    deadline_monotonic=request_deadline.deadline_monotonic,
                 )
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as error:
                 error_text = self._sanitize_custom_ai_profile_error(
                     error,
@@ -1166,13 +1240,24 @@ class TranslationRequestsMixin:
         keep_linebreaks,
         custom_prompt=None,
         timeout_seconds=None,
+        deadline_monotonic=None,
     ):
+        if deadline_monotonic is None:
+            request_deadline = CustomAIRequestDeadline.from_timeout(
+                timeout_seconds,
+                fallback_seconds=10.0,
+            )
+        else:
+            request_deadline = CustomAIRequestDeadline.from_absolute(
+                deadline_monotonic
+            )
         if custom_prompt is None:
             custom_prompt = getattr(self.app, 'custom_prompt_text', '')
         candidates = self._get_custom_ai_race_profiles(active_profile)
         if len(candidates) <= 1:
             candidate = candidates[0] if candidates else active_profile
             try:
+                request_deadline.http_timeout()
                 translated, usage, duration = (
                     self.custom_ai_provider.translate(
                         candidate,
@@ -1184,8 +1269,11 @@ class TranslationRequestsMixin:
                         keep_linebreaks=keep_linebreaks,
                         latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
                         timeout_seconds=timeout_seconds,
+                        deadline_monotonic=request_deadline.deadline_monotonic,
                     )
                 )
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as error:
                 error_text = self._sanitize_custom_ai_profile_error(
                     error,
@@ -1219,6 +1307,7 @@ class TranslationRequestsMixin:
         errors = []
         try:
             for candidate in candidates:
+                request_deadline.http_timeout()
                 identity = self._custom_ai_race_profile_identity(candidate)
                 with self._custom_race_state_lock:
                     self._custom_race_inflight_profiles.add(identity)
@@ -1234,6 +1323,7 @@ class TranslationRequestsMixin:
                         keep_linebreaks=keep_linebreaks,
                         latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
                         timeout_seconds=timeout_seconds,
+                        deadline_monotonic=request_deadline.deadline_monotonic,
                     )
                 except Exception:
                     self._release_custom_ai_race_profile(identity)
@@ -1245,44 +1335,56 @@ class TranslationRequestsMixin:
                     )
                 )
 
-            for future in concurrent.futures.as_completed(future_to_profile):
-                candidate = future_to_profile[future]
-                try:
-                    translated, usage, duration = future.result()
-                except Exception as e:
-                    error_text = self._sanitize_custom_ai_profile_error(
-                        e,
+            try:
+                completed_futures = concurrent.futures.as_completed(
+                    future_to_profile,
+                    timeout=request_deadline.http_timeout(),
+                )
+                for future in completed_futures:
+                    candidate = future_to_profile[future]
+                    try:
+                        translated, usage, duration = future.result()
+                        request_deadline.http_timeout()
+                    except CustomAIRequestDeadlineExceeded:
+                        raise
+                    except Exception as e:
+                        error_text = self._sanitize_custom_ai_profile_error(
+                            e,
+                            candidate,
+                        )
+                        errors.append(
+                            f"{candidate.get('name', 'Custom AI')}: "
+                            f"{error_text}"
+                        )
+                        continue
+                    _log_debug(
+                        "LATENCY: custom_ai race winner "
+                        f"profile={candidate.get('name', 'Custom AI')} "
+                        f"duration={duration:.3f}s candidates={len(candidates)}"
+                    )
+                    self._note_custom_ai_race_winner(candidate)
+                    self._release_custom_ai_race_profile(
+                        self._custom_ai_race_profile_identity(candidate)
+                    )
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    shutdown_started = True
+                    return (
+                        translated,
+                        usage,
+                        duration,
+                        self._cache_params_for_profile(
+                            candidate,
+                            custom_prompt=custom_prompt,
+                            keep_linebreaks=keep_linebreaks,
+                            context=context,
+                            latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                        ),
                         candidate,
                     )
-                    errors.append(
-                        f"{candidate.get('name', 'Custom AI')}: "
-                        f"{error_text}"
-                    )
-                    continue
-                _log_debug(
-                    "LATENCY: custom_ai race winner "
-                    f"profile={candidate.get('name', 'Custom AI')} "
-                    f"duration={duration:.3f}s candidates={len(candidates)}"
-                )
-                self._note_custom_ai_race_winner(candidate)
-                self._release_custom_ai_race_profile(
-                    self._custom_ai_race_profile_identity(candidate)
-                )
-                executor.shutdown(wait=False, cancel_futures=True)
-                shutdown_started = True
-                return (
-                    translated,
-                    usage,
-                    duration,
-                    self._cache_params_for_profile(
-                        candidate,
-                        custom_prompt=custom_prompt,
-                        keep_linebreaks=keep_linebreaks,
-                        context=context,
-                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
-                    ),
-                    candidate,
-                )
+            except concurrent.futures.TimeoutError as error:
+                raise CustomAIRequestDeadlineExceeded(
+                    "Custom AI request deadline expired"
+                ) from error
         finally:
             if not shutdown_started:
                 executor.shutdown(wait=False, cancel_futures=True)

@@ -10351,6 +10351,215 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             self.assertEqual(second_handler._custom_ai_translate("current", 0.0), "translated")
 
 
+    def test_translation_request_snapshot_freezes_deadline_at_original_arrival(self):
+        profile = {
+            "id": "deadline-profile",
+            "name": "Deadline profile",
+            "base_url": "https://deadline.example/v1",
+            "api_key": "deadline-secret",
+            "model": "deadline-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Queued subtitle",
+                requested_at_monotonic=100.0,
+            )
+
+            self.assertEqual(snapshot["requested_at_monotonic"], 100.0)
+            self.assertEqual(
+                snapshot["deadline_monotonic"],
+                100.0 + snapshot["timeout_seconds"],
+            )
+        finally:
+            handler.close()
+
+    def test_expired_request_snapshot_makes_zero_provider_calls(self):
+        profile = {
+            "id": "expired-profile",
+            "name": "Expired profile",
+            "base_url": "https://expired.example/v1",
+            "api_key": "expired-secret",
+            "model": "deadline-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Expired subtitle",
+                requested_at_monotonic=0.0,
+            )
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("expired requests must not reach providers")
+            )
+
+            result = handler._custom_ai_translate(
+                "Expired subtitle",
+                0.0,
+                request_snapshot=snapshot,
+            )
+
+            self.assertIn("Custom AI request deadline expired", result)
+            handler.custom_ai_provider.translate.assert_not_called()
+        finally:
+            handler.close()
+
+    def test_failover_does_not_call_next_provider_after_deadline_expires(self):
+        from custom_ai_deadline import CustomAIRequestDeadlineExceeded
+
+        primary = {
+            "id": "primary",
+            "name": "Primary",
+            "base_url": "https://primary.example/v1",
+            "api_key": "primary-key",
+            "model": "deadline-model",
+        }
+        fallback = {
+            "id": "fallback",
+            "name": "Fallback",
+            "base_url": "https://fallback.example/v1",
+            "api_key": "fallback-key",
+            "model": "deadline-model",
+        }
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        clock = Clock()
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+        handler._get_custom_ai_failover_profiles = Mock(
+            return_value=[primary, fallback]
+        )
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.custom_ai_provider.mark_profile_unavailable = Mock()
+        called_ids = []
+
+        def consume_budget_then_fail(profile, *args, **kwargs):
+            called_ids.append(profile["id"])
+            clock.now = 102.0
+            raise ValueError("primary unavailable")
+
+        handler.custom_ai_provider.translate = Mock(
+            side_effect=consume_budget_then_fail
+        )
+        try:
+            with patch("custom_ai_deadline.time.monotonic", clock.monotonic):
+                with self.assertRaises(CustomAIRequestDeadlineExceeded):
+                    handler._custom_ai_translate_with_failover(
+                        primary,
+                        "Queued subtitle",
+                        "en",
+                        "zh-CN",
+                        [],
+                        False,
+                        deadline_monotonic=101.0,
+                    )
+
+            self.assertEqual(called_ids, ["primary"])
+            handler.custom_ai_provider.mark_profile_unavailable.assert_called_once()
+        finally:
+            handler.close()
+
+    def test_race_deadline_returns_before_late_candidates_can_win(self):
+        from custom_ai_deadline import CustomAIRequestDeadlineExceeded
+
+        first = {
+            "id": "first",
+            "name": "First",
+            "base_url": "https://first.example/v1",
+            "api_key": "first-key",
+            "model": "deadline-model",
+        }
+        second = {
+            "id": "second",
+            "name": "Second",
+            "base_url": "https://second.example/v1",
+            "api_key": "second-key",
+            "model": "deadline-model",
+        }
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [first, second]
+
+        release_late_results = threading.Event()
+        started = threading.Event()
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            custom_prompt_text="",
+            keep_linebreaks_var=DummyVar(False),
+            custom_context_window_var=DummyVar(0),
+        )
+        handler = TranslationHandler(app)
+        handler.custom_ai_provider.get_cooldown_remaining = Mock(return_value=0.0)
+
+        def late_translate(*args, **kwargs):
+            started.set()
+            release_late_results.wait(timeout=1.0)
+            return "late result", {}, 1.0
+
+        handler.custom_ai_provider.translate = Mock(side_effect=late_translate)
+        try:
+            deadline = time.monotonic() + 0.1
+            started_at = time.monotonic()
+            with self.assertRaises(CustomAIRequestDeadlineExceeded):
+                handler._custom_ai_translate_race(
+                    first,
+                    "Queued subtitle",
+                    "en",
+                    "zh-CN",
+                    [],
+                    False,
+                    deadline_monotonic=deadline,
+                )
+            self.assertTrue(started.is_set())
+            self.assertLess(time.monotonic() - started_at, 0.5)
+
+            release_late_results.set()
+            release_deadline = time.monotonic() + 1.0
+            while (
+                handler._custom_race_inflight_profiles
+                and time.monotonic() < release_deadline
+            ):
+                time.sleep(0.01)
+            self.assertEqual(handler._custom_race_inflight_profiles, set())
+        finally:
+            release_late_results.set()
+            handler.close()
+
+
 class ModelFilterTests(unittest.TestCase):
     def test_filter_model_values_matches_case_insensitive_substrings(self):
         models = ["openai/gpt-5.5", "deepseek/deepseek-v4", "Google/Gemini-3.5"]

@@ -4381,6 +4381,179 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             requested_at_monotonic=99.75,
         )
 
+    def test_pending_translation_reuses_initial_deadline_snapshot_until_flush(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        request_snapshot = {
+            "inflight_key": ("custom_ai", "Latest", "frozen-route"),
+            "latency_mode": "safe",
+            "requested_at_monotonic": 99.75,
+            "timeout_seconds": 4.0,
+            "deadline_monotonic": 103.75,
+        }
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads._queue_pending_translation_request(
+                app,
+                "Latest",
+                2,
+                0.5,
+                "submit interval",
+                requested_at_monotonic=99.75,
+                request_snapshot=request_snapshot,
+            )
+
+        self.assertIs(
+            app.pending_translation_request["request_snapshot"],
+            request_snapshot,
+        )
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            with patch.object(worker_threads.time, "monotonic", return_value=100.5):
+                worker_threads._flush_pending_translation_request(
+                    app,
+                    app.pending_translation_flush_generation,
+                )
+
+        start_translation.assert_called_once_with(
+            app,
+            "Latest",
+            2,
+            requested_at_monotonic=99.75,
+            request_snapshot=request_snapshot,
+        )
+
+    def test_start_translation_builds_one_snapshot_after_cache_miss_and_before_queue(self):
+        worker_threads = import_worker_threads_for_tests()
+        request_snapshot = {
+            "inflight_key": ("custom_ai", "Queued", "frozen-route"),
+            "latency_mode": "safe",
+            "requested_at_monotonic": 90.0,
+            "timeout_seconds": 4.0,
+            "deadline_monotonic": 94.0,
+        }
+        snapshot_calls = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+                requested_at_monotonic=None,
+            ):
+                snapshot_calls.append((text, commit, requested_at_monotonic))
+                return request_snapshot
+
+            def get_translation_submit_interval_seconds(self, text):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **kwargs):
+                return 2.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=Mock()),
+            initialize_async_translation_infrastructure=lambda: None,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            translation_sequence_counter=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            last_translation_submit_monotonic=0.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads.start_async_translation(
+                app,
+                "Queued",
+                5,
+                requested_at_monotonic=90.0,
+            )
+
+        self.assertEqual(snapshot_calls, [("Queued", False, 90.0)])
+        self.assertIs(
+            app.pending_translation_request["request_snapshot"],
+            request_snapshot,
+        )
+
+    def test_start_translation_reuses_supplied_queue_snapshot_without_rebuilding(self):
+        worker_threads = import_worker_threads_for_tests()
+        request_snapshot = {
+            "inflight_key": ("custom_ai", "Ready", "frozen-route"),
+            "latency_mode": "safe",
+            "requested_at_monotonic": 90.0,
+            "timeout_seconds": 4.0,
+            "deadline_monotonic": 94.0,
+        }
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(self, *args, **kwargs):
+                raise AssertionError("queued snapshot must be reused")
+
+            def get_translation_submit_interval_seconds(self, text):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Mock()
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(after=Mock()),
+            initialize_async_translation_infrastructure=lambda: None,
+            translation_handler=Handler(),
+            translation_thread_pool=pool,
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            translation_sequence_counter=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            last_translation_submit_monotonic=0.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads.start_async_translation(
+                app,
+                "Ready",
+                6,
+                requested_at_monotonic=90.0,
+                request_snapshot=request_snapshot,
+            )
+
+        pool.submit.assert_called_once()
+        self.assertIs(pool.submit.call_args.args[-1], request_snapshot)
+
     def test_stale_pending_translation_timer_cannot_consume_latest_request(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []
@@ -6037,9 +6210,102 @@ class LiveCustomAIModelSwitchTests(unittest.TestCase):
             app,
             "newer subtitle",
             4,
-            requested_at_monotonic=51.0,
             configuration_refresh=True,
         )
+
+    def test_profile_refresh_reanchors_deadline_at_refresh_boundary(self):
+        worker_threads = import_worker_threads_for_tests()
+        snapshot_arrivals = []
+        executed_snapshots = []
+        scheduled = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+                requested_at_monotonic=None,
+            ):
+                snapshot_arrivals.append(requested_at_monotonic)
+                return {
+                    "inflight_key": ("custom_ai", text, "refreshed-profile"),
+                    "latency_mode": "safe",
+                    "requested_at_monotonic": requested_at_monotonic,
+                    "timeout_seconds": 4.0,
+                    "deadline_monotonic": requested_at_monotonic + 4.0,
+                }
+
+            def get_translation_submit_interval_seconds(self, text):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+            def translate_text_with_timeout(self, text, **kwargs):
+                executed_snapshots.append(kwargs["request_snapshot"])
+                return "refreshed translation"
+
+        class ImmediatePool:
+            def submit(self, callback, *args):
+                callback(*args)
+
+        candidate = {
+            "text": "old-deadline subtitle",
+            "ocr_sequence_number": 8,
+            "requested_at_monotonic": 100.0,
+            "request_snapshot": {
+                "deadline_monotonic": 104.0,
+            },
+        }
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            latest_translation_candidate=dict(candidate),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=2,
+            translation_profile_refresh_generation=3,
+            translation_handler=Handler(),
+            translation_thread_pool=ImmediatePool(),
+            initialize_async_translation_infrastructure=lambda: None,
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            translation_sequence_counter=0,
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            last_translation_submit_monotonic=0.0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=200.0):
+            refreshed = worker_threads._apply_translation_profile_refresh(
+                app,
+                3,
+                candidate,
+                "profile changed",
+            )
+
+        self.assertTrue(refreshed)
+        self.assertEqual(snapshot_arrivals, [200.0])
+        self.assertEqual(len(executed_snapshots), 1)
+        self.assertEqual(
+            executed_snapshots[0]["deadline_monotonic"],
+            204.0,
+        )
+        self.assertEqual(app.latest_translation_candidate["ocr_sequence_number"], 8)
+        self.assertEqual(scheduled[0][0], 0)
 
     def test_profile_change_can_use_bounded_overflow_without_age_wait(self):
         import inspect

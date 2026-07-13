@@ -255,6 +255,9 @@ def _flush_pending_translation_request(app, flush_generation=None):
                 "requested_at_monotonic"
             )
         }
+        request_snapshot = pending_request.get("request_snapshot")
+        if request_snapshot is not None:
+            submit_kwargs["request_snapshot"] = request_snapshot
         if pending_request.get("configuration_refresh", False):
             submit_kwargs["configuration_refresh"] = True
         _start_async_translation(
@@ -278,6 +281,7 @@ def _queue_pending_translation_request(
     reason,
     requested_at_monotonic=None,
     configuration_refresh=False,
+    request_snapshot=None,
 ):
     now = time.monotonic()
     if requested_at_monotonic is None:
@@ -289,6 +293,8 @@ def _queue_pending_translation_request(
         "requested_at_monotonic": float(requested_at_monotonic),
         "configuration_refresh": bool(configuration_refresh),
     }
+    if request_snapshot is not None:
+        app.pending_translation_request["request_snapshot"] = request_snapshot
     _log_debug_coalesced(
         "translation-pending-queue",
         "LATENCY: queued latest translation request "
@@ -346,6 +352,7 @@ def _expedite_pending_translation_request(app):
         configuration_refresh=bool(
             pending_request.get("configuration_refresh", False)
         ),
+        request_snapshot=pending_request.get("request_snapshot"),
     )
 
 
@@ -386,7 +393,6 @@ def _apply_translation_profile_refresh(
         app,
         candidate["text"],
         candidate.get("ocr_sequence_number", 0),
-        requested_at_monotonic=candidate.get("requested_at_monotonic"),
         configuration_refresh=True,
     )
     return True
@@ -560,5 +566,3 @@ def _build_streaming_display_callback(app, translation_sequence):
             raise
 
     return stream_callback
-
-

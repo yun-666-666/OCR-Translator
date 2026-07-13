@@ -1359,6 +1359,7 @@ def start_async_translation(
     ocr_sequence_number,
     requested_at_monotonic=None,
     configuration_refresh=False,
+    request_snapshot=None,
 ):
     """Start async translation processing to eliminate queue bottlenecks."""
     try:
@@ -1377,6 +1378,11 @@ def start_async_translation(
             text_to_translate,
             ocr_sequence_number,
         ):
+            pending_request = getattr(app, "pending_translation_request", None)
+            if isinstance(pending_request, dict):
+                app.latest_translation_candidate["request_snapshot"] = (
+                    pending_request.get("request_snapshot")
+                )
             return
 
         enable_instant_var = getattr(app, 'enable_instant_cache_display_var', None)
@@ -1411,19 +1417,31 @@ def start_async_translation(
 
         inflight_key = None
         latency_mode = None
-        request_snapshot = None
         handler = getattr(app, 'translation_handler', None)
         snapshot_getter = getattr(
             handler,
             'get_custom_ai_translation_request_snapshot',
             None,
         )
-        if callable(snapshot_getter):
+        if request_snapshot is None and callable(snapshot_getter):
             try:
                 request_snapshot = snapshot_getter(
                     text_to_translate,
                     commit=False,
+                    requested_at_monotonic=requested_at_monotonic,
                 )
+            except TypeError:
+                try:
+                    request_snapshot = snapshot_getter(
+                        text_to_translate,
+                        commit=False,
+                    )
+                except Exception as snapshot_error:
+                    log_debug(
+                        "LATENCY: failed to build translation request snapshot: "
+                        f"{type(snapshot_error).__name__} - {snapshot_error}"
+                    )
+                    request_snapshot = None
             except Exception as snapshot_error:
                 log_debug(
                     "LATENCY: failed to build translation request snapshot: "
@@ -1433,6 +1451,7 @@ def start_async_translation(
         if isinstance(request_snapshot, dict):
             inflight_key = request_snapshot.get("inflight_key")
             latency_mode = request_snapshot.get("latency_mode")
+            app.latest_translation_candidate["request_snapshot"] = request_snapshot
         if inflight_key is None and hasattr(app, 'translation_handler') and hasattr(app.translation_handler, 'get_inflight_translation_key'):
             try:
                 inflight_key = app.translation_handler.get_inflight_translation_key(text_to_translate)
@@ -1521,6 +1540,7 @@ def start_async_translation(
                 ", ".join(queue_reasons),
                 requested_at_monotonic=requested_at_monotonic,
                 configuration_refresh=configuration_refresh,
+                request_snapshot=request_snapshot,
             )
             return
 
