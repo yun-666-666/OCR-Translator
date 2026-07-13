@@ -22,7 +22,7 @@ from custom_ai_deadline import (
     CustomAIRequestDeadline,
     CustomAIRequestDeadlineExceeded,
 )
-from logger import summarize_text_for_log
+from logger import log_debug_coalesced, summarize_text_for_log
 
 CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
 _CUSTOM_AI_PROFILE_UNSET = object()
@@ -1108,10 +1108,21 @@ class TranslationRequestsMixin:
         for candidate, cache_params in candidate_states:
             cooldown_seconds = self._custom_ai_profile_cooldown_seconds(candidate)
             if cooldown_seconds > 0:
-                _log_debug(
+                profile_id = str(candidate.get("id") or "").strip()
+                profile_identity_source = (
+                    ("profile-id", profile_id)
+                    if profile_id
+                    else self._custom_ai_route_state_key(candidate)
+                )
+                profile_identity = hashlib.sha256(
+                    repr(profile_identity_source).encode("utf-8")
+                ).hexdigest()[:16]
+                log_debug_coalesced(
+                    ("custom-ai-failover-cooling-profile", profile_identity),
                     "LATENCY: custom_ai failover skipped cooling profile "
-                    f"provider={candidate.get('name', 'Custom AI')} "
-                    f"seconds={cooldown_seconds:.1f}"
+                    f"profile={profile_identity} "
+                    f"seconds={cooldown_seconds:.1f}",
+                    interval_seconds=5.0,
                 )
                 continue
 

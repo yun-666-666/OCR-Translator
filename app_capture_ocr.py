@@ -302,8 +302,10 @@ class AppCaptureOcrMixin:
 
     def reset_clear_timeout(self):
         """Reset clear translation timeout timer."""
+        was_active = self.clear_timeout_timer_start is not None
         self.clear_timeout_timer_start = None
-        _log_debug("Clear timeout timer reset - text detected")
+        if was_active:
+            _log_debug("Clear timeout timer reset - text detected")
 
     def show_ocr_preview(self):
         """Show/create the OCR Preview window."""

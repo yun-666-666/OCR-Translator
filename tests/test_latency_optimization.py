@@ -783,6 +783,24 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
         )
 
 
+class ClearTimeoutResetLoggingTests(unittest.TestCase):
+    def test_reset_clear_timeout_logs_only_active_to_inactive_transition(self):
+        from app_capture_ocr import AppCaptureOcrMixin
+
+        app = types.SimpleNamespace(clear_timeout_timer_start=None)
+
+        with patch("app_capture_ocr._log_debug") as debug_log:
+            AppCaptureOcrMixin.reset_clear_timeout(app)
+            app.clear_timeout_timer_start = 123.0
+            AppCaptureOcrMixin.reset_clear_timeout(app)
+            AppCaptureOcrMixin.reset_clear_timeout(app)
+
+        self.assertIsNone(app.clear_timeout_timer_start)
+        debug_log.assert_called_once_with(
+            "Clear timeout timer reset - text detected"
+        )
+
+
 class LatencyCaptureBackendSelectorTests(unittest.TestCase):
     def _make_selector(self, capture_func, monotonic_times=None, sample_count=2):
         ocr_utils = import_ocr_utils_for_tests()

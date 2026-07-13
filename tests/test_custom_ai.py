@@ -10985,6 +10985,60 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
         finally:
             handler.close()
 
+    def test_failover_cooling_profile_skips_use_nonsecret_coalesced_log(self):
+        handler, primary, fallback = self._make_handler()
+        try:
+            handler.custom_ai_provider.get_cooldown_remaining = Mock(
+                return_value=30.0
+            )
+            handler.custom_ai_provider.translate = Mock()
+
+            with patch(
+                "handlers.translation_requests.log_debug_coalesced",
+                create=True,
+            ) as coalesced_log:
+                with patch("handlers.translation_requests._log_debug") as debug_log:
+                    first_result = handler._custom_ai_translate_with_failover(
+                        primary,
+                        "source",
+                        "en",
+                        "zh-CN",
+                        [],
+                        False,
+                    )
+                    second_result = handler._custom_ai_translate_with_failover(
+                        primary,
+                        "source",
+                        "en",
+                        "zh-CN",
+                        [],
+                        False,
+                    )
+
+            self.assertIn("requests are paused", first_result)
+            self.assertEqual(first_result, second_result)
+            handler.custom_ai_provider.translate.assert_not_called()
+            self.assertEqual(coalesced_log.call_count, 4)
+            self.assertTrue(
+                all(
+                    call.args[0][0] == "custom-ai-failover-cooling-profile"
+                    and isinstance(call.args[0][1], str)
+                    and len(call.args[0][1]) == 16
+                    and call.kwargs == {"interval_seconds": 5.0}
+                    for call in coalesced_log.call_args_list
+                )
+            )
+            rendered = "\n".join(
+                repr(call) for call in coalesced_log.call_args_list
+            )
+            self.assertNotIn("primary-secret", rendered)
+            self.assertNotIn("fallback-secret", rendered)
+            self.assertNotIn("Primary relay", rendered)
+            self.assertNotIn("Fallback relay", rendered)
+            debug_log.assert_not_called()
+        finally:
+            handler.close()
+
     def test_failover_sanitizes_logged_and_ui_returned_provider_error(self):
         handler, _primary, fallback = self._make_handler()
         fallback["enabled"] = False
