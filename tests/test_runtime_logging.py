@@ -444,12 +444,14 @@ class RotatingTextWriterTests(unittest.TestCase):
             / f"ocr-translator-tests-{os.getpid()}"
         )
 
-        logger.ensure_test_log_environment()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OCR_TRANSLATOR_LOG_DIR", None)
+            logger.ensure_test_log_environment()
 
-        self.assertEqual(
-            os.environ.get("OCR_TRANSLATOR_LOG_DIR"),
-            str(expected),
-        )
+            self.assertEqual(
+                os.environ.get("OCR_TRANSLATOR_LOG_DIR"),
+                str(expected),
+            )
 
     def test_log_debug_keeps_timestamp_format_in_resolved_directory(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
