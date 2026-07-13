@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser
 import threading
+from diagnostic_sanitizer import sanitize_error_text
 from logger import log_debug
 from ui_elements import create_scrollable_tab
 from modern_ui import style_tk_text_widget
@@ -45,7 +46,7 @@ def apply_custom_ai_profile_model_selection(app):
     except Exception as error:
         log_debug(
             "Custom AI profile model apply failed: "
-            f"{type(error).__name__} - {error}"
+            f"{type(error).__name__} - {sanitize_error_text(error, max_length=500)}"
         )
         ui_lang = getattr(app, "ui_lang", None)
         title = (
@@ -56,13 +57,14 @@ def apply_custom_ai_profile_model_selection(app):
         try:
             messagebox.showerror(
                 title,
-                str(error),
+                sanitize_error_text(error, max_length=500),
                 parent=getattr(app, "root", None),
             )
         except Exception as dialog_error:
             log_debug(
                 "Custom AI profile error dialog failed: "
-                f"{type(dialog_error).__name__} - {dialog_error}"
+                f"{type(dialog_error).__name__} - "
+                f"{sanitize_error_text(dialog_error, max_length=500)}"
             )
         return False
 
@@ -133,7 +135,7 @@ def apply_custom_ai_translation_profile_selection(app, selected_name):
     except Exception as error:
         log_debug(
             "Custom AI translation profile apply failed: "
-            f"{type(error).__name__} - {error}"
+            f"{type(error).__name__} - {sanitize_error_text(error, max_length=500)}"
         )
         ui_lang = getattr(app, "ui_lang", None)
         title = (
@@ -144,13 +146,14 @@ def apply_custom_ai_translation_profile_selection(app, selected_name):
         try:
             messagebox.showerror(
                 title,
-                str(error),
+                sanitize_error_text(error, max_length=500),
                 parent=getattr(app, "root", None),
             )
         except Exception as dialog_error:
             log_debug(
                 "Custom AI translation profile error dialog failed: "
-                f"{type(dialog_error).__name__} - {dialog_error}"
+                f"{type(dialog_error).__name__} - "
+                f"{sanitize_error_text(dialog_error, max_length=500)}"
             )
         return False
 
@@ -184,7 +187,10 @@ def run_profile_network_task_async(app, button, task, on_success, failure_title)
         try:
             button.config(state=state)
         except Exception as e:
-            log_debug(f"Custom AI profile button state update failed: {e}")
+            log_debug(
+                "Custom AI profile button state update failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     def finish_success(result):
         set_button_state(tk.NORMAL)
@@ -192,13 +198,20 @@ def run_profile_network_task_async(app, button, task, on_success, failure_title)
 
     def finish_error(error):
         set_button_state(tk.NORMAL)
-        messagebox.showerror(failure_title, str(error), parent=app.root)
+        messagebox.showerror(
+            failure_title,
+            sanitize_error_text(error, max_length=500),
+            parent=app.root,
+        )
 
     def schedule(callback, *args):
         try:
             app.root.after(0, callback, *args)
         except Exception as e:
-            log_debug(f"Custom AI profile async callback scheduling failed: {e}")
+            log_debug(
+                "Custom AI profile async callback scheduling failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     def worker():
         try:

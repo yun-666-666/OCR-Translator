@@ -1,6 +1,7 @@
 """Focused Custom AI profile and OCR selection helpers for the Tk UI."""
 
 from logger import log_debug
+from diagnostic_sanitizer import sanitize_error_text
 from custom_ai import (
     CUSTOM_AI_REASONING_EFFORT_HIGH,
     CUSTOM_AI_REASONING_EFFORT_LOW,
@@ -64,7 +65,10 @@ def _find_selected_custom_ai_profile(app):
         try:
             profile = profiles.get_profile(selected_id)
         except Exception as e:
-            log_debug(f"Custom AI selected profile lookup failed: {e}")
+            log_debug(
+                "Custom AI selected profile lookup failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
         else:
             if profile:
                 return profile
@@ -79,7 +83,10 @@ def _find_selected_custom_ai_profile(app):
     try:
         profile_list = profiles.list_profiles()
     except Exception as e:
-        log_debug(f"Custom AI profile name lookup failed: {e}")
+        log_debug(
+            "Custom AI profile name lookup failed: "
+            f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+        )
         return None
 
     return next((profile for profile in profile_list if profile.get("name") == current_name), None)
@@ -196,5 +203,4 @@ def _apply_custom_ai_profile_model_selection(app):
         f"model={model}"
     )
     return True
-
 

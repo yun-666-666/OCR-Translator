@@ -9,6 +9,7 @@ import time
 import uuid
 
 from credential_store import create_default_credential_store as _base_credential_store_factory
+from diagnostic_sanitizer import sanitize_error_text
 from custom_ai_policy import (
     ACTIVE_PROFILE_KINDS,
     CUSTOM_AI_CREDENTIAL_SERVICE,
@@ -97,7 +98,10 @@ class CustomAIProfileManager:
                 if self._sanitize():
                     self.save()
         except Exception as e:
-            _log_debug(f"Custom AI profiles load failed: {e}")
+            _log_debug(
+                "Custom AI profiles load failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     def _snapshot_data(self):
         with self._data_lock:
@@ -168,7 +172,10 @@ class CustomAIProfileManager:
         except CredentialPersistenceError:
             raise
         except Exception as e:
-            _log_debug(f"Custom AI profiles save failed: {e}")
+            _log_debug(
+                "Custom AI profiles save failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
             return False
         finally:
             if temporary_path is not None:

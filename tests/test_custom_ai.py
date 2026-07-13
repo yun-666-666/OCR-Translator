@@ -3851,6 +3851,47 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(result, "Recovered translation")
         self.assertEqual(provider.http_client.stream_flags, [True, False])
 
+    def test_stream_transient_fallback_log_sanitizes_error(self):
+        token_marker = "UNIQUE_STREAM_FALLBACK_TOKEN_8A52"
+        body_marker = "UNIQUE_STREAM_FALLBACK_BODY_C6D9"
+        provider = CustomAIProvider()
+        provider._stream_post = Mock(
+            side_effect=ConnectionError(
+                "remote end closed connection "
+                f"token={token_marker} response_body={body_marker}"
+            )
+        )
+        provider._post = Mock(
+            return_value=(
+                {"choices": [{"message": {"content": "Recovered translation"}}]},
+                0.01,
+            )
+        )
+
+        with patch.object(custom_ai_module, "log_debug") as debug_log:
+            result, _usage, _duration = provider.translate(
+                {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "test-secret-key",
+                    "model": "demo",
+                    "structured_output_mode": "off",
+                },
+                "Bonjour",
+                "fr",
+                "en",
+                latency_mode="stream",
+            )
+
+        logged = "\n".join(
+            str(call.args[0]) for call in debug_log.call_args_list if call.args
+        )
+        self.assertEqual(result, "Recovered translation")
+        self.assertEqual(provider._stream_post.call_count, 1)
+        self.assertEqual(provider._post.call_count, 1)
+        self.assertIn("ConnectionError", logged)
+        self.assertNotIn(token_marker, logged)
+        self.assertNotIn(body_marker, logged)
+
     def test_stream_post_preserves_original_payload_while_adding_stream_flag(self):
         class Response:
             status_code = 200

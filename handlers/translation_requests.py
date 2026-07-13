@@ -250,9 +250,7 @@ class TranslationRequestsMixin:
             self._log_custom_short_call("ocr", log_profile, result, usage, duration)
             return result
         except Exception as e:
-            error_text = str(e)
-            if hasattr(self.custom_ai_provider, "_sanitize_error"):
-                error_text = self.custom_ai_provider._sanitize_error(error_text, profile.get("api_key", ""))
+            error_text = self._sanitize_custom_ai_profile_error(e, profile)
             _log_debug(f"Custom AI OCR error: {type(e).__name__} - {error_text}")
             return f"<e>: Custom AI OCR error: {type(e).__name__} - {error_text}"
 
@@ -281,8 +279,9 @@ class TranslationRequestsMixin:
                 request_snapshot=request_snapshot,
             )
         except Exception as e:
-            _log_debug(f"Translation exception: {e}")
-            return f"Translation error: {str(e)}"
+            error_text = sanitize_error_text(e, max_length=500)
+            _log_debug(f"Translation exception: {type(e).__name__} - {error_text}")
+            return f"Translation error: {error_text}"
 
     def translate_text(self, text_content_main, ocr_batch_number=None, stream_callback=None, translation_sequence=None, latency_mode=None, timeout_seconds=None, request_snapshot=None):
         cleaned_text_main = text_content_main.strip() if text_content_main else ""
@@ -643,9 +642,13 @@ class TranslationRequestsMixin:
             try:
                 return bool(checker(profile))
             except Exception as stream_error:
+                error_text = self._sanitize_custom_ai_profile_error(
+                    stream_error,
+                    profile,
+                )
                 _log_debug(
                     "Custom AI stream capability check failed: "
-                    f"{type(stream_error).__name__} - {stream_error}"
+                    f"{type(stream_error).__name__} - {error_text}"
                 )
         return bool(profile)
 
@@ -662,9 +665,13 @@ class TranslationRequestsMixin:
         try:
             return max(0.0, float(cooldown_getter(profile)))
         except Exception as cooldown_error:
+            error_text = self._sanitize_custom_ai_profile_error(
+                cooldown_error,
+                profile,
+            )
             _log_debug(
                 "Custom AI cooldown check failed: "
-                f"{type(cooldown_error).__name__} - {cooldown_error}"
+                f"{type(cooldown_error).__name__} - {error_text}"
             )
             return 0.0
 
@@ -684,9 +691,13 @@ class TranslationRequestsMixin:
             try:
                 remaining = max(0.0, float(cooldown_getter(candidate)))
             except Exception as cooldown_error:
+                error_text = self._sanitize_custom_ai_profile_error(
+                    cooldown_error,
+                    candidate,
+                )
                 _log_debug(
                     "Custom AI adaptive cooldown check failed: "
-                    f"{type(cooldown_error).__name__} - {cooldown_error}"
+                    f"{type(cooldown_error).__name__} - {error_text}"
                 )
                 remaining = 0.0
             if remaining <= 0.0:
@@ -766,9 +777,13 @@ class TranslationRequestsMixin:
             self._set_runtime_metric_gauge("provider_cooldown_seconds", remaining)
             return remaining
         except Exception as cooldown_error:
+            error_text = self._sanitize_custom_ai_profile_error(
+                cooldown_error,
+                profile,
+            )
             _log_debug(
                 "Custom AI cooldown check failed: "
-                f"{type(cooldown_error).__name__} - {cooldown_error}"
+                f"{type(cooldown_error).__name__} - {error_text}"
             )
             self._set_runtime_metric_gauge("provider_cooldown_seconds", 0.0)
             return 0.0
@@ -884,7 +899,8 @@ class TranslationRequestsMixin:
                 )
                 return (
                     "Custom AI translation error: "
-                    f"{type(error).__name__} - {error}"
+                    f"{type(error).__name__} - "
+                    f"{self._sanitize_custom_ai_profile_error(error, profile)}"
                 )
 
         cached_result = self._get_custom_ai_cached_translation(
@@ -1424,7 +1440,11 @@ class TranslationRequestsMixin:
         except TypeError:
             profiles = self.app.custom_ai_profiles.list_profiles(enabled_only=True)
         except Exception as e:
-            _log_debug(f"Custom AI race profile list failed: {e}")
+            _log_debug(
+                "Custom AI race profile list failed: "
+                f"{type(e).__name__} - "
+                f"{self._sanitize_custom_ai_profile_error(e, {})}"
+            )
             profiles = []
         for profile in profiles:
             add_candidate(profile)
@@ -1441,9 +1461,13 @@ class TranslationRequestsMixin:
                 try:
                     remaining = max(0.0, float(cooldown_getter(candidate)))
                 except Exception as cooldown_error:
+                    error_text = self._sanitize_custom_ai_profile_error(
+                        cooldown_error,
+                        candidate,
+                    )
                     _log_debug(
                         "Custom AI race cooldown check failed: "
-                        f"{type(cooldown_error).__name__} - {cooldown_error}"
+                        f"{type(cooldown_error).__name__} - {error_text}"
                     )
                     remaining = 0.0
                 if remaining <= 0.0:

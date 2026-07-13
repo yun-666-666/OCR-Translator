@@ -6,6 +6,7 @@ import re
 import sys
 import time
 
+from diagnostic_sanitizer import sanitize_error_text
 from logger import summarize_text_for_log
 from ocr_utils import (
     API_OCR_IMAGE_DETAIL_DEFAULT,
@@ -60,7 +61,10 @@ def _get_custom_ai_ocr_reasoning_contract(app):
     try:
         profile = profiles.get_active_profile("ocr")
     except Exception as e:
-        _log_debug(f"Could not resolve active OCR profile for API OCR reasoning cache key: {type(e).__name__} - {e}")
+        _log_debug(
+            "Could not resolve active OCR profile for API OCR reasoning cache key: "
+            f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+        )
         return 'none'
     if not profile:
         return 'none'
@@ -76,7 +80,10 @@ def _get_custom_ai_ocr_reasoning_contract(app):
                 provider.reasoning_effort_request_contract(profile, "ocr")
             )
         except Exception as e:
-            _log_debug(f"Could not resolve Custom AI OCR reasoning contract: {type(e).__name__} - {e}")
+            _log_debug(
+                "Could not resolve Custom AI OCR reasoning contract: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     return _normalize_custom_ai_ocr_reasoning_contract(
         profile.get("reasoning_effort") or profile.get("model_reasoning_effort")
@@ -418,7 +425,8 @@ def _get_local_ocr_submit_scope(app, text_to_translate):
     except Exception as scope_error:
         _log_debug(
             "LATENCY: failed to build local OCR submit scope: "
-            f"{type(scope_error).__name__} - {scope_error}"
+            f"{type(scope_error).__name__} - "
+            f"{sanitize_error_text(scope_error, max_length=500)}"
         )
         return None
 
@@ -632,7 +640,8 @@ def _apply_inactive_translation_clear(
     except Exception as clear_error:
         _log_debug(
             "LATENCY: failed to apply translation inactivity clear: "
-            f"{type(clear_error).__name__} - {clear_error}"
+            f"{type(clear_error).__name__} - "
+            f"{sanitize_error_text(clear_error, max_length=500)}"
         )
         return False
 
@@ -694,7 +703,8 @@ def _schedule_inactive_translation_clear(
             app.translation_inactivity_clear_scheduled_epoch = None
         _log_debug(
             "LATENCY: failed to schedule translation inactivity clear: "
-            f"{type(schedule_error).__name__} - {schedule_error}"
+            f"{type(schedule_error).__name__} - "
+            f"{sanitize_error_text(schedule_error, max_length=500)}"
         )
         return False
     return True
@@ -710,7 +720,8 @@ def _clear_ocr_stability_gate(app, reason):
     except Exception as clear_error:
         _log_debug(
             "LATENCY: failed to clear OCR stability gate "
-            f"reason={reason}: {type(clear_error).__name__} - {clear_error}"
+            f"reason={reason}: {type(clear_error).__name__} - "
+            f"{sanitize_error_text(clear_error, max_length=500)}"
         )
         return False
     if had_pending:
@@ -958,6 +969,5 @@ def _get_api_ocr_cache_mode_key(app, provider_name=None):
             parts.append(f"reasoning_effort={reasoning_contract}")
 
     return "|".join(parts)
-
 
 

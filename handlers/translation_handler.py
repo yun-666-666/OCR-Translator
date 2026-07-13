@@ -22,6 +22,7 @@ from logger import (
     log_debug_coalesced,
     summarize_text_for_log,
 )
+from diagnostic_sanitizer import sanitize_error_text
 from unified_translation_cache import UnifiedTranslationCache
 from translation_utils import is_translation_error_result
 from custom_ai import (
@@ -102,7 +103,10 @@ class TranslationHandler(TranslationContextMixin, TranslationRequestsMixin, Tran
                 backup_count=CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
             )
         except Exception as e:
-            _log_debug(f"Custom AI short log write failed: {e}")
+            _log_debug(
+                "Custom AI short log write failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     def _format_dialog_text(self, text):
         """Format dialog text by adding line breaks before dashes that follow sentence-ending punctuation.

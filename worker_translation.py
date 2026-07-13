@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 
+from diagnostic_sanitizer import sanitize_error_text
 from logger import summarize_text_for_log
 from translation_utils import post_process_translation_text
 from worker_capture import _increment_metric, _refresh_translation_metric_gauges
@@ -44,7 +45,8 @@ def _get_translation_submit_interval_seconds(app, text_to_translate):
         except Exception as interval_error:
             _log_debug(
                 "LATENCY: failed to read translation submit interval: "
-                f"{type(interval_error).__name__} - {interval_error}"
+                f"{type(interval_error).__name__} - "
+                f"{sanitize_error_text(interval_error, max_length=500)}"
             )
     return max(0.0, float(getattr(app, 'min_translation_interval', 0.3) or 0.3))
 
@@ -61,12 +63,14 @@ def _get_translation_provider_cooldown_seconds(app, latency_mode=None):
             except Exception as cooldown_error:
                 _log_debug(
                     "LATENCY: failed to read translation provider cooldown: "
-                    f"{type(cooldown_error).__name__} - {cooldown_error}"
+                    f"{type(cooldown_error).__name__} - "
+                    f"{sanitize_error_text(cooldown_error, max_length=500)}"
                 )
         except Exception as cooldown_error:
             _log_debug(
                 "LATENCY: failed to read translation provider cooldown: "
-                f"{type(cooldown_error).__name__} - {cooldown_error}"
+                f"{type(cooldown_error).__name__} - "
+                f"{sanitize_error_text(cooldown_error, max_length=500)}"
             )
     return 0.0
 
@@ -99,7 +103,8 @@ def _get_translation_concurrency_limit(app):
         except Exception as limit_error:
             _log_debug(
                 "LATENCY: failed to read translation concurrency limit: "
-                f"{type(limit_error).__name__} - {limit_error}"
+                f"{type(limit_error).__name__} - "
+                f"{sanitize_error_text(limit_error, max_length=500)}"
             )
     return max(1, int(getattr(app, 'max_concurrent_translation_calls', 1) or 1))
 
@@ -269,7 +274,8 @@ def _flush_pending_translation_request(app, flush_generation=None):
     except Exception as flush_error:
         _log_debug(
             "LATENCY: failed to flush pending translation request: "
-            f"{type(flush_error).__name__} - {flush_error}"
+            f"{type(flush_error).__name__} - "
+            f"{sanitize_error_text(flush_error, max_length=500)}"
         )
 
 
@@ -548,7 +554,8 @@ def _build_streaming_display_callback(app, translation_sequence):
         except Exception as stream_error:
             _log_debug(
                 "Streaming translation display failed: "
-                f"{type(stream_error).__name__} - {stream_error}"
+                f"{type(stream_error).__name__} - "
+                f"{sanitize_error_text(stream_error, max_length=500)}"
             )
 
     def stream_callback(partial_text):

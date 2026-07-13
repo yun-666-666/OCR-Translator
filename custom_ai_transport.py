@@ -166,7 +166,10 @@ class CustomAITransportMixin:
                 self.http_client.close()
                 _log_debug("LATENCY: Custom AI HTTP session closed")
             except Exception as e:
-                _log_debug(f"Custom AI HTTP session close failed: {e}")
+                _log_debug(
+                    "Custom AI HTTP session close failed: "
+                    f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+                )
         self.http_client = None
         self._owns_http_client = True
 
@@ -787,10 +790,14 @@ class CustomAITransportMixin:
                 or not self._stream_error_should_fallback_to_non_stream(stream_error)
             ):
                 raise
+            safe_stream_error = self._sanitize_error(
+                stream_error,
+                profile.get("api_key", ""),
+            )
             _log_debug(
                 "LATENCY: custom_ai stream translation failed transiently; "
                 "retrying non-stream request: "
-                f"{type(stream_error).__name__} - {stream_error}"
+                f"{type(stream_error).__name__} - {safe_stream_error}"
             )
             active_payload = self.build_translation_payload(
                 profile,
@@ -888,10 +895,14 @@ class CustomAITransportMixin:
                     f"{self._responses_response_shape_summary(response_json)}"
                 )
             else:
+                safe_parse_error = self._sanitize_error(
+                    parse_error,
+                    profile.get("api_key", ""),
+                )
                 _log_debug(
                     "LATENCY: custom_ai structured stream fallback failed; "
                     "retrying plain-text request: "
-                    f"{type(parse_error).__name__} - {parse_error}"
+                    f"{type(parse_error).__name__} - {safe_parse_error}"
                 )
             response_json, retry_duration = active_request(retry_payload)
             duration += retry_duration
@@ -1484,7 +1495,11 @@ class CustomAITransportMixin:
                         try:
                             stream_callback(accumulated)
                         except Exception as e:
-                            _log_debug(f"Custom AI stream callback failed: {e}")
+                            _log_debug(
+                                "Custom AI stream callback failed: "
+                                f"{type(e).__name__} - "
+                                f"{sanitize_error_text(e, max_length=500)}"
+                            )
                 continue
             if chunk_type == "response.output_text.done":
                 text = chunk.get("text") or chunk.get("output_text") or ""
@@ -1494,7 +1509,11 @@ class CustomAITransportMixin:
                         try:
                             stream_callback(accumulated)
                         except Exception as e:
-                            _log_debug(f"Custom AI stream callback failed: {e}")
+                            _log_debug(
+                                "Custom AI stream callback failed: "
+                                f"{type(e).__name__} - "
+                                f"{sanitize_error_text(e, max_length=500)}"
+                            )
         if (
             not accumulated
             and terminal_event_type != "response.failed"
@@ -1568,7 +1587,11 @@ class CustomAITransportMixin:
                 try:
                     stream_callback(accumulated)
                 except Exception as e:
-                    _log_debug(f"Custom AI stream callback failed: {e}")
+                    _log_debug(
+                        "Custom AI stream callback failed: "
+                        f"{type(e).__name__} - "
+                        f"{sanitize_error_text(e, max_length=500)}"
+                    )
         if not accumulated:
             raise ValueError("Streaming API response did not contain message content")
         result_choice = {"message": {"content": accumulated}}

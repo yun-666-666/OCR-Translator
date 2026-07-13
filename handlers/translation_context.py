@@ -2,6 +2,8 @@
 
 import sys
 
+from diagnostic_sanitizer import sanitize_error_text
+
 CUSTOM_CONTEXT_MAX_CHAR_BUDGET = 2400
 CUSTOM_CONTEXT_MIN_CHAR_BUDGET = 600
 CUSTOM_CONTEXT_SOURCE_PENALTY_CAP = 1800
@@ -95,7 +97,10 @@ class TranslationContextMixin:
             if log_executor is not None:
                 log_executor.shutdown(wait=True, cancel_futures=False)
         except Exception as e:
-            _log_debug(f"Error flushing Custom AI short log: {e}")
+            _log_debug(
+                "Error flushing Custom AI short log: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
         try:
             if hasattr(self.unified_cache, "close"):
                 self.unified_cache.close()
@@ -105,7 +110,10 @@ class TranslationContextMixin:
             if hasattr(self.custom_ai_provider, "close"):
                 self.custom_ai_provider.close()
         except Exception as e:
-            _log_debug(f"Error closing Custom AI provider: {e}")
+            _log_debug(
+                "Error closing Custom AI provider: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     # === DEEPL CONTEXT MANAGEMENT ===
     def _clear_deepl_context(self):
@@ -493,7 +501,7 @@ class TranslationContextMixin:
         except Exception as observe_error:
             _log_debug(
                 "Custom AI adaptive latency observation failed: "
-                f"{type(observe_error).__name__} - {observe_error}"
+                f"{type(observe_error).__name__} - "
+                f"{sanitize_error_text(observe_error, max_length=500)}"
             )
-
 

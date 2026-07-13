@@ -14,6 +14,7 @@ from logger import (
     log_debug_coalesced,
     summarize_text_for_log,
 )
+from diagnostic_sanitizer import sanitize_error_text
 from translation_utils import is_translation_error_result
 
 REQUESTS_AVAILABLE = False
@@ -208,7 +209,10 @@ Call Duration: {call_duration:.3f} seconds
                 )
                 self._custom_session_started.add(call_type)
         except Exception as e:
-            _log_debug(f"Custom AI short log scheduling failed: {e}")
+            _log_debug(
+                "Custom AI short log scheduling failed: "
+                f"{type(e).__name__} - {sanitize_error_text(e, max_length=500)}"
+            )
 
     def _legacy_translate_disabled(self):
         """Legacy provider code is kept below for reference but is no longer reached."""
