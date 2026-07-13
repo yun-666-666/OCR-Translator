@@ -1116,6 +1116,7 @@ py -3.12 -m venv .venv-build
 .\.venv-build\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 python -m pip install PyInstaller
+python -m pip install wheel
 ```
 
 `requirements.txt` does not install PaddleOCR. To include local OCR, install
@@ -1123,6 +1124,10 @@ the optional PaddleOCR backend separately by following the
 [official PaddleOCR installation instructions](https://www.paddleocr.ai/latest/en/version3.x/installation.html)
 for the selected Python version and hardware. Otherwise configure Custom AI
 OCR and do not add PaddleOCR to the build environment.
+
+`wheel` is a development-only test build tool. Install it in the isolated
+virtual environment before running `python scripts/run_offline_tests.py`; it
+does not become an application runtime dependency.
 
 ### Build an existing PyInstaller specification
 

@@ -101,8 +101,14 @@ class SetupConfigurationTests(unittest.TestCase):
             with zipfile.ZipFile(wheel_path) as wheel_archive:
                 wheel_members = set(wheel_archive.namelist())
 
-            for module_name in ("main.py", "app_logic.py", "worker_threads.py"):
-                self.assertIn(module_name, wheel_members)
+            sys.modules.pop("setup", None)
+            with patch("setuptools.setup"):
+                setup_module = importlib.import_module("setup")
+            runtime_module_names = {
+                f"{module_name}.py" for module_name in setup_module.ROOT_PY_MODULES
+            }
+            self.assertTrue(runtime_module_names)
+            self.assertTrue(runtime_module_names.issubset(wheel_members))
             for resource_path in (PROJECT_ROOT / "resources").glob("*.csv"):
                 self.assertIn(f"resources/{resource_path.name}", wheel_members)
 
@@ -139,6 +145,35 @@ class CompileAppSafetyTests(unittest.TestCase):
             )
 
         self.assertTrue(success)
+        run.assert_called_once_with(
+            [sys.executable, "-m", "pip", "install", "PyInstaller"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_missing_pyinstaller_refuses_installation_without_explicit_flag(self):
+        compile_app = self._load_compile_app()
+
+        with patch.object(compile_app.importlib.util, "find_spec", return_value=None), patch.object(
+            compile_app.subprocess, "run"
+        ) as run:
+            available = compile_app.ensure_pyinstaller()
+
+        self.assertFalse(available)
+        run.assert_not_called()
+
+    def test_missing_pyinstaller_installs_with_explicit_flag_using_active_interpreter(self):
+        compile_app = self._load_compile_app()
+
+        with patch.object(compile_app.importlib.util, "find_spec", return_value=None), patch.object(
+            compile_app.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, stdout="ok", stderr=""),
+        ) as run:
+            available = compile_app.ensure_pyinstaller(allow_environment_mutation=True)
+
+        self.assertTrue(available)
         run.assert_called_once_with(
             [sys.executable, "-m", "pip", "install", "PyInstaller"],
             check=True,
@@ -183,3 +218,11 @@ class PackagingDocumentationTests(unittest.TestCase):
         self.assertIn("GameChangingTranslator.spec", developer_guide)
         self.assertIn("GameChangingTranslator_GPU.spec", developer_guide)
         self.assertIn("isolated virtual environment", developer_guide)
+        self.assertIn("python -m pip install wheel", developer_guide)
+
+    def test_offline_ci_installs_wheel_as_a_test_build_tool(self):
+        workflow = (PROJECT_ROOT / ".github" / "workflows" / "offline-tests.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("python -m pip install wheel", workflow)
