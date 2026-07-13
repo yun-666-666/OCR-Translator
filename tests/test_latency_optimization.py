@@ -10,12 +10,534 @@ import threading
 import time
 import types
 import unittest
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
 from runtime_metrics import RuntimeMetrics
+
+
+class ApiOcrRequestSnapshotTests(unittest.TestCase):
+    def test_snapshot_module_is_available(self):
+        self.assertIsNotNone(importlib.util.find_spec("api_ocr_request"))
+
+    def test_snapshot_direct_construction_is_not_public(self):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
+        mutable_profile = {"request_options": {"headers": []}}
+
+        with self.assertRaises(TypeError):
+            ApiOcrRequestSnapshot(
+                generation=1,
+                sequence=1,
+                provider="custom_ai",
+                profile_id="profile",
+                model="vision-model",
+                base_url="https://relay.example/v1",
+                wire_api="responses",
+                credential_scope_digest="",
+                endpoint_scope_digest="",
+                source_language="en",
+                keep_linebreaks=True,
+                latency_mode="safe",
+                reasoning_effort="low",
+                image_detail="auto",
+                image_format="webp",
+                image_mode="balanced_webp",
+                image_quality=85,
+                mime_type="image/webp",
+                _profile=mutable_profile,
+            )
+
+    @staticmethod
+    def _profile(api_key="sk-ocr-snapshot-secret"):
+        return {
+            "id": "ocr-profile",
+            "name": "OCR relay",
+            "base_url": " HTTPS://Relay.Example:443/v1/ ",
+            "api_key": api_key,
+            "api_key_ref": "ocr/profile/key",
+            "model": " vision-model ",
+            "wire_api": "OpenAI-Responses",
+            "reasoning_effort": "low",
+            "enabled": True,
+        }
+
+    def _make_snapshot(self, profile=None, **overrides):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
+        values = {
+            "generation": 7,
+            "sequence": 12,
+            "provider": " Custom-AI ",
+            "profile": profile if profile is not None else self._profile(),
+            "source_language": " en ",
+            "keep_linebreaks": True,
+            "latency_mode": " ADAPTIVE ",
+            "reasoning_effort": " LOW ",
+            "image_detail": " HIGH ",
+            "image_format": " JPG ",
+            "image_mode": " BALANCED_WEBP ",
+            "image_quality": "87",
+            "mime_type": " IMAGE/JPEG ",
+        }
+        values.update(overrides)
+        return ApiOcrRequestSnapshot.create(**values)
+
+    def test_snapshot_freezes_normalized_request_contract(self):
+        secret = "sk-ocr-snapshot-secret"
+        snapshot = self._make_snapshot(self._profile(secret))
+
+        self.assertEqual(snapshot.request_token, (7, 12))
+        self.assertEqual(snapshot.provider, "custom_ai")
+        self.assertEqual(snapshot.model, "vision-model")
+        self.assertEqual(snapshot.base_url, "https://relay.example/v1")
+        self.assertEqual(snapshot.wire_api, "responses")
+        self.assertTrue(snapshot.credential_scope_digest)
+        self.assertNotIn(secret, snapshot.credential_scope_digest)
+        self.assertEqual(snapshot.source_language, "en")
+        self.assertIs(snapshot.keep_linebreaks, True)
+        self.assertEqual(snapshot.latency_mode, "adaptive")
+        self.assertEqual(snapshot.reasoning_effort, "low")
+        self.assertEqual(snapshot.image_detail, "high")
+        self.assertEqual(snapshot.image_format, "jpeg")
+        self.assertEqual(snapshot.image_mode, "balanced_webp")
+        self.assertEqual(snapshot.image_quality, 87)
+        self.assertEqual(snapshot.mime_type, "image/jpeg")
+        self.assertEqual(snapshot.profile_copy()["api_key"], secret)
+
+    def test_snapshot_and_stored_profile_are_immutable_defensive_copies(self):
+        profile = self._profile()
+        snapshot = self._make_snapshot(profile)
+        expected_model_identity = snapshot.cache_model_identity
+        expected_mode_identity = snapshot.cache_mode_identity
+
+        profile.update(
+            api_key="sk-later-secret",
+            base_url="https://changed.example/v2",
+            model="changed-model",
+            wire_api="chat_completions",
+        )
+        with self.assertRaises(FrozenInstanceError):
+            snapshot.provider = "changed"
+        with self.assertRaises(TypeError):
+            snapshot.profile_view["model"] = "changed"
+
+        first_provider_input = snapshot.profile_copy()
+        second_provider_input = snapshot.profile_copy()
+        first_provider_input["api_key"] = "provider-mutated-secret"
+        first_provider_input["model"] = "provider-mutated-model"
+
+        self.assertIsNot(first_provider_input, second_provider_input)
+        self.assertEqual(snapshot.profile_copy()["api_key"], "sk-ocr-snapshot-secret")
+        self.assertEqual(snapshot.profile_copy()["model"], " vision-model ")
+        self.assertEqual(second_provider_input["model"], " vision-model ")
+        self.assertEqual(snapshot.cache_model_identity, expected_model_identity)
+        self.assertEqual(snapshot.cache_mode_identity, expected_mode_identity)
+
+    def test_nested_profile_values_are_deeply_isolated_and_thawed(self):
+        profile = self._profile()
+        profile["request_options"] = {
+            "headers": ["first", {"enabled": True}],
+            "features": {"vision", "ocr"},
+        }
+        snapshot = self._make_snapshot(profile)
+        expected_repr = repr(snapshot)
+        expected_hash = hash(snapshot)
+
+        with self.assertRaises(TypeError):
+            snapshot._profile["request_options"]["headers"][1]["enabled"] = False
+        with self.assertRaises(AttributeError):
+            snapshot._profile["request_options"]["headers"].append("blocked")
+        with self.assertRaises(AttributeError):
+            snapshot._profile["request_options"]["features"].add("blocked")
+
+        profile["request_options"]["headers"][1]["enabled"] = False
+        profile["request_options"]["headers"].append("later")
+        profile["request_options"]["features"].add("later")
+        first_provider_input = snapshot.profile_copy()
+
+        self.assertEqual(
+            first_provider_input["request_options"]["headers"],
+            ["first", {"enabled": True}],
+        )
+        self.assertEqual(
+            first_provider_input["request_options"]["features"],
+            {"vision", "ocr"},
+        )
+        self.assertIsInstance(first_provider_input["request_options"], dict)
+        self.assertIsInstance(first_provider_input["request_options"]["headers"], list)
+        self.assertIsInstance(first_provider_input["request_options"]["features"], set)
+
+        first_provider_input["request_options"]["headers"][1]["enabled"] = False
+        first_provider_input["request_options"]["headers"].append("provider")
+        first_provider_input["request_options"]["features"].add("provider")
+        second_provider_input = snapshot.profile_copy()
+
+        self.assertEqual(
+            second_provider_input["request_options"]["headers"],
+            ["first", {"enabled": True}],
+        )
+        self.assertEqual(
+            second_provider_input["request_options"]["features"],
+            {"vision", "ocr"},
+        )
+        self.assertEqual(repr(snapshot), expected_repr)
+        self.assertEqual(hash(snapshot), expected_hash)
+
+    def test_profile_copy_preserves_supported_container_types(self):
+        profile = self._profile()
+        profile["request_options"] = {
+            "list": ["list"],
+            "tuple": ("tuple",),
+            "set": {"set"},
+            "frozenset": frozenset({"frozenset"}),
+        }
+
+        provider_input = self._make_snapshot(profile).profile_copy()["request_options"]
+
+        self.assertIs(type(provider_input), dict)
+        self.assertIs(type(provider_input["list"]), list)
+        self.assertIs(type(provider_input["tuple"]), tuple)
+        self.assertIs(type(provider_input["set"]), set)
+        self.assertIs(type(provider_input["frozenset"]), frozenset)
+
+    def test_profile_copy_thaws_repeated_values_independently(self):
+        shared_options = {"headers": ["first"]}
+        profile = self._profile()
+        profile["first_options"] = shared_options
+        profile["second_options"] = shared_options
+        snapshot = self._make_snapshot(profile)
+
+        first_provider_input = snapshot.profile_copy()
+        first_provider_input["first_options"]["headers"].append("provider")
+
+        self.assertIsNot(
+            first_provider_input["first_options"],
+            first_provider_input["second_options"],
+        )
+        self.assertEqual(
+            first_provider_input["second_options"]["headers"],
+            ["first"],
+        )
+        self.assertEqual(
+            snapshot.profile_copy()["first_options"]["headers"],
+            ["first"],
+        )
+
+    def test_snapshot_rejects_unsupported_profile_values(self):
+        class UnsupportedValue:
+            pass
+
+        profile = self._profile()
+        profile["request_options"] = UnsupportedValue()
+
+        with self.assertRaises(TypeError):
+            self._make_snapshot(profile)
+
+    def test_snapshot_rejects_direct_and_indirect_profile_cycles(self):
+        direct_cycle = []
+        direct_cycle.append(direct_cycle)
+        direct_profile = self._profile()
+        direct_profile["request_options"] = direct_cycle
+
+        with self.assertRaises(ValueError):
+            self._make_snapshot(direct_profile)
+
+        indirect_first = {}
+        indirect_second = {"first": indirect_first}
+        indirect_first["second"] = indirect_second
+        indirect_profile = self._profile()
+        indirect_profile["request_options"] = indirect_first
+
+        with self.assertRaises(ValueError):
+            self._make_snapshot(indirect_profile)
+
+    def test_public_profile_view_is_safe_and_raw_profile_copy_is_explicit(self):
+        api_key = "sk-provider-only-secret"
+        userinfo = "url-userinfo-secret"
+        query_secret = "url-query-secret"
+        fragment_secret = "url-fragment-secret"
+        raw_base_url = (
+            f"https://user:{userinfo}@Relay.Example:443/v1/"
+            f"?api_key={query_secret}#{fragment_secret}"
+        )
+        profile = self._profile(api_key)
+        profile["base_url"] = raw_base_url
+        snapshot = self._make_snapshot(profile)
+        public_view = snapshot.profile_view
+        raw_profile_field = next(
+            dataclass_field
+            for dataclass_field in fields(snapshot)
+            if dataclass_field.name == "_profile"
+        )
+
+        self.assertFalse(hasattr(snapshot, "profile"))
+        self.assertFalse(raw_profile_field.repr)
+        self.assertFalse(raw_profile_field.compare)
+        self.assertFalse(raw_profile_field.hash)
+        self.assertNotIn("api_key", public_view)
+        self.assertEqual(public_view["base_url"], "https://relay.example/v1")
+        self.assertEqual(public_view["model"], "vision-model")
+        self.assertEqual(public_view["wire_api"], "responses")
+        with self.assertRaises(TypeError):
+            public_view["base_url"] = "https://changed.example/v1"
+
+        raw_provider_input = snapshot.profile_copy()
+        self.assertEqual(raw_provider_input["api_key"], api_key)
+        self.assertEqual(raw_provider_input["base_url"], raw_base_url)
+        self.assertIn("not log", snapshot.profile_copy.__doc__.lower())
+
+        same_credential = self._profile(api_key)
+        same_credential["base_url"] = (
+            "https://other:parts@relay.example:443/v1/"
+            "?api_key=other-query#other-fragment"
+        )
+        same_scope = self._make_snapshot(same_credential)
+        self.assertEqual(
+            snapshot.credential_scope_digest,
+            same_scope.credential_scope_digest,
+        )
+        self.assertNotEqual(
+            snapshot.endpoint_scope_digest,
+            same_scope.endpoint_scope_digest,
+        )
+        self.assertNotEqual(snapshot.cache_model_identity, same_scope.cache_model_identity)
+
+        fragment_a = self._profile(api_key)
+        fragment_a["base_url"] = raw_base_url.rsplit("#", 1)[0] + "#fragment-a"
+        fragment_b = self._profile(api_key)
+        fragment_b["base_url"] = raw_base_url.rsplit("#", 1)[0] + "#fragment-b"
+        fragment_a_snapshot = self._make_snapshot(fragment_a)
+        fragment_b_snapshot = self._make_snapshot(fragment_b)
+        self.assertEqual(
+            fragment_a_snapshot.endpoint_scope_digest,
+            fragment_b_snapshot.endpoint_scope_digest,
+        )
+        self.assertEqual(
+            fragment_a_snapshot.cache_model_identity,
+            fragment_b_snapshot.cache_model_identity,
+        )
+
+        other_credential = self._profile("sk-different-provider-secret")
+        other_credential["base_url"] = raw_base_url
+        other_credential_snapshot = self._make_snapshot(other_credential)
+        self.assertNotEqual(
+            snapshot.credential_scope_digest,
+            other_credential_snapshot.credential_scope_digest,
+        )
+
+        public_surfaces = (
+            repr(snapshot),
+            repr(public_view),
+            snapshot.provider,
+            snapshot.profile_id,
+            snapshot.model,
+            snapshot.base_url,
+            snapshot.wire_api,
+            snapshot.credential_scope_digest,
+            snapshot.endpoint_scope_digest,
+            repr(snapshot.request_token),
+            snapshot.cache_model_identity,
+            snapshot.cache_mode_identity,
+        )
+        for secret in (api_key, userinfo, query_secret, fragment_secret):
+            for surface in public_surfaces:
+                self.assertNotIn(secret, surface)
+
+    def test_base_url_accepts_only_canonical_http_endpoints(self):
+        for raw_url, expected in (
+            ("HTTPS://[2001:DB8::1]:443/v1/", "https://[2001:db8::1]/v1"),
+            ("http://[2001:DB8::2]:80/v1/", "http://[2001:db8::2]/v1"),
+            (
+                "https://[2001:DB8::3]:8443/v1/",
+                "https://[2001:db8::3]:8443/v1",
+            ),
+            ("https://Relay.Example:8443/v1/", "https://relay.example:8443/v1"),
+            ("https://127.0.0.1:8080/v1/", "https://127.0.0.1:8080/v1"),
+            ("https://api-v1.relay.example/v1/", "https://api-v1.relay.example/v1"),
+            ("https://例子.测试/v1/", "https://xn--fsqu00a.xn--0zwm56d/v1"),
+        ):
+            with self.subTest(raw_url=raw_url):
+                profile = self._profile()
+                profile["base_url"] = raw_url
+                self.assertEqual(self._make_snapshot(profile).base_url, expected)
+
+        for invalid_url in (
+            "ftp://relay.example/v1",
+            "javascript:alert(1)",
+            "relay.example/v1",
+            "https:///v1",
+            "https://relay.example:not-a-port/v1",
+            "https://[2001:db8::1/v1",
+            "https:// relay.example/v1",
+            "https://relay.example\\evil/v1",
+            "https://relay.example%2fevil/v1",
+            "https://user%20name@relay.example/v1",
+            "https://relay.example\t/v1",
+            "https://relay.example\n/v1",
+            "https://relay.example\r/v1",
+            "https://relay.example\x1f/v1",
+            "https://relay.example\x7f/v1",
+            "https://relay.example:0/v1",
+            "https://relay.example:/v1",
+            "https://[2001:db8::1]:/v1",
+            "https://relay.example:65536/v1",
+            "https://relay.example:-1/v1",
+            "https://-relay.example/v1",
+            "https://relay-.example/v1",
+            "https://relay..example/v1",
+            "https://999.1.1.1/v1",
+        ):
+            with self.subTest(invalid_url=invalid_url):
+                profile = self._profile()
+                profile["base_url"] = invalid_url
+                with self.assertRaises(ValueError):
+                    self._make_snapshot(profile)
+
+    def test_reasoning_effort_has_one_frozen_provider_authority(self):
+        profile = self._profile()
+        profile["reasoning_effort"] = "HIGH"
+
+        snapshot = self._make_snapshot(profile, reasoning_effort=" LOW ")
+
+        self.assertEqual(profile["reasoning_effort"], "HIGH")
+        self.assertEqual(snapshot.reasoning_effort, "low")
+        self.assertEqual(snapshot.profile_copy()["reasoning_effort"], "low")
+
+    def test_cache_identities_cover_only_frozen_semantic_fields(self):
+        snapshot = self._make_snapshot()
+        same_contract = self._make_snapshot(
+            self._profile(),
+            provider="custom_ai",
+            source_language="en",
+            latency_mode="adaptive",
+            reasoning_effort="low",
+            image_detail="high",
+            image_format="jpeg",
+            image_mode="balanced_webp",
+            image_quality=87,
+            mime_type="image/jpeg",
+        )
+
+        self.assertEqual(snapshot.cache_model_identity, same_contract.cache_model_identity)
+        self.assertEqual(snapshot.cache_mode_identity, same_contract.cache_mode_identity)
+        self.assertEqual(snapshot, same_contract)
+        self.assertEqual(hash(snapshot), hash(same_contract))
+        for field_name, changed_value in (
+            ("provider", "openai"),
+            ("profile", dict(self._profile(), id="other-profile")),
+            ("profile", dict(self._profile(), base_url="https://other.example/v1")),
+            ("profile", dict(self._profile(), model="other-model")),
+            ("profile", dict(self._profile(), wire_api="chat_completions")),
+            ("profile", self._profile("sk-other-credential")),
+        ):
+            changed = self._make_snapshot(**{field_name: changed_value})
+            self.assertNotEqual(
+                snapshot.cache_model_identity,
+                changed.cache_model_identity,
+                field_name,
+            )
+        for contract_name, changed_values in (
+            ("source_language", {"source_language": "ja"}),
+            ("keep_linebreaks", {"keep_linebreaks": False}),
+            ("latency_mode", {"latency_mode": "safe"}),
+            ("reasoning_effort", {"reasoning_effort": "none"}),
+            ("image_detail", {"image_detail": "low"}),
+            (
+                "image_format_and_mime",
+                {"image_format": "png", "mime_type": "image/png"},
+            ),
+            ("image_mode", {"image_mode": "lossless_webp"}),
+            ("image_quality", {"image_quality": 72}),
+        ):
+            changed = self._make_snapshot(**changed_values)
+            self.assertNotEqual(
+                snapshot.cache_mode_identity,
+                changed.cache_mode_identity,
+                contract_name,
+            )
+
+    def test_secret_never_appears_in_safe_snapshot_surfaces(self):
+        secret = "sk-never-log-this-credential"
+        snapshot = self._make_snapshot(self._profile(secret))
+        safe_surfaces = (
+            repr(snapshot),
+            str(snapshot),
+            repr(snapshot.request_token),
+            snapshot.cache_model_identity,
+            snapshot.cache_mode_identity,
+        )
+
+        self.assertTrue(snapshot.credential_scope_digest)
+        self.assertNotEqual(snapshot.credential_scope_digest, secret)
+        for surface in safe_surfaces:
+            self.assertNotIn(secret, surface)
+
+    def test_normalized_base_url_drops_default_ports_and_secret_url_parts(self):
+        secret = "url-userinfo-secret"
+        profile = self._profile()
+        profile["base_url"] = (
+            f"http://name:{secret}@Relay.Example:80/v1/?api_key={secret}#{secret}"
+        )
+
+        snapshot = self._make_snapshot(profile)
+        plain_endpoint = self._make_snapshot(self._profile())
+
+        self.assertEqual(snapshot.base_url, "http://relay.example/v1")
+        self.assertNotEqual(
+            snapshot.cache_model_identity,
+            plain_endpoint.cache_model_identity,
+        )
+        self.assertNotIn(secret, snapshot.cache_model_identity)
+        self.assertNotIn(secret, repr(snapshot))
+
+    def test_mime_contract_is_canonical_derived_and_strictly_matched(self):
+        jpeg_alias = self._make_snapshot(
+            image_format="jpg",
+            mime_type="IMAGE/JPG",
+        )
+        jpeg_canonical = self._make_snapshot(
+            image_format="jpeg",
+            mime_type="image/jpeg",
+        )
+        derived_png = self._make_snapshot(
+            image_format="png",
+            mime_type=None,
+        )
+
+        self.assertEqual(jpeg_alias.image_format, "jpeg")
+        self.assertEqual(jpeg_alias.mime_type, "image/jpeg")
+        self.assertEqual(jpeg_alias, jpeg_canonical)
+        self.assertEqual(
+            jpeg_alias.cache_mode_identity,
+            jpeg_canonical.cache_mode_identity,
+        )
+        self.assertEqual(derived_png.mime_type, "image/png")
+
+        for invalid_mime in ("image/gif", "application/octet-stream", "not-a-mime"):
+            with self.subTest(invalid_mime=invalid_mime):
+                with self.assertRaises(ValueError):
+                    self._make_snapshot(
+                        image_format="webp",
+                        mime_type=invalid_mime,
+                    )
+        for image_format, mismatched_mime in (
+            ("webp", "image/png"),
+            ("png", "image/jpeg"),
+            ("jpeg", "image/webp"),
+        ):
+            with self.subTest(
+                image_format=image_format,
+                mismatched_mime=mismatched_mime,
+            ):
+                with self.assertRaises(ValueError):
+                    self._make_snapshot(
+                        image_format=image_format,
+                        mime_type=mismatched_mime,
+                    )
 
 
 def import_ocr_utils_for_tests():
