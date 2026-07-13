@@ -1148,6 +1148,7 @@ class LatencyOcrCacheTests(unittest.TestCase):
         app.text_stability_counter = 3
         app.previous_text = "old text"
         app.ocr_frame_cache = cache
+        app.ocr_session_generation = 3
         app.last_processed_subtitle = "cached OCR"
         app.ocr_stability_gate = types.SimpleNamespace(clear=Mock(return_value=True))
         app.status_label = types.SimpleNamespace(
@@ -1164,6 +1165,7 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
         self.assertIsNone(cache.get(cache_key))
         self.assertIsNone(app.last_processed_subtitle)
+        self.assertEqual(app.ocr_session_generation, 4)
         app.ocr_stability_gate.clear.assert_called()
 
     def test_ocr_cache_key_includes_region_origin(self):
@@ -1200,6 +1202,38 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
 
 class LatencyShutdownTests(unittest.TestCase):
+    def test_on_closing_advances_generation_without_an_active_run(self):
+        import app_logic
+
+        class Root:
+            def __init__(self):
+                self.destroyed = False
+
+            def winfo_exists(self):
+                return not self.destroyed
+
+            def destroy(self):
+                self.destroyed = True
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = Root()
+        app.ocr_session_generation = 11
+        app.runtime_metrics_refresh_after_id = None
+        app.ocr_preview_window = None
+        app.is_running = False
+        app._fully_initialized = True
+        app.save_settings = Mock()
+        app.KEYBOARD_AVAILABLE = False
+        app.source_overlay = None
+        app.target_overlay = None
+        app.translation_text = None
+
+        with patch.object(app_logic, "log_debug"):
+            app.on_closing()
+
+        self.assertGreater(app.ocr_session_generation, 11)
+        self.assertTrue(app.root.destroyed)
+
     def test_on_closing_stops_running_app_without_user_stop_poll(self):
         import app_logic
 
@@ -1262,6 +1296,8 @@ class LatencyShutdownTests(unittest.TestCase):
 
     def test_finalize_shutdown_is_idempotent_and_skips_dead_widgets(self):
         import app_logic
+
+        import_worker_threads_for_tests()
 
         class DeadWidget:
             def winfo_exists(self):
@@ -1346,6 +1382,40 @@ class LatencyShutdownTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(scheduled[0][0], 100)
 
+    def test_graceful_shutdown_waits_for_executor_registry_after_session_advance(self):
+        import app_logic
+
+        scheduled = []
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.translation_handler = types.SimpleNamespace(
+            ocr_providers={},
+            providers={},
+        )
+        app.ocr_active_calls_lock = threading.RLock()
+        app.active_ocr_calls = set()
+        app.active_ocr_executor_calls = {(1, 1)}
+        app.active_translation_calls = set()
+        app._shutdown_start_time = 100.0
+        app.root = types.SimpleNamespace(after=lambda *args: scheduled.append(args))
+        app._finalize_shutdown = Mock()
+
+        with patch.object(app_logic.time, "monotonic", return_value=105.0):
+            app._graceful_shutdown_poll()
+
+        app._finalize_shutdown.assert_not_called()
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], 100)
+
+        with app.ocr_active_calls_lock:
+            app.active_ocr_executor_calls.clear()
+        scheduled.clear()
+
+        with patch.object(app_logic.time, "monotonic", return_value=106.0):
+            app._graceful_shutdown_poll()
+
+        app._finalize_shutdown.assert_called_once()
+        self.assertEqual(scheduled, [])
+
     def test_graceful_shutdown_waits_for_active_translation_calls(self):
         import app_logic
 
@@ -1367,6 +1437,797 @@ class LatencyShutdownTests(unittest.TestCase):
         app._finalize_shutdown.assert_not_called()
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(scheduled[0][0], 100)
+
+
+class ApiOcrSessionGenerationTests(unittest.TestCase):
+    @staticmethod
+    def _profile():
+        return {
+            "id": "ocr-profile",
+            "base_url": "https://provider.example/v1",
+            "api_key": "test-key",
+            "model": "vision",
+            "wire_api": "responses",
+        }
+
+    def _snapshot(self, generation, sequence=1):
+        from api_ocr_request import ApiOcrRequestSnapshot
+
+        return ApiOcrRequestSnapshot.create(
+            generation=generation,
+            sequence=sequence,
+            provider="custom_ai",
+            profile=self._profile(),
+            source_language="en",
+            keep_linebreaks=False,
+            latency_mode="safe",
+            reasoning_effort="low",
+            image_detail="auto",
+            image_format="webp",
+            image_mode="balanced_webp",
+            image_quality=85,
+            mime_type="image/webp",
+            frame_hash="session-generation-frame",
+            region_size=(32, 16),
+        )
+
+    def test_lifecycle_session_boundaries_advance_generation_and_replace_ocr_state(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        old_calls = {(8, 4)}
+        app.ocr_session_generation = 8
+        app.batch_sequence_counter = 4
+        app.last_displayed_batch_sequence = 3
+        app.active_ocr_calls = old_calls
+        app.ocr_active_calls_lock = threading.RLock()
+        app.active_ocr_executor_calls = {(8, 4)}
+        app.last_processed_subtitle = "previous"
+        app.last_local_ocr_submitted_text = "previous"
+        app.last_local_ocr_submitted_norm = "previous"
+        app.last_local_ocr_submitted_scope = "previous"
+        app.clear_timeout_timer_start = 10.0
+        app.clear_ocr_stability_gate = Mock()
+
+        app._reset_gemini_batch_state()
+
+        self.assertEqual(app.ocr_session_generation, 9)
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertEqual(app.last_displayed_batch_sequence, 0)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertIsNot(app.active_ocr_calls, old_calls)
+        self.assertEqual(app.active_ocr_executor_calls, {(8, 4)})
+
+        stopped = object.__new__(app_logic.GameChangingTranslator)
+        stopped.ocr_session_generation = 9
+        stopped.is_running = False
+        stopped.ocr_active_calls_lock = threading.RLock()
+        stopped.active_ocr_executor_calls = {(9, 1)}
+        stopped._stop_translation_for_app_exit()
+        self.assertEqual(stopped.ocr_session_generation, 10)
+        self.assertEqual(stopped.active_ocr_executor_calls, {(9, 1)})
+
+    def test_stop_request_advances_generation_before_graceful_shutdown_wait(self):
+        import app_logic
+
+        scheduled = []
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.ocr_session_generation = 3
+        app.batch_sequence_counter = 2
+        app.last_displayed_batch_sequence = 1
+        app.active_ocr_calls = {(3, 2)}
+        app.is_running = True
+        app.toggle_in_progress = False
+        app._shutdown_finalized = False
+        app.start_stop_btn = Mock()
+        app.status_label = Mock()
+        app.root = types.SimpleNamespace(
+            update_idletasks=Mock(),
+            after=lambda *args: scheduled.append(args),
+        )
+        app.threads = []
+
+        app.toggle_translation()
+
+        self.assertEqual(app.ocr_session_generation, 4)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(len(scheduled), 1)
+        self.assertIs(
+            scheduled[0][1].__func__,
+            app._graceful_shutdown_poll.__func__,
+        )
+
+    def test_snapshot_generation_is_checked_before_provider_and_before_callback(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        performed = []
+
+        class Handler:
+            def perform_ocr(self, _image, *, request_snapshot):
+                performed.append(request_snapshot.request_token)
+                return "recognized"
+
+        stale = self._snapshot(4)
+        app = types.SimpleNamespace(
+            ocr_session_generation=5,
+            batch_sequence_counter=1,
+            active_ocr_calls={stale.request_token},
+            translation_handler=Handler(),
+            root=types.SimpleNamespace(after=lambda *args: scheduled.append(args)),
+        )
+
+        worker_threads.process_api_ocr_snapshot_async(app, b"image", stale)
+
+        self.assertEqual(performed, [])
+        self.assertEqual(scheduled, [])
+
+        current = self._snapshot(5)
+        app.active_ocr_calls = {current.request_token}
+        worker_threads.process_api_ocr_snapshot_async(app, b"image", current)
+        self.assertEqual(performed, [current.request_token])
+        self.assertEqual(len(scheduled), 1)
+
+        scheduled.clear()
+
+        class AdvancingHandler:
+            def perform_ocr(self, _image, *, request_snapshot):
+                app.ocr_session_generation += 1
+                return "late result"
+
+        latest = self._snapshot(6)
+        app.batch_sequence_counter = 1
+        app.active_ocr_calls = {latest.request_token}
+        app.translation_handler = AdvancingHandler()
+        worker_threads.process_api_ocr_snapshot_async(app, b"image", latest)
+        self.assertEqual(scheduled, [])
+
+        class AdvancingErrorHandler:
+            def perform_ocr(self, _image, *, request_snapshot):
+                app.ocr_session_generation += 1
+                raise RuntimeError("provider failed after session change")
+
+        failed = self._snapshot(7)
+        app.batch_sequence_counter = 1
+        app.active_ocr_calls = {failed.request_token}
+        app.translation_handler = AdvancingErrorHandler()
+        worker_threads.process_api_ocr_snapshot_async(app, b"image", failed)
+        self.assertEqual(scheduled, [])
+
+    def test_stale_snapshot_callback_cannot_mutate_cache_display_or_translation_state(self):
+        worker_threads = import_worker_threads_for_tests()
+        stale = self._snapshot(1)
+        cache = Mock()
+        app = types.SimpleNamespace(
+            ocr_session_generation=2,
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="same subtitle",
+            ocr_frame_cache=cache,
+            update_translation_text=Mock(),
+            handle_empty_ocr_result=Mock(),
+            reset_clear_timeout=Mock(),
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            for result in (
+                "new subtitle",
+                "<e>: provider error",
+                "<EMPTY>",
+                "same subtitle",
+            ):
+                worker_threads.process_api_ocr_snapshot_response(app, result, stale)
+
+        cache.put.assert_not_called()
+        app.update_translation_text.assert_not_called()
+        app.handle_empty_ocr_result.assert_not_called()
+        app.reset_clear_timeout.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(app.last_displayed_batch_sequence, 0)
+        self.assertEqual(app.last_processed_subtitle, "same subtitle")
+
+    def test_current_snapshot_keeps_existing_sequence_ordering(self):
+        worker_threads = import_worker_threads_for_tests()
+        current = self._snapshot(3, sequence=2)
+        stale_sequence = self._snapshot(3, sequence=1)
+        app = types.SimpleNamespace(
+            ocr_session_generation=3,
+            last_displayed_batch_sequence=1,
+            last_processed_subtitle=None,
+            reset_clear_timeout=Mock(),
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            worker_threads.process_api_ocr_snapshot_response(
+                app,
+                "old sequence",
+                stale_sequence,
+            )
+            worker_threads.process_api_ocr_snapshot_response(
+                app,
+                "current sequence",
+                current,
+            )
+
+        start.assert_called_once_with(app, "current sequence", 2)
+        self.assertEqual(app.last_displayed_batch_sequence, 2)
+
+    def test_snapshot_cache_hit_is_queued_and_stale_callback_is_discarded(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        translated = []
+
+        class Cache:
+            def get(self, _key):
+                return "cached OCR"
+
+            def put(self, _key, _value):
+                return None
+
+        app = types.SimpleNamespace(
+            ocr_session_generation=7,
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            custom_ai_profiles=types.SimpleNamespace(
+                get_active_profile=lambda _kind: self._profile()
+            ),
+            custom_source_lang="en",
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda _model: False,
+            is_openai_model=lambda _model: False,
+            ocr_thread_pool=Mock(),
+            ocr_frame_cache=Cache(),
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle=None,
+            reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+        )
+        screenshot = Image.new("RGB", (32, 16), (1, 2, 3))
+        screenshot._gct_frame_hash = "session-generation-frame"
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda *args: translated.append(args),
+        ):
+            worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(translated, [])
+            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(scheduled[0][0], 0)
+            scheduled[0][1](*scheduled[0][2])
+            self.assertEqual(translated, [(app, "cached OCR", 1)])
+
+            worker_threads.run_api_ocr(app, screenshot)
+            app.ocr_session_generation = 8
+            scheduled[1][1](*scheduled[1][2])
+
+        self.assertEqual(translated, [(app, "cached OCR", 1)])
+
+    def test_snapshot_tokens_do_not_release_new_generation_slots(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        scheduled = []
+        old = self._snapshot(1)
+
+        class Handler:
+            def perform_ocr(self, _image, *, request_snapshot):
+                app.ocr_session_generation = 2
+                app.active_ocr_calls = {(2, 1)}
+                app.active_ocr_executor_calls = {old.request_token, (2, 1)}
+                return "late"
+
+        app = types.SimpleNamespace(
+            ocr_session_generation=1,
+            batch_sequence_counter=1,
+            active_ocr_calls={old.request_token},
+            ocr_active_calls_lock=threading.RLock(),
+            active_ocr_executor_calls={old.request_token},
+            translation_handler=Handler(),
+            root=types.SimpleNamespace(after=lambda *args: scheduled.append(args)),
+            runtime_metrics=metrics,
+        )
+
+        worker_threads.process_api_ocr_snapshot_async(app, b"image", old)
+
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.active_ocr_calls, {(2, 1)})
+        self.assertEqual(app.active_ocr_executor_calls, {(2, 1)})
+        self.assertEqual(
+            metrics.snapshot()["gauges"]["active_ocr_calls"],
+            1,
+        )
+
+    def test_api_ocr_setup_errors_do_not_log_raw_content(self):
+        worker_threads = import_worker_threads_for_tests()
+        secret = "snapshot-setup-secret"
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: (_ for _ in ()).throw(
+                RuntimeError(secret)
+            ),
+        )
+
+        with patch.object(worker_threads, "log_debug") as debug_log:
+            worker_threads.run_api_ocr(app, object())
+
+        messages = "\n".join(
+            str(call.args[0]) for call in debug_log.call_args_list
+        )
+        self.assertIn("RuntimeError", messages)
+        self.assertNotIn(secret, messages)
+
+
+class GenericApiOcrSessionGenerationTests(unittest.TestCase):
+    class Pool:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, function, *args):
+            self.submissions.append((function, args))
+            return object()
+
+    @staticmethod
+    def _screenshot():
+        return Image.new("RGB", (32, 16), (1, 2, 3))
+
+    def _make_app(self, generation=1, cache=None):
+        scheduled = []
+        provider_calls = []
+        pool = self.Pool()
+
+        class Handler:
+            behavior = staticmethod(lambda: "generic OCR text")
+
+            def perform_ocr(self, image_data, source_lang, **kwargs):
+                provider_calls.append((image_data, source_lang, kwargs))
+                return self.behavior()
+
+        handler = Handler()
+        app = types.SimpleNamespace(
+            ocr_session_generation=generation,
+            get_ocr_model_setting=lambda: "gemini_api",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: b"generic-webp",
+            translation_model_var=types.SimpleNamespace(get=lambda: "gemini_api"),
+            is_gemini_model=lambda model: model == "gemini_api",
+            is_openai_model=lambda _model: False,
+            gemini_source_lang="en",
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+            translation_handler=handler,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle=None,
+            reset_clear_timeout=Mock(),
+            update_translation_text=Mock(),
+            handle_empty_ocr_result=Mock(),
+        )
+        if cache is not None:
+            app.ocr_frame_cache = cache
+        return app, pool, handler, scheduled, provider_calls
+
+    def test_generic_run_uses_generation_token_and_old_worker_cannot_release_new_slot(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, pool, _handler, scheduled, provider_calls = self._make_app()
+
+        worker_threads.run_api_ocr(app, self._screenshot())
+        old_function, old_args = pool.submissions[0]
+        self.assertEqual(app.active_ocr_calls, {(1, 1)})
+
+        app.ocr_session_generation = 2
+        app.batch_sequence_counter = 0
+        app.active_ocr_calls = set()
+        worker_threads.run_api_ocr(app, self._screenshot())
+
+        old_function(*old_args)
+
+        self.assertEqual(provider_calls, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.active_ocr_calls, {(2, 1)})
+
+    def test_generic_async_discards_success_and_exception_after_session_changes(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        for error in (False, True):
+            with self.subTest(error=error):
+                app, pool, handler, scheduled, _provider_calls = self._make_app()
+
+                def change_generation_then_finish():
+                    app.ocr_session_generation = 2
+                    if error:
+                        raise RuntimeError("generic provider failure")
+                    return "late generic result"
+
+                handler.behavior = change_generation_then_finish
+                worker_threads.run_api_ocr(app, self._screenshot())
+                function, args = pool.submissions[0]
+                function(*args)
+
+                self.assertEqual(scheduled, [])
+
+    def test_generic_stale_callbacks_cannot_mutate_response_paths(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        for result in (
+            "fresh generic text",
+            "<e>: generic provider error",
+            "<EMPTY>",
+            "duplicate generic text",
+        ):
+            with self.subTest(result=result):
+                cache = types.SimpleNamespace(get=lambda _key: None, put=Mock())
+                app, pool, handler, scheduled, _provider_calls = self._make_app(
+                    cache=cache
+                )
+                if result == "duplicate generic text":
+                    app.last_processed_subtitle = result
+                handler.behavior = lambda current=result: current
+
+                worker_threads.run_api_ocr(app, self._screenshot())
+                function, args = pool.submissions[0]
+                function(*args)
+                _delay, callback, callback_args = scheduled.pop()
+                app.ocr_session_generation = 2
+
+                with patch.object(worker_threads, "start_async_translation") as start:
+                    callback(*callback_args)
+
+                cache.put.assert_not_called()
+                app.update_translation_text.assert_not_called()
+                app.handle_empty_ocr_result.assert_not_called()
+                app.reset_clear_timeout.assert_not_called()
+                start.assert_not_called()
+                self.assertEqual(app.last_displayed_batch_sequence, 0)
+
+    def test_generic_cache_hit_is_queued_and_discarded_after_session_change(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache = types.SimpleNamespace(
+            get=lambda _key: "cached generic OCR",
+            put=Mock(),
+        )
+        app, _pool, _handler, scheduled, _provider_calls = self._make_app(
+            cache=cache
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            worker_threads.run_api_ocr(app, self._screenshot())
+            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(scheduled[0][0], 0)
+            start.assert_not_called()
+
+            app.ocr_session_generation = 2
+            scheduled[0][1](*scheduled[0][2])
+
+        start.assert_not_called()
+        cache.put.assert_not_called()
+
+    def test_generic_cache_hit_without_root_processes_current_generation_synchronously(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache = types.SimpleNamespace(
+            get=lambda _key: "cached generic OCR",
+            put=Mock(),
+        )
+        app, pool, _handler, _scheduled, _provider_calls = self._make_app(
+            cache=cache
+        )
+        delattr(app, "root")
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            worker_threads.run_api_ocr(app, self._screenshot())
+
+        self.assertEqual(pool.submissions, [])
+        cache.put.assert_called_once()
+        self.assertEqual(app.batch_sequence_counter, 1)
+        self.assertEqual(app.last_processed_subtitle, "cached generic OCR")
+        self.assertEqual(app.last_displayed_batch_sequence, 1)
+        app.reset_clear_timeout.assert_called_once()
+        start.assert_called_once_with(app, "cached generic OCR", 1)
+
+    def test_generic_cache_hit_without_root_discards_stale_generation(self):
+        from app_lifecycle import AppLifecycleMixin
+
+        worker_threads = import_worker_threads_for_tests()
+        cache = types.SimpleNamespace(put=Mock())
+        app, pool, _handler, _scheduled, _provider_calls = self._make_app(
+            cache=cache
+        )
+        delattr(app, "root")
+        app._get_ocr_active_calls_lock = types.MethodType(
+            AppLifecycleMixin._get_ocr_active_calls_lock,
+            app,
+        )
+        app._advance_ocr_session_generation = types.MethodType(
+            AppLifecycleMixin._advance_ocr_session_generation,
+            app,
+        )
+        cache.get = lambda _key: (
+            app._advance_ocr_session_generation("test cache boundary"),
+            "stale generic OCR",
+        )[-1]
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            worker_threads.run_api_ocr(app, self._screenshot())
+
+        self.assertEqual(pool.submissions, [])
+        cache.put.assert_not_called()
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertIsNone(app.last_processed_subtitle)
+        self.assertEqual(app.last_displayed_batch_sequence, 0)
+        app.reset_clear_timeout.assert_not_called()
+        start.assert_not_called()
+
+    def test_current_generic_generation_keeps_async_response_behavior(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, pool, _handler, scheduled, _provider_calls = self._make_app(
+            generation=4
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start:
+            worker_threads.run_api_ocr(app, self._screenshot())
+            self.assertEqual(app.active_ocr_calls, {(4, 1)})
+            function, args = pool.submissions[0]
+            function(*args)
+            self.assertEqual(len(scheduled), 1)
+            scheduled[0][1](*scheduled[0][2])
+
+        start.assert_called_once_with(app, "generic OCR text", 1)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.last_displayed_batch_sequence, 1)
+
+    def test_executor_registry_enforces_capacity_across_generations(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        app, pool, _handler, _scheduled, _provider_calls = self._make_app(
+            generation=2
+        )
+        app.ocr_active_calls_lock = threading.RLock()
+        app.active_ocr_calls = {(2, 1)}
+        app.active_ocr_executor_calls = {(1, 1), (2, 1)}
+        app.max_concurrent_ocr_calls = 2
+        app.runtime_metrics = metrics
+        app.convert_to_webp_for_api = lambda _image: (_ for _ in ()).throw(
+            AssertionError("capacity guard must run before image conversion")
+        )
+
+        worker_threads.run_api_ocr(app, self._screenshot())
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(
+            metrics.snapshot()["gauges"].get("active_ocr_calls"),
+            2,
+        )
+
+
+class ApiOcrExecutorRegistryTests(unittest.TestCase):
+    def test_active_count_uses_a_locked_snapshot_during_concurrent_mutation(self):
+        worker_threads = import_worker_threads_for_tests()
+        iterator_entered = threading.Event()
+        mutation_complete = threading.Event()
+        count_finished = threading.Event()
+
+        class CoordinatedSet(set):
+            def __iter__(self):
+                iterator = super().__iter__()
+                iterator_entered.set()
+                mutation_complete.wait(timeout=0.2)
+                return iterator
+
+        lock = threading.RLock()
+        active_calls = CoordinatedSet({(1, 1)})
+        app = types.SimpleNamespace(
+            ocr_session_generation=1,
+            ocr_active_calls_lock=lock,
+            active_ocr_calls=active_calls,
+        )
+        errors = []
+        counts = []
+
+        def count_calls():
+            try:
+                counts.append(worker_threads._active_ocr_call_count(app))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                count_finished.set()
+
+        def mutate_calls():
+            iterator_entered.wait(timeout=1.0)
+            with lock:
+                active_calls.add((1, 2))
+            mutation_complete.set()
+            count_finished.wait(timeout=1.0)
+            with lock:
+                active_calls.discard((1, 2))
+
+        counter = threading.Thread(target=count_calls)
+        mutator = threading.Thread(target=mutate_calls)
+        mutator.start()
+        counter.start()
+        counter.join(timeout=2.0)
+        mutator.join(timeout=2.0)
+
+        self.assertFalse(counter.is_alive())
+        self.assertFalse(mutator.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(counts, [1])
+        self.assertEqual(active_calls, {(1, 1)})
+
+
+class ApiOcrGenerationClaimRaceTests(unittest.TestCase):
+    @staticmethod
+    def _advance_generation(app):
+        from app_lifecycle import AppLifecycleMixin
+
+        app._get_ocr_active_calls_lock = types.MethodType(
+            AppLifecycleMixin._get_ocr_active_calls_lock,
+            app,
+        )
+        app._advance_ocr_session_generation = types.MethodType(
+            AppLifecycleMixin._advance_ocr_session_generation,
+            app,
+        )
+        app._advance_ocr_session_generation("deterministic test boundary")
+
+    @staticmethod
+    def _generic_app(cache=None):
+        builder = GenericApiOcrSessionGenerationTests()
+        return builder._make_app(generation=1, cache=cache)
+
+    def _run_after_source_barrier(self, app):
+        worker_threads = import_worker_threads_for_tests()
+        source_entered = threading.Event()
+        allow_source = threading.Event()
+        errors = []
+        app.translation_model_var = types.SimpleNamespace(get=lambda: "other")
+        app.is_gemini_model = lambda _model: False
+        app.is_openai_model = lambda _model: False
+        app.source_lang_var = types.SimpleNamespace(
+            get=lambda: (
+                source_entered.set(),
+                allow_source.wait(timeout=1.0),
+                "en",
+            )[-1]
+        )
+
+        runner = threading.Thread(
+            target=lambda: self._run_api_ocr_capturing_errors(
+                worker_threads,
+                app,
+                errors,
+            )
+        )
+        runner.start()
+        self.assertTrue(source_entered.wait(timeout=1.0))
+        self._advance_generation(app)
+        allow_source.set()
+        runner.join(timeout=2.0)
+
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(errors, [])
+        return worker_threads
+
+    @staticmethod
+    def _run_api_ocr_capturing_errors(worker_threads, app, errors):
+        try:
+            worker_threads.run_api_ocr(
+                app,
+                Image.new("RGB", (32, 16), (1, 2, 3)),
+            )
+        except Exception as error:
+            errors.append(error)
+
+    def test_generic_boundary_before_claim_abandons_old_submission(self):
+        app, pool, _handler, scheduled, _provider_calls = self._generic_app()
+
+        self._run_after_source_barrier(app)
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.active_ocr_executor_calls, set())
+
+    def test_current_generation_claim_submits_and_keeps_its_token(self):
+        worker_threads = import_worker_threads_for_tests()
+        app, pool, _handler, scheduled, _provider_calls = self._generic_app()
+
+        worker_threads.run_api_ocr(
+            app,
+            Image.new("RGB", (32, 16), (1, 2, 3)),
+        )
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.batch_sequence_counter, 1)
+        self.assertEqual(app.active_ocr_calls, {(1, 1)})
+        self.assertEqual(app.active_ocr_executor_calls, {(1, 1)})
+
+    def test_stale_helper_registration_cannot_reinsert_old_token(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            ocr_session_generation=2,
+            ocr_active_calls_lock=threading.RLock(),
+            active_ocr_calls={(2, 1)},
+            active_ocr_executor_calls={(1, 1), (2, 1)},
+        )
+
+        registered = worker_threads._register_active_ocr_call(app, (1, 2))
+
+        self.assertFalse(registered)
+        self.assertEqual(app.active_ocr_calls, {(2, 1)})
+        self.assertEqual(app.active_ocr_executor_calls, {(1, 1), (2, 1)})
+
+    def test_generic_cache_boundary_does_not_allocate_or_schedule_old_callback(self):
+        cache = types.SimpleNamespace(
+            get=lambda _key: "cached old-generation OCR",
+            put=Mock(),
+        )
+        app, pool, _handler, scheduled, _provider_calls = self._generic_app(
+            cache=cache
+        )
+
+        self._run_after_source_barrier(app)
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.active_ocr_executor_calls, set())
+
+    def test_snapshot_profile_boundary_abandons_old_submission_without_new_sequence(self):
+        worker_threads = import_worker_threads_for_tests()
+        profile_entered = threading.Event()
+        allow_profile = threading.Event()
+        errors = []
+        app, pool, _handler, scheduled, _provider_calls = self._generic_app()
+        app.get_ocr_model_setting = lambda: "custom_ai"
+        app.translation_model_var = types.SimpleNamespace(get=lambda: "custom_ai")
+        app.custom_source_lang = "en"
+        app.custom_ai_profiles = types.SimpleNamespace(
+            get_active_profile=lambda _kind: (
+                profile_entered.set(),
+                allow_profile.wait(timeout=1.0),
+                {
+                    "id": "profile",
+                    "base_url": "https://provider.example/v1",
+                    "api_key": "test-key",
+                    "model": "vision",
+                    "wire_api": "responses",
+                },
+            )[-1]
+        )
+
+        runner = threading.Thread(
+            target=lambda: self._run_api_ocr_capturing_errors(
+                worker_threads,
+                app,
+                errors,
+            )
+        )
+        runner.start()
+        self.assertTrue(profile_entered.wait(timeout=1.0))
+        self._advance_generation(app)
+        allow_profile.set()
+        runner.join(timeout=2.0)
+
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.active_ocr_executor_calls, set())
 
 
 class TranslationSessionBoundaryTests(unittest.TestCase):
@@ -1888,7 +2749,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             def get(self, key):
                 self.lookups.append(key)
                 self.assertEqual(key, self.expected_snapshot.frame_cache_key)
-                self.assertEqual(app.batch_sequence_counter, 1)
+                self.assertEqual(app.batch_sequence_counter, 0)
                 return None
 
             def put(self, key, value):
@@ -2046,6 +2907,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         convert_calls = []
         translation_calls = []
+        scheduled = []
 
         cache = ocr_utils.OCRFrameCache(max_size=4)
         cache_key = ocr_utils.build_ocr_frame_cache_key(
@@ -2077,10 +2939,18 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             last_displayed_batch_sequence=0,
             last_processed_subtitle=None,
             reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
         )
 
         with patch.object(worker_threads, "start_async_translation", side_effect=lambda *args: translation_calls.append(args)):
             worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(translation_calls, [])
+            self.assertEqual(len(scheduled), 1)
+            scheduled[0][1](*scheduled[0][2])
 
         self.assertEqual(convert_calls, [])
         self.assertEqual(translation_calls, [(app, "Cached OCR text", 1)])
@@ -2096,6 +2966,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 raise AssertionError("API OCR should not be submitted for cached frames")
 
         translation_calls = []
+        scheduled = []
         cache = ocr_utils.OCRFrameCache(max_size=4)
         cache_key = ocr_utils.build_ocr_frame_cache_key(
             "repeat-hash",
@@ -2128,10 +2999,18 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             last_displayed_batch_sequence=0,
             last_processed_subtitle=None,
             reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
         )
 
         with patch.object(worker_threads, "start_async_translation", side_effect=lambda *args: translation_calls.append(args)):
             worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(translation_calls, [])
+            self.assertEqual(len(scheduled), 1)
+            scheduled[0][1](*scheduled[0][2])
 
         self.assertEqual(translation_calls, [(app, "Cached OCR text under load", 1)])
         self.assertEqual(app.active_ocr_calls, {99})
@@ -2216,7 +3095,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(profiles.requested_kind, "ocr")
         self.assertEqual(convert_calls, ["called"])
         self.assertEqual(len(pool.submissions), 1)
-        self.assertEqual(app.active_ocr_calls, {1})
+        self.assertEqual(app.active_ocr_calls, {(0, 1)})
 
     def test_api_ocr_cache_does_not_cross_keep_linebreaks_mode(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2266,7 +3145,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(convert_calls, ["called"])
         self.assertEqual(len(pool.submissions), 1)
-        self.assertEqual(app.active_ocr_calls, {1})
+        self.assertEqual(app.active_ocr_calls, {(0, 1)})
 
     def test_api_ocr_cache_does_not_cross_image_payload_settings(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2320,7 +3199,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(convert_calls, ["called"])
         self.assertEqual(len(pool.submissions), 1)
-        self.assertEqual(app.active_ocr_calls, {1})
+        self.assertEqual(app.active_ocr_calls, {(0, 1)})
 
     def test_api_ocr_cache_mode_key_includes_image_payload_settings(self):
         worker_threads = import_worker_threads_for_tests()

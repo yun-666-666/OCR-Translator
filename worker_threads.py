@@ -438,6 +438,7 @@ def _build_api_ocr_request_snapshot(
     frame_hash,
     region_size,
     region_origin,
+    ocr_session_generation=None,
 ):
     """Freeze Custom AI OCR inputs before cache lookup or image conversion."""
     if str(provider_name or '').strip().lower() != 'custom_ai':
@@ -499,7 +500,11 @@ def _build_api_ocr_request_snapshot(
     )
     try:
         return ApiOcrRequestSnapshot.create(
-            generation=getattr(app, 'api_ocr_request_generation', 0),
+            generation=(
+                _get_ocr_session_generation(app)
+                if ocr_session_generation is None
+                else ocr_session_generation
+            ),
             sequence=sequence,
             provider=provider_name,
             profile=profile,
@@ -555,14 +560,331 @@ def _build_api_ocr_request_snapshot(
         )
         return None
 
+
+def _get_ocr_session_generation(app):
+    """Read the current API OCR session generation with clone-safe fallback."""
+    try:
+        return max(0, int(getattr(app, 'ocr_session_generation', 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _normalize_ocr_session_generation(value):
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_current_ocr_generation(app, generation):
+    return (
+        _normalize_ocr_session_generation(generation)
+        == _get_ocr_session_generation(app)
+    )
+
+
+def _is_current_ocr_snapshot(app, request_snapshot):
+    return _is_current_ocr_generation(app, request_snapshot.generation)
+
+
+def _get_ocr_active_calls_lock(app):
+    lock = getattr(app, 'ocr_active_calls_lock', None)
+    if not (
+        hasattr(lock, 'acquire')
+        and hasattr(lock, 'release')
+    ):
+        lock = threading.RLock()
+        try:
+            app.ocr_active_calls_lock = lock
+        except Exception:
+            pass
+    return lock
+
+
+def _get_ocr_executor_calls(app, create=False):
+    executor_calls = getattr(app, 'active_ocr_executor_calls', None)
+    if executor_calls is None and create:
+        executor_calls = set()
+        try:
+            app.active_ocr_executor_calls = executor_calls
+        except Exception:
+            return None
+    return executor_calls
+
+
+def _get_ocr_batch_sequence(app):
+    """Return the current API OCR sequence without trusting mutable UI state."""
+    try:
+        return max(0, int(getattr(app, 'batch_sequence_counter', 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _active_ocr_call_count_locked(app):
+    """Count live API OCR calls while the app ownership lock is held."""
+    executor_calls = _get_ocr_executor_calls(app, create=False)
+    if executor_calls is not None:
+        return len(tuple(executor_calls))
+    active_tokens = tuple(getattr(app, 'active_ocr_calls', set()))
+    current_generation = _get_ocr_session_generation(app)
+    return sum(
+        1
+        for token in active_tokens
+        if not (
+            isinstance(token, tuple)
+            and len(token) == 2
+            and token[0] != current_generation
+        )
+    )
+
+
+def _observe_ocr_session_generation(app):
+    """Atomically start an API OCR attempt against the current session."""
+    with _get_ocr_active_calls_lock(app):
+        if not hasattr(app, 'batch_sequence_counter'):
+            app.batch_sequence_counter = 0
+        return _get_ocr_session_generation(app)
+
+
+def _bind_api_ocr_request_snapshot(
+    prepared_snapshot,
+    generation,
+    sequence_number,
+):
+    """Attach an atomically claimed token without rereading live request inputs."""
+    try:
+        (
+            frame_hash,
+            _cache_model,
+            _cache_source,
+            _cache_mode,
+            origin_x,
+            origin_y,
+            width,
+            height,
+        ) = prepared_snapshot.frame_cache_key
+        return ApiOcrRequestSnapshot.create(
+            generation=generation,
+            sequence=sequence_number,
+            provider=prepared_snapshot.provider,
+            profile=prepared_snapshot.profile_copy(),
+            source_language=prepared_snapshot.source_language,
+            keep_linebreaks=prepared_snapshot.keep_linebreaks,
+            latency_mode=prepared_snapshot.latency_mode,
+            reasoning_effort=prepared_snapshot.reasoning_effort,
+            image_detail=prepared_snapshot.image_detail,
+            image_format=prepared_snapshot.image_format,
+            image_mode=prepared_snapshot.image_mode,
+            image_quality=prepared_snapshot.image_quality,
+            mime_type=prepared_snapshot.mime_type,
+            frame_hash=frame_hash,
+            region_size=(width, height),
+            region_origin=(origin_x, origin_y),
+        )
+    except (AttributeError, IndexError, TypeError, ValueError) as error:
+        log_debug(
+            "Could not bind Custom AI OCR request snapshot to claimed token: "
+            f"{type(error).__name__}"
+        )
+        return None
+
+
+def _register_active_ocr_call(app, token):
+    """Atomically claim UI and executor ownership for one API OCR call."""
+    with _get_ocr_active_calls_lock(app):
+        if (
+            isinstance(token, tuple)
+            and len(token) == 2
+            and not _is_current_ocr_generation(app, token[0])
+        ):
+            return False
+        active_calls = getattr(app, 'active_ocr_calls', None)
+        if active_calls is None:
+            active_calls = set()
+            try:
+                app.active_ocr_calls = active_calls
+            except Exception:
+                return False
+        active_calls.add(token)
+        executor_calls = _get_ocr_executor_calls(app, create=True)
+        if executor_calls is not None:
+            executor_calls.add(token)
+        return True
+
+
+def _release_active_ocr_call(app, token):
+    """Atomically release exactly one API OCR call without clearing newer work."""
+    with _get_ocr_active_calls_lock(app):
+        active_calls = getattr(app, 'active_ocr_calls', None)
+        if active_calls is not None:
+            active_calls.discard(token)
+        executor_calls = _get_ocr_executor_calls(app, create=False)
+        if executor_calls is not None:
+            executor_calls.discard(token)
+
+
+def _active_ocr_call_count(app):
+    """Count a locked snapshot of live executor calls or compatible UI tokens."""
+    with _get_ocr_active_calls_lock(app):
+        return _active_ocr_call_count_locked(app)
+
+
+def _preflight_api_ocr_submission(app, observed_generation):
+    """Avoid encoding work when the observed session is obsolete or full.
+
+    The final capacity decision is repeated by `_claim_and_submit_api_ocr` while
+    it claims the token, so this early check cannot create a claim race.
+    """
+    with _get_ocr_active_calls_lock(app):
+        if not _is_current_ocr_generation(app, observed_generation):
+            return 'obsolete', 0
+        active_call_count = _active_ocr_call_count_locked(app)
+        if active_call_count >= app.max_concurrent_ocr_calls:
+            _set_metric_gauge(app, "active_ocr_calls", active_call_count)
+            return 'capacity', active_call_count
+        return 'ready', active_call_count
+
+
+def _schedule_cached_api_ocr_response(
+    app,
+    observed_generation,
+    cached_ocr_text,
+    source_lang,
+    provider_name,
+    ocr_cache_key,
+    prepared_snapshot=None,
+):
+    """Atomically allocate a cache sequence and queue its guarded callback."""
+    with _get_ocr_active_calls_lock(app):
+        if not _is_current_ocr_generation(app, observed_generation):
+            return 'obsolete', None
+
+        sequence_number = _get_ocr_batch_sequence(app) + 1
+        request_snapshot = prepared_snapshot
+        if request_snapshot is not None:
+            request_snapshot = _bind_api_ocr_request_snapshot(
+                request_snapshot,
+                observed_generation,
+                sequence_number,
+            )
+            if request_snapshot is None:
+                return 'invalid_snapshot', None
+
+        app.batch_sequence_counter = sequence_number
+        try:
+            if request_snapshot is not None:
+                callback = process_api_ocr_snapshot_response
+                callback_args = (
+                    app,
+                    cached_ocr_text,
+                    request_snapshot,
+                )
+            else:
+                callback = process_api_ocr_response
+                callback_args = (
+                    app,
+                    cached_ocr_text,
+                    sequence_number,
+                    source_lang,
+                    provider_name,
+                    ocr_cache_key,
+                    observed_generation,
+                )
+            after = getattr(getattr(app, 'root', None), 'after', None)
+            if callable(after):
+                after(0, callback, *callback_args)
+            else:
+                callback(*callback_args)
+        except Exception:
+            # Keep the allocated sequence for compatibility with the existing
+            # cache-hit path: a UI scheduling failure still consumed this
+            # accepted current-session result before the callback failed.
+            raise
+        return 'scheduled', sequence_number
+
+
+def _claim_and_submit_api_ocr(
+    app,
+    observed_generation,
+    provider_name,
+    image_data,
+    source_lang,
+    ocr_cache_key,
+    image_mime_type,
+    prepared_snapshot=None,
+):
+    """Atomically verify, allocate, claim, and submit one API OCR request."""
+    with _get_ocr_active_calls_lock(app):
+        if not _is_current_ocr_generation(app, observed_generation):
+            return 'obsolete', None, None
+
+        active_call_count = _active_ocr_call_count_locked(app)
+        if active_call_count >= app.max_concurrent_ocr_calls:
+            _set_metric_gauge(app, "active_ocr_calls", active_call_count)
+            return 'capacity', None, active_call_count
+
+        previous_sequence = _get_ocr_batch_sequence(app)
+        sequence_number = previous_sequence + 1
+        request_snapshot = prepared_snapshot
+        if request_snapshot is not None:
+            request_snapshot = _bind_api_ocr_request_snapshot(
+                request_snapshot,
+                observed_generation,
+                sequence_number,
+            )
+            if request_snapshot is None:
+                return 'invalid_snapshot', None, active_call_count
+
+        active_call_token = (observed_generation, sequence_number)
+        if not _register_active_ocr_call(app, active_call_token):
+            return 'obsolete', None, None
+
+        app.batch_sequence_counter = sequence_number
+        try:
+            if request_snapshot is not None:
+                app.ocr_thread_pool.submit(
+                    process_api_ocr_snapshot_async,
+                    app,
+                    image_data,
+                    request_snapshot,
+                )
+            else:
+                app.ocr_thread_pool.submit(
+                    process_api_ocr_async,
+                    app,
+                    image_data,
+                    source_lang,
+                    sequence_number,
+                    provider_name,
+                    ocr_cache_key,
+                    image_mime_type,
+                    observed_generation,
+                )
+        except Exception:
+            _release_active_ocr_call(app, active_call_token)
+            if (
+                _is_current_ocr_generation(app, observed_generation)
+                and _get_ocr_batch_sequence(app) == sequence_number
+            ):
+                app.batch_sequence_counter = previous_sequence
+            _set_metric_gauge(
+                app,
+                "active_ocr_calls",
+                _active_ocr_call_count_locked(app),
+            )
+            raise
+
+        active_call_count = _active_ocr_call_count_locked(app)
+        _set_metric_gauge(app, "active_ocr_calls", active_call_count)
+        return 'submitted', sequence_number, active_call_count
+
 def run_api_ocr(app, screenshot_pil):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
         ocr_start_time = time.monotonic()
         provider_name = app.get_ocr_model_setting()
 
-        if not hasattr(app, 'batch_sequence_counter'):
-            app.batch_sequence_counter = 0
+        ocr_session_generation = _observe_ocr_session_generation(app)
 
         if provider_name == 'custom_ai':
             source_lang = getattr(app, 'custom_source_lang', None) or app.source_lang_var.get()
@@ -582,16 +904,15 @@ def run_api_ocr(app, screenshot_pil):
         if is_custom_ai_provider and hasattr(app, 'custom_ai_profiles'):
             frame_hash = _get_screenshot_frame_hash(screenshot_pil)
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
-            app.batch_sequence_counter += 1
-            sequence_number = app.batch_sequence_counter
             request_snapshot = _build_api_ocr_request_snapshot(
                 app,
                 provider_name,
                 source_lang,
-                sequence_number,
+                0,
                 frame_hash,
                 screenshot_pil.size,
                 region_origin,
+                ocr_session_generation,
             )
             if request_snapshot is None:
                 return
@@ -613,31 +934,52 @@ def run_api_ocr(app, screenshot_pil):
                 )
             cached_ocr_text = app.ocr_frame_cache.get(ocr_cache_key)
             if cached_ocr_text is not None:
-                if request_snapshot is None:
-                    app.batch_sequence_counter += 1
-                    sequence_number = app.batch_sequence_counter
+                try:
+                    cache_status, sequence_number = _schedule_cached_api_ocr_response(
+                        app,
+                        ocr_session_generation,
+                        cached_ocr_text,
+                        source_lang,
+                        provider_name,
+                        ocr_cache_key,
+                        request_snapshot,
+                    )
+                except Exception:
+                    _increment_metric(app, "ocr_frame_cache_hit")
+                    _record_metric_timing(
+                        app,
+                        "ocr_duration",
+                        time.monotonic() - ocr_start_time,
+                    )
+                    raise
+                if cache_status == 'obsolete':
+                    log_debug(
+                        f"{provider_name} OCR cache result belongs to an obsolete "
+                        "session; discarding"
+                    )
+                    return
+                if cache_status == 'invalid_snapshot':
+                    log_debug(
+                        "Custom AI OCR cache result has an invalid request "
+                        "snapshot; discarding"
+                    )
+                    return
                 log_debug(f"LATENCY: API OCR cache hit for {provider_name} batch {sequence_number}")
                 _increment_metric(app, "ocr_frame_cache_hit")
                 _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
-                if request_snapshot is not None:
-                    process_api_ocr_snapshot_response(
-                        app,
-                        cached_ocr_text,
-                        request_snapshot,
-                    )
-                else:
-                    process_api_ocr_response(
-                        app,
-                        cached_ocr_text,
-                        sequence_number,
-                        source_lang,
-                        provider_name,
-                        ocr_cache_key=ocr_cache_key,
-                    )
                 return
 
-        if len(app.active_ocr_calls) >= app.max_concurrent_ocr_calls:
-            _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
+        preflight_status, active_call_count = _preflight_api_ocr_submission(
+            app,
+            ocr_session_generation,
+        )
+        if preflight_status == 'obsolete':
+            log_debug(
+                f"{provider_name} OCR request belongs to an obsolete session; "
+                "discarding before image conversion"
+            )
+            return
+        if preflight_status == 'capacity':
             log_debug(f"Max concurrent OCR calls ({app.max_concurrent_ocr_calls}) reached, skipping {provider_name} OCR before image conversion")
             return
 
@@ -675,7 +1017,7 @@ def run_api_ocr(app, screenshot_pil):
             != request_snapshot.mime_type
         ):
             log_debug(
-                f"Custom AI OCR batch {sequence_number} image contract mismatch; skipping provider call"
+                "Custom AI OCR image contract mismatch; skipping provider call"
             )
             return
 
@@ -685,44 +1027,58 @@ def run_api_ocr(app, screenshot_pil):
         image_data = encoded_image.data
         image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
 
-        if request_snapshot is None:
-            app.batch_sequence_counter += 1
-            sequence_number = app.batch_sequence_counter
-
-        app.active_ocr_calls.add(sequence_number)
-        _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
-        try:
-            if request_snapshot is not None:
-                app.ocr_thread_pool.submit(
-                    process_api_ocr_snapshot_async,
-                    app,
-                    image_data,
-                    request_snapshot,
-                )
-            else:
-                app.ocr_thread_pool.submit(
-                    process_api_ocr_async,
-                    app,
-                    image_data,
-                    source_lang,
-                    sequence_number,
-                    provider_name,
-                    ocr_cache_key,
-                    image_mime_type,
-                )
-        except Exception:
-            app.active_ocr_calls.discard(sequence_number)
-            raise
-        log_debug(f"Started {provider_name} OCR batch {sequence_number} (active calls: {len(app.active_ocr_calls)})")
+        submit_status, sequence_number, active_call_count = _claim_and_submit_api_ocr(
+            app,
+            ocr_session_generation,
+            provider_name,
+            image_data,
+            source_lang,
+            ocr_cache_key,
+            image_mime_type,
+            request_snapshot,
+        )
+        if submit_status == 'obsolete':
+            log_debug(
+                f"{provider_name} OCR request belongs to an obsolete session; "
+                "discarding before submission"
+            )
+            return
+        if submit_status == 'capacity':
+            log_debug(
+                f"Max concurrent OCR calls ({app.max_concurrent_ocr_calls}) "
+                f"reached, skipping {provider_name} OCR before submission"
+            )
+            return
+        if submit_status == 'invalid_snapshot':
+            log_debug(
+                "Custom AI OCR request has an invalid snapshot; skipping "
+                "provider call"
+            )
+            return
+        log_debug(
+            f"Started {provider_name} OCR batch {sequence_number} "
+            f"(active calls: {active_call_count})"
+        )
 
     except Exception as e:
-        log_debug(f"Error starting API OCR batch: {type(e).__name__} - {e}")
+        log_debug(
+            "Error starting API OCR batch: "
+            f"{type(e).__name__}"
+        )
 
 def process_api_ocr_snapshot_async(app, image_data, request_snapshot):
     """Run one fully frozen Custom AI OCR request without configuration reads."""
     sequence_number = request_snapshot.sequence
     provider_name = request_snapshot.provider
+    request_token = request_snapshot.request_token
     try:
+        if not _is_current_ocr_snapshot(app, request_snapshot):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} belongs to an "
+                "obsolete session; skipping provider call"
+            )
+            return
+
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
         if sequence_number < latest_started_sequence:
             log_debug(
@@ -742,6 +1098,12 @@ def process_api_ocr_snapshot_async(app, image_data, request_snapshot):
             f"{provider_name} OCR batch {sequence_number} completed, "
             f"scheduling response {summarize_text_for_log(ocr_result)}"
         )
+        if not _is_current_ocr_snapshot(app, request_snapshot):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} completed for an "
+                "obsolete session; discarding response"
+            )
+            return
         app.root.after(
             0,
             process_api_ocr_snapshot_response,
@@ -750,8 +1112,17 @@ def process_api_ocr_snapshot_async(app, image_data, request_snapshot):
             request_snapshot,
         )
     except Exception as e:
-        log_debug(f"Error in async {provider_name} OCR batch {sequence_number}: {type(e).__name__} - {e}")
+        log_debug(
+            f"Error in async {provider_name} OCR batch {sequence_number}: "
+            f"{type(e).__name__}"
+        )
         error_msg = f"<e>: OCR batch {sequence_number} error: {str(e)}"
+        if not _is_current_ocr_snapshot(app, request_snapshot):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} failed for an "
+                "obsolete session; discarding response"
+            )
+            return
         app.root.after(
             0,
             process_api_ocr_snapshot_response,
@@ -760,13 +1131,22 @@ def process_api_ocr_snapshot_async(app, image_data, request_snapshot):
             request_snapshot,
         )
     finally:
-        app.active_ocr_calls.discard(sequence_number)
-        _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
-        log_debug(f"{provider_name} OCR batch {sequence_number} finished (active calls: {len(app.active_ocr_calls)})")
+        _release_active_ocr_call(app, request_token)
+        _set_metric_gauge(app, "active_ocr_calls", _active_ocr_call_count(app))
+        log_debug(
+            f"{provider_name} OCR batch {sequence_number} finished "
+            f"(active calls: {_active_ocr_call_count(app)})"
+        )
 
 
 def process_api_ocr_snapshot_response(app, ocr_result, request_snapshot):
     """Schedule response bookkeeping solely from an API OCR request snapshot."""
+    if not _is_current_ocr_snapshot(app, request_snapshot):
+        log_debug(
+            f"{request_snapshot.provider} OCR batch {request_snapshot.sequence} "
+            "response belongs to an obsolete session; discarding"
+        )
+        return
     return process_api_ocr_response(
         app,
         ocr_result,
@@ -785,9 +1165,29 @@ def process_api_ocr_async(
     provider_name,
     ocr_cache_key=None,
     image_mime_type="image/webp",
+    ocr_session_generation=None,
 ):
     """Process an API OCR call asynchronously. This is the generic worker function."""
+    generation_qualified = ocr_session_generation is not None
+    captured_generation = _normalize_ocr_session_generation(
+        ocr_session_generation
+    )
+    active_call_token = (
+        (captured_generation, sequence_number)
+        if generation_qualified
+        else sequence_number
+    )
     try:
+        if generation_qualified and not _is_current_ocr_generation(
+            app,
+            captured_generation,
+        ):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} belongs to an "
+                "obsolete session; skipping provider call"
+            )
+            return
+
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
         if sequence_number < latest_started_sequence:
             log_debug(
@@ -810,6 +1210,15 @@ def process_api_ocr_async(
             f"{provider_name} OCR batch {sequence_number} completed, "
             f"scheduling response {summarize_text_for_log(ocr_result)}"
         )
+        if generation_qualified and not _is_current_ocr_generation(
+            app,
+            captured_generation,
+        ):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} completed for an "
+                "obsolete session; discarding response"
+            )
+            return
         app.root.after(
             0,
             process_api_ocr_response,
@@ -819,11 +1228,28 @@ def process_api_ocr_async(
             source_lang,
             provider_name,
             ocr_cache_key,
+            *(
+                (captured_generation,)
+                if generation_qualified
+                else ()
+            ),
         )
 
     except Exception as e:
-        log_debug(f"Error in async {provider_name} OCR batch {sequence_number}: {type(e).__name__} - {e}")
+        log_debug(
+            f"Error in async {provider_name} OCR batch {sequence_number}: "
+            f"{type(e).__name__}"
+        )
         error_msg = f"<e>: OCR batch {sequence_number} error: {str(e)}"
+        if generation_qualified and not _is_current_ocr_generation(
+            app,
+            captured_generation,
+        ):
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} failed for an "
+                "obsolete session; discarding response"
+            )
+            return
         app.root.after(
             0,
             process_api_ocr_response,
@@ -833,12 +1259,20 @@ def process_api_ocr_async(
             source_lang,
             provider_name,
             ocr_cache_key,
+            *(
+                (captured_generation,)
+                if generation_qualified
+                else ()
+            ),
         )
 
     finally:
-        app.active_ocr_calls.discard(sequence_number)
-        _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
-        log_debug(f"{provider_name} OCR batch {sequence_number} finished (active calls: {len(app.active_ocr_calls)})")
+        _release_active_ocr_call(app, active_call_token)
+        _set_metric_gauge(app, "active_ocr_calls", _active_ocr_call_count(app))
+        log_debug(
+            f"{provider_name} OCR batch {sequence_number} finished "
+            f"(active calls: {_active_ocr_call_count(app)})"
+        )
 
 def process_api_ocr_response(
     app,
@@ -847,8 +1281,18 @@ def process_api_ocr_response(
     source_lang,
     provider_name,
     ocr_cache_key=None,
+    ocr_session_generation=None,
 ):
     """Process any API OCR response with chronological order enforcement. This is the generic callback."""
+    if (
+        ocr_session_generation is not None
+        and not _is_current_ocr_generation(app, ocr_session_generation)
+    ):
+        log_debug(
+            f"{provider_name} OCR batch {sequence_number} response belongs to an "
+            "obsolete session; discarding"
+        )
+        return
     try:
         log_debug(
             f"Processing {provider_name} OCR response for batch "

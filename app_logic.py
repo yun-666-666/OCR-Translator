@@ -184,9 +184,12 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
 
         # Gemini OCR Batch Infrastructure (Phase 1)
         self.last_processed_subtitle = None  # Store last processed subtitle for successive comparison
+        self.ocr_session_generation = 0  # Invalidate API OCR work across lifecycle boundaries
         self.batch_sequence_counter = 0  # Track batch sequence numbers
         self.clear_timeout_timer_start = None  # Timer for clear translation timeout
+        self.ocr_active_calls_lock = threading.RLock()  # Synchronize API OCR call ownership
         self.active_ocr_calls = set()  # Track active async OCR calls
+        self.active_ocr_executor_calls = set()  # Track all in-flight API OCR executor calls
         self.max_concurrent_ocr_calls = 8  # Limit concurrent OCR API calls (8 for Gemini)
 
         # Gemini OCR Simple Management (No Queue for Gemini)

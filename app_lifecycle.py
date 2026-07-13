@@ -97,6 +97,7 @@ class AppLifecycleMixin:
         """Clear unified translation cache - FIXED VERSION (No pause/resume needed)."""
         try:
             _log_debug("Clearing unified translation cache...")
+            self._advance_ocr_session_generation("cache cleared")
 
             # Notify MarianMT translator about cache clearing FIRST
             if hasattr(self, 'marian_translator') and self.marian_translator:
@@ -173,11 +174,41 @@ class AppLifecycleMixin:
 
         reset_translation_scheduler_session_state(self, reason)
 
+    def _get_ocr_active_calls_lock(self):
+        lock = getattr(self, 'ocr_active_calls_lock', None)
+        if not (
+            hasattr(lock, 'acquire')
+            and hasattr(lock, 'release')
+        ):
+            lock = threading.RLock()
+            self.ocr_active_calls_lock = lock
+        return lock
+
+    def _advance_ocr_session_generation(self, reason):
+        """Invalidate API OCR work before a lifecycle boundary changes state."""
+        with self._get_ocr_active_calls_lock():
+            try:
+                current_generation = int(
+                    getattr(self, 'ocr_session_generation', 0)
+                )
+            except (TypeError, ValueError):
+                current_generation = 0
+            next_generation = max(0, current_generation) + 1
+            self.ocr_session_generation = next_generation
+            self.batch_sequence_counter = 0
+            self.last_displayed_batch_sequence = 0
+            self.active_ocr_calls = set()
+            if not hasattr(self, 'active_ocr_executor_calls'):
+                self.active_ocr_executor_calls = set()
+        _log_debug(
+            "API OCR session generation advanced to "
+            f"{next_generation} ({reason})"
+        )
+        return next_generation
+
     def _reset_gemini_batch_state(self):
         """Reset Gemini OCR batch management state for clean start."""
-        self.batch_sequence_counter = 0
-        self.last_displayed_batch_sequence = 0
-        self.active_ocr_calls = set()
+        self._advance_ocr_session_generation("OCR batch state reset")
         self.last_processed_subtitle = None
         self.last_local_ocr_submitted_text = None
         self.last_local_ocr_submitted_norm = None
@@ -198,6 +229,7 @@ class AppLifecycleMixin:
 
     def _stop_translation_for_app_exit(self):
         """Stop worker activity for application exit without scheduling UI callbacks."""
+        self._advance_ocr_session_generation("application exit")
         if not self.is_running:
             _log_debug("Process was not running at close time.")
             return
@@ -219,8 +251,6 @@ class AppLifecycleMixin:
             except Exception as join_error:
                 _log_debug(f"Error joining thread during app exit: {join_error}")
 
-        if hasattr(self, 'active_ocr_calls'):
-            self.active_ocr_calls.clear()
         if hasattr(self, 'active_translation_calls'):
             self.active_translation_calls.clear()
 
@@ -252,8 +282,16 @@ class AppLifecycleMixin:
         if hasattr(translation_handler, 'ocr_providers'):
             for provider in translation_handler.ocr_providers.values():
                 pending_ocr += provider._pending_ocr_calls
-        if hasattr(self, 'active_ocr_calls'):
-            pending_ocr += len(self.active_ocr_calls)
+        with self._get_ocr_active_calls_lock():
+            executor_calls = getattr(
+                self,
+                'active_ocr_executor_calls',
+                None,
+            )
+            if executor_calls is not None:
+                pending_ocr += len(tuple(executor_calls))
+            elif hasattr(self, 'active_ocr_calls'):
+                pending_ocr += len(tuple(self.active_ocr_calls))
 
         pending_translation = 0
         if hasattr(translation_handler, 'providers'):
@@ -329,6 +367,7 @@ class AppLifecycleMixin:
 
         if self.is_running:
             _log_debug("Stopping translation process requested by user.")
+            self._advance_ocr_session_generation("translation stop requested")
             self.is_running = False
             self._shutdown_finalized = False
 
@@ -502,6 +541,7 @@ class AppLifecycleMixin:
     def on_closing(self):
         _log_debug("Main window close requested. Initiating shutdown...")
         self._app_is_closing = True
+        self._advance_ocr_session_generation("window closing")
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)
@@ -610,5 +650,3 @@ class AppLifecycleMixin:
         except Exception as e_drw:
              _log_debug(f"Error destroying root window: {e_drw}")
         _log_debug("Application shutdown sequence complete.")
-
-
