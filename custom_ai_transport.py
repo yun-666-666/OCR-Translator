@@ -105,6 +105,35 @@ class CustomAITransportMixin:
         kwargs["deadline"] = deadline
         return post(profile, payload, **kwargs)
 
+    def _stream_post_with_deadline_compatibility(
+        self,
+        profile,
+        payload,
+        stream_callback,
+        latency_mode,
+        request_kind,
+        timeout_seconds,
+        deadline,
+    ):
+        kwargs = {
+            "stream_callback": stream_callback,
+            "latency_mode": latency_mode,
+            "request_kind": request_kind,
+        }
+        if timeout_seconds is not None:
+            kwargs["timeout_seconds"] = timeout_seconds
+        if deadline is None:
+            return self._stream_post(profile, payload, **kwargs)
+        post = self._stream_post
+        is_builtin_post = (
+            getattr(post, "__func__", None)
+            is CustomAITransportMixin._stream_post
+        )
+        if not is_builtin_post and not self._post_accepts_deadline(post):
+            return post(profile, payload, **kwargs)
+        kwargs["deadline"] = deadline
+        return post(profile, payload, **kwargs)
+
     def _get_http_client(self, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         if latency_mode == CUSTOM_AI_LATENCY_MODE_NONE and self._owns_http_client:
@@ -194,180 +223,193 @@ class CustomAITransportMixin:
             return http_client.post(url, **kwargs)
 
         response = send(request_payload)
+
+        def retry(current_payload):
+            nonlocal response
+            previous_response = response
+            response = None
+            self._close_response_quietly(previous_response)
+            response = send(current_payload)
+            return response
+
         output_limit_field = self._output_limit_field(profile)
         pending_reasoning_memory = None
-        for _attempt in range(4):
-            if (
-                "prompt_cache_key" in request_payload
-                and self._response_rejects_compatibility_feature(
-                    response,
-                    api_key,
-                    required_markers=("prompt_cache_key",),
-                    rejection_markers=(
-                        "unsupported",
-                        "not supported",
-                        "unknown",
-                        "unrecognized",
-                        "not permitted",
-                        "not allowed",
-                        "extra input",
-                        "extra field",
-                    ),
-                )
-            ):
-                self._remember_unsupported_prompt_cache_key(profile)
-                request_payload = self._without_prompt_cache_key(
-                    request_payload,
-                )
-                _log_debug(
-                    "COMPAT: retrying Custom AI request without unsupported "
-                    "prompt_cache_key"
-                )
-                response = send(request_payload)
-                continue
-
-            if (
-                request_kind
-                and self._payload_has_reasoning_effort(request_payload)
-                and self._response_rejects_compatibility_feature(
-                    response,
-                    api_key,
-                    required_markers=(
-                        "reasoning",
-                        "reasoning_effort",
-                        "thinking",
-                        "effort",
-                    ),
-                    rejection_markers=(
-                        "does not support parameter",
-                        "does not support",
-                        "doesn't support",
-                        "do not support",
-                        "not support",
-                        "unsupported parameter",
-                        "unknown parameter",
-                        "unknown field",
-                        "invalid field",
-                        "invalid parameter",
-                        "unsupported",
-                        "not supported",
-                        "unrecognized",
-                        "not permitted",
-                        "not allowed",
-                        "extra input",
-                        "extra field",
-                    ),
-                )
-            ):
-                pending_reasoning_memory = (
-                    request_kind,
-                    self._payload_reasoning_effort(request_payload, profile),
-                )
-                request_payload = self._without_reasoning_effort(
-                    request_payload,
-                )
-                _log_debug(
-                    "COMPAT: retrying Custom AI request without unsupported "
-                    "reasoning effort"
-                )
-                response = send(request_payload)
-                continue
-
-            if (
-                self._payload_has_structured_output(request_payload)
-                and self._response_rejects_compatibility_feature(
-                    response,
-                    api_key,
-                    required_markers=(
-                        "response_format",
-                        "json_schema",
-                        "json schema",
-                        "text.format",
-                        '"format"',
-                        "'format'",
-                        "structured",
-                    ),
-                    rejection_markers=(
-                        "unsupported",
-                        "not supported",
-                        "unknown",
-                        "unrecognized",
-                        "not permitted",
-                        "not allowed",
-                        "extra input",
-                        "extra field",
-                        "invalid parameter",
-                        "unknown parameter",
-                    ),
-                )
-            ):
+        try:
+            for _attempt in range(4):
                 if (
-                    self._structured_output_mode(profile)
-                    != CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
-                ):
-                    raise ValueError(
-                        self._structured_output_error_message(profile)
+                    "prompt_cache_key" in request_payload
+                    and self._response_rejects_compatibility_feature(
+                        response,
+                        api_key,
+                        required_markers=("prompt_cache_key",),
+                        rejection_markers=(
+                            "unsupported",
+                            "not supported",
+                            "unknown",
+                            "unrecognized",
+                            "not permitted",
+                            "not allowed",
+                            "extra input",
+                            "extra field",
+                        ),
                     )
-                self._remember_unsupported_structured_output(profile)
-                request_payload = self._without_structured_output(
-                    request_payload,
-                )
-                _log_debug(
-                    "COMPAT: retrying Custom AI request without unsupported "
-                    "structured output"
-                )
-                response = send(request_payload)
-                continue
+                ):
+                    self._remember_unsupported_prompt_cache_key(profile)
+                    request_payload = self._without_prompt_cache_key(
+                        request_payload,
+                    )
+                    _log_debug(
+                        "COMPAT: retrying Custom AI request without unsupported "
+                        "prompt_cache_key"
+                    )
+                    retry(request_payload)
+                    continue
 
+                if (
+                    request_kind
+                    and self._payload_has_reasoning_effort(request_payload)
+                    and self._response_rejects_compatibility_feature(
+                        response,
+                        api_key,
+                        required_markers=(
+                            "reasoning",
+                            "reasoning_effort",
+                            "thinking",
+                            "effort",
+                        ),
+                        rejection_markers=(
+                            "does not support parameter",
+                            "does not support",
+                            "doesn't support",
+                            "do not support",
+                            "not support",
+                            "unsupported parameter",
+                            "unknown parameter",
+                            "unknown field",
+                            "invalid field",
+                            "invalid parameter",
+                            "unsupported",
+                            "not supported",
+                            "unrecognized",
+                            "not permitted",
+                            "not allowed",
+                            "extra input",
+                            "extra field",
+                        ),
+                    )
+                ):
+                    pending_reasoning_memory = (
+                        request_kind,
+                        self._payload_reasoning_effort(request_payload, profile),
+                    )
+                    request_payload = self._without_reasoning_effort(
+                        request_payload,
+                    )
+                    _log_debug(
+                        "COMPAT: retrying Custom AI request without unsupported "
+                        "reasoning effort"
+                    )
+                    retry(request_payload)
+                    continue
+
+                if (
+                    self._payload_has_structured_output(request_payload)
+                    and self._response_rejects_compatibility_feature(
+                        response,
+                        api_key,
+                        required_markers=(
+                            "response_format",
+                            "json_schema",
+                            "json schema",
+                            "text.format",
+                            '"format"',
+                            "'format'",
+                            "structured",
+                        ),
+                        rejection_markers=(
+                            "unsupported",
+                            "not supported",
+                            "unknown",
+                            "unrecognized",
+                            "not permitted",
+                            "not allowed",
+                            "extra input",
+                            "extra field",
+                            "invalid parameter",
+                            "unknown parameter",
+                        ),
+                    )
+                ):
+                    if (
+                        self._structured_output_mode(profile)
+                        != CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
+                    ):
+                        raise ValueError(
+                            self._structured_output_error_message(profile)
+                        )
+                    self._remember_unsupported_structured_output(profile)
+                    request_payload = self._without_structured_output(
+                        request_payload,
+                    )
+                    _log_debug(
+                        "COMPAT: retrying Custom AI request without unsupported "
+                        "structured output"
+                    )
+                    retry(request_payload)
+                    continue
+
+                if (
+                    output_limit_field in request_payload
+                    and self._response_rejects_compatibility_feature(
+                        response,
+                        api_key,
+                        required_markers=(output_limit_field.lower(),),
+                        rejection_markers=(
+                            "unsupported",
+                            "not supported",
+                            "unknown",
+                            "unrecognized",
+                            "not permitted",
+                            "not allowed",
+                            "extra input",
+                            "extra field",
+                        ),
+                        excluded_markers=(
+                            " must be ",
+                            "less than",
+                            "greater than",
+                            "maximum",
+                            "minimum",
+                            "between",
+                            "out of range",
+                            f"{output_limit_field.lower()} value ",
+                        ),
+                    )
+                ):
+                    self._remember_unsupported_output_limit(profile)
+                    retry_payload = dict(request_payload)
+                    retry_payload.pop(output_limit_field, None)
+                    request_payload = retry_payload
+                    _log_debug(
+                        "COMPAT: retrying Custom AI request without unsupported "
+                        f"{output_limit_field}"
+                    )
+                    retry(request_payload)
+                    continue
+                break
             if (
-                output_limit_field in request_payload
-                and self._response_rejects_compatibility_feature(
-                    response,
-                    api_key,
-                    required_markers=(output_limit_field.lower(),),
-                    rejection_markers=(
-                        "unsupported",
-                        "not supported",
-                        "unknown",
-                        "unrecognized",
-                        "not permitted",
-                        "not allowed",
-                        "extra input",
-                        "extra field",
-                    ),
-                    excluded_markers=(
-                        " must be ",
-                        "less than",
-                        "greater than",
-                        "maximum",
-                        "minimum",
-                        "between",
-                        "out of range",
-                        f"{output_limit_field.lower()} value ",
-                    ),
-                )
+                pending_reasoning_memory
+                and int(getattr(response, "status_code", 200) or 200) < 400
             ):
-                self._remember_unsupported_output_limit(profile)
-                retry_payload = dict(request_payload)
-                retry_payload.pop(output_limit_field, None)
-                request_payload = retry_payload
-                _log_debug(
-                    "COMPAT: retrying Custom AI request without unsupported "
-                    f"{output_limit_field}"
+                self._remember_unsupported_reasoning_effort(
+                    profile,
+                    pending_reasoning_memory[0],
+                    pending_reasoning_memory[1],
                 )
-                response = send(request_payload)
-                continue
-            break
-        if (
-            pending_reasoning_memory
-            and int(getattr(response, "status_code", 200) or 200) < 400
-        ):
-            self._remember_unsupported_reasoning_effort(
-                profile,
-                pending_reasoning_memory[0],
-                pending_reasoning_memory[1],
-            )
-        return response
+            return response
+        except Exception:
+            self._close_response_quietly(response)
+            raise
 
     def _response_classification_detail(self, response):
         """Read provider detail only for private boolean classification."""
@@ -685,12 +727,10 @@ class CustomAITransportMixin:
         deadline_monotonic=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
-        deadline = None
-        if latency_mode != CUSTOM_AI_LATENCY_MODE_STREAM:
-            deadline = self._resolve_request_deadline(
-                deadline_monotonic=deadline_monotonic,
-                timeout_seconds=timeout_seconds,
-            )
+        deadline = self._resolve_request_deadline(
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         payload = self.build_translation_payload(
             profile,
             text,
@@ -716,17 +756,14 @@ class CustomAITransportMixin:
 
         def request(current_payload):
             if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM:
-                stream_kwargs = {
-                    "stream_callback": effective_stream_callback,
-                    "latency_mode": latency_mode,
-                }
-                if timeout_seconds is not None:
-                    stream_kwargs["timeout_seconds"] = timeout_seconds
-                return self._stream_post(
+                return self._stream_post_with_deadline_compatibility(
                     profile,
                     current_payload,
-                    request_kind="translation",
-                    **stream_kwargs,
+                    effective_stream_callback,
+                    latency_mode,
+                    "translation",
+                    timeout_seconds,
+                    deadline,
                 )
             return self._post_with_deadline_compatibility(
                 profile,
@@ -1157,8 +1194,15 @@ class CustomAITransportMixin:
         latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM,
         request_kind=None,
         timeout_seconds=None,
+        deadline_monotonic=None,
+        deadline=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        deadline = self._resolve_request_deadline(
+            deadline=deadline,
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
         headers = {
@@ -1180,6 +1224,7 @@ class CustomAITransportMixin:
                 latency_mode=latency_mode,
                 request_kind=request_kind,
                 timeout_seconds=timeout_seconds,
+                deadline=deadline,
             )
         api_key = profile.get("api_key", "")
         request_payload, openrouter_latency_routing = self._prepare_payload_for_profile(
@@ -1197,6 +1242,7 @@ class CustomAITransportMixin:
         errors = []
 
         for url in urls:
+            response = None
             try:
                 start = time.monotonic()
                 response = self._post_with_output_limit_fallback(
@@ -1209,6 +1255,7 @@ class CustomAITransportMixin:
                     stream=True,
                     request_kind=request_kind,
                     timeout_seconds=timeout_seconds,
+                    deadline=deadline,
                 )
                 status_code = int(getattr(response, "status_code", 200) or 200)
                 _log_debug(
@@ -1241,11 +1288,17 @@ class CustomAITransportMixin:
                     continue
                 if hasattr(response, "raise_for_status"):
                     response.raise_for_status()
-                response_json = self._parse_streaming_chat_response(response, stream_callback)
+                response_json = self._parse_streaming_chat_response(
+                    response,
+                    stream_callback,
+                    deadline=deadline,
+                )
                 duration = time.monotonic() - start
                 self._note_rate_limit_success(profile)
                 self._remember_successful_url(self._successful_chat_urls, cache_key, url)
                 return response_json, duration
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as e:
                 self._forget_successful_url(self._successful_chat_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
@@ -1253,6 +1306,8 @@ class CustomAITransportMixin:
                 errors.append(
                     f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
                 )
+            finally:
+                self._close_response_quietly(response)
 
         if len(errors) == 1:
             raise ValueError(errors[0])
@@ -1268,8 +1323,15 @@ class CustomAITransportMixin:
         latency_mode=CUSTOM_AI_LATENCY_MODE_STREAM,
         request_kind=None,
         timeout_seconds=None,
+        deadline_monotonic=None,
+        deadline=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        deadline = self._resolve_request_deadline(
+            deadline=deadline,
+            deadline_monotonic=deadline_monotonic,
+            timeout_seconds=timeout_seconds,
+        )
         http_client = http_client or self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile)
         headers = headers or {
@@ -1291,6 +1353,7 @@ class CustomAITransportMixin:
         )
         errors = []
         for url in urls:
+            response = None
             try:
                 start = time.monotonic()
                 response = self._post_with_output_limit_fallback(
@@ -1303,6 +1366,7 @@ class CustomAITransportMixin:
                     stream=True,
                     request_kind=request_kind,
                     timeout_seconds=timeout_seconds,
+                    deadline=deadline,
                 )
                 status_code = int(getattr(response, "status_code", 200) or 200)
                 _log_debug(
@@ -1333,11 +1397,17 @@ class CustomAITransportMixin:
                     continue
                 if hasattr(response, "raise_for_status"):
                     response.raise_for_status()
-                response_json = self._parse_streaming_responses_response(response, stream_callback)
+                response_json = self._parse_streaming_responses_response(
+                    response,
+                    stream_callback,
+                    deadline=deadline,
+                )
                 duration = time.monotonic() - start
                 self._note_rate_limit_success(profile)
                 self._remember_successful_url(self._successful_responses_urls, cache_key, url)
                 return response_json, duration
+            except CustomAIRequestDeadlineExceeded:
+                raise
             except Exception as e:
                 self._forget_successful_url(self._successful_responses_urls, cache_key, url)
                 if self._discard_owned_http_client_for_transport_error(e):
@@ -1345,17 +1415,26 @@ class CustomAITransportMixin:
                 errors.append(
                     f"{sanitize_url(url)}: {self._sanitize_error(str(e), api_key)}"
                 )
+            finally:
+                self._close_response_quietly(response)
         if len(errors) == 1:
             raise ValueError(errors[0])
         raise ValueError("Unable to call streaming responses. Tried: " + "; ".join(errors))
 
-    def _parse_streaming_responses_response(self, response, stream_callback=None):
+    def _parse_streaming_responses_response(
+        self,
+        response,
+        stream_callback=None,
+        deadline=None,
+    ):
         accumulated = ""
         usage = None
         event_type = None
         terminal_event_type = None
         terminal_response = None
         for raw_line in self._iter_utf8_response_lines(response):
+            if deadline is not None:
+                deadline.http_timeout()
             if not raw_line:
                 continue
             line = str(raw_line).strip()
@@ -1444,11 +1523,18 @@ class CustomAITransportMixin:
             result["status"] = "failed"
         return result
 
-    def _parse_streaming_chat_response(self, response, stream_callback=None):
+    def _parse_streaming_chat_response(
+        self,
+        response,
+        stream_callback=None,
+        deadline=None,
+    ):
         accumulated = ""
         usage = None
         finish_reason = None
         for raw_line in self._iter_utf8_response_lines(response):
+            if deadline is not None:
+                deadline.http_timeout()
             if not raw_line:
                 continue
             line = str(raw_line).strip()

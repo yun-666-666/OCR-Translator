@@ -1627,6 +1627,209 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(client.timeouts, [4.0])
         self.assertEqual(client.calls, 1)
 
+    def test_stream_deadline_rejects_late_chat_and_responses_chunks_and_closes_response(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, clock, wire_api):
+                self.clock = clock
+                self.wire_api = wire_api
+                self.closed = 0
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                self.clock.now = 104.0
+                if self.wire_api == "responses":
+                    yield 'data: {"type":"response.output_text.delta","delta":"late"}'
+                else:
+                    yield 'data: {"choices":[{"delta":{"content":"late"}}]}'
+
+            def close(self):
+                self.closed += 1
+
+        class Client:
+            def __init__(self, clock, wire_api):
+                self.clock = clock
+                self.wire_api = wire_api
+                self.timeouts = []
+                self.responses = []
+
+            def post(self, _url, headers=None, json=None, timeout=None, stream=False):
+                self.timeouts.append(timeout)
+                response = Response(self.clock, self.wire_api)
+                self.responses.append(response)
+                return response
+
+        for wire_api in ("chat_completions", "responses"):
+            with self.subTest(wire_api=wire_api):
+                clock = Clock()
+                client = Client(clock, wire_api)
+                provider = CustomAIProvider(http_client=client)
+                partials = []
+                profile = {
+                    "base_url": "https://host.example/v1",
+                    "api_key": "test-secret-key",
+                    "model": "demo",
+                    "structured_output_mode": "off",
+                    "wire_api": wire_api,
+                }
+
+                with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+                    with self.assertRaisesRegex(
+                        deadline_module.CustomAIRequestDeadlineExceeded,
+                        r"^Custom AI request deadline expired$",
+                    ):
+                        provider.translate(
+                            profile,
+                            "Hello",
+                            "en",
+                            "zh-CN",
+                            latency_mode="stream",
+                            stream_callback=partials.append,
+                            timeout_seconds=4.0,
+                        )
+
+                self.assertEqual(client.timeouts, [4.0])
+                self.assertEqual(partials, [])
+                self.assertEqual(client.responses[0].closed, 1)
+
+    def test_stream_deadline_blocks_non_stream_fallback_after_empty_stream(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class EmptyStreamResponse:
+            status_code = 200
+
+            def __init__(self, clock):
+                self.clock = clock
+                self.closed = 0
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                self.clock.now = 104.0
+                return iter(["data: [DONE]"])
+
+            def close(self):
+                self.closed += 1
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.calls = []
+                self.response = None
+
+            def post(self, _url, headers=None, json=None, timeout=None, stream=False):
+                self.calls.append((timeout, stream))
+                if not stream:
+                    raise AssertionError("expired stream must not fall back to another POST")
+                self.response = EmptyStreamResponse(self.clock)
+                return self.response
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            with self.assertRaisesRegex(
+                deadline_module.CustomAIRequestDeadlineExceeded,
+                r"^Custom AI request deadline expired$",
+            ):
+                provider.translate(
+                    {
+                        "base_url": "https://host.example/v1",
+                        "api_key": "test-secret-key",
+                        "model": "demo",
+                        "structured_output_mode": "off",
+                    },
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    latency_mode="stream",
+                    timeout_seconds=4.0,
+                )
+
+        self.assertEqual(client.calls, [(4.0, True)])
+        self.assertEqual(client.response.closed, 1)
+
+    def test_stream_deadline_blocks_output_limit_compatibility_retry(self):
+        deadline_module = importlib.import_module("custom_ai_deadline")
+
+        class Clock:
+            now = 100.0
+
+            def monotonic(self):
+                return self.now
+
+        class RejectedResponse:
+            status_code = 400
+            headers = {}
+            text = '{"error":{"message":"Unsupported parameter: max_tokens"}}'
+
+            def __init__(self):
+                self.closed = 0
+
+            def json(self):
+                return json.loads(self.text)
+
+            def close(self):
+                self.closed += 1
+
+        class Client:
+            def __init__(self, clock):
+                self.clock = clock
+                self.calls = []
+                self.responses = []
+
+            def post(self, _url, headers=None, json=None, timeout=None, stream=False):
+                self.calls.append((timeout, stream))
+                if len(self.calls) > 1:
+                    raise AssertionError("expired output-limit retry must not post")
+                self.clock.now = 104.0
+                response = RejectedResponse()
+                self.responses.append(response)
+                return response
+
+        clock = Clock()
+        client = Client(clock)
+        provider = CustomAIProvider(http_client=client)
+        with patch.object(deadline_module.time, "monotonic", clock.monotonic):
+            with self.assertRaisesRegex(
+                deadline_module.CustomAIRequestDeadlineExceeded,
+                r"^Custom AI request deadline expired$",
+            ):
+                provider.translate(
+                    {
+                        "base_url": "https://host.example/v1",
+                        "api_key": "test-secret-key",
+                        "model": "demo",
+                        "structured_output_mode": "off",
+                    },
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    latency_mode="stream",
+                    timeout_seconds=4.0,
+                )
+
+        self.assertEqual(client.calls, [(4.0, True)])
+        self.assertEqual(client.responses[0].closed, 1)
+
     def test_recognize_accepts_an_absolute_deadline(self):
         deadline_module = importlib.import_module("custom_ai_deadline")
 
