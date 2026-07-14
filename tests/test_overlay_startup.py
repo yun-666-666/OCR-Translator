@@ -77,6 +77,21 @@ class FakeResizableOverlay:
     update_color = ui_elements.ResizableMovableFrame.update_color
 
 
+class FakeReadyOverlay:
+    def __init__(self, visible=False):
+        self.visible = visible
+        self.destroyed = False
+
+    def winfo_exists(self):
+        return not self.destroyed
+
+    def winfo_viewable(self):
+        return self.visible
+
+    def hide(self):
+        self.visible = False
+
+
 class OverlayStartupTests(unittest.TestCase):
     def _build_app(self, target_visible=False, source_visible=False):
         cfg = configparser.ConfigParser()
@@ -101,60 +116,275 @@ class OverlayStartupTests(unittest.TestCase):
                 "target_area": None,
                 "source_overlay": None,
                 "target_overlay": None,
+                "translation_text": None,
             },
         )()
 
-    def test_hidden_target_overlay_is_not_created_during_config_load(self):
+    def test_hidden_startup_restores_and_prepares_both_overlays(self):
         app = self._build_app(target_visible=False)
-        with patch.object(overlay_manager, "create_source_overlay_om") as create_source, patch.object(
-            overlay_manager, "create_target_overlay_om"
-        ) as create_target:
-            overlay_manager.load_areas_from_config_om(app)
+        created = []
 
-        create_source.assert_not_called()
-        create_target.assert_not_called()
+        def create_source(fake_app, force_hidden=False):
+            created.append(("source", force_hidden))
+            fake_app.source_overlay = FakeReadyOverlay()
+
+        def create_target(fake_app, skip_preservation=False, force_hidden=False):
+            created.append(("target", force_hidden))
+            fake_app.target_overlay = FakeReadyOverlay()
+            fake_app.translation_text = FakeReadyOverlay()
+
+        with patch.object(overlay_manager, "create_source_overlay_om", side_effect=create_source), patch.object(
+            overlay_manager, "create_target_overlay_om", side_effect=create_target
+        ):
+            ready = overlay_manager.load_areas_from_config_om(app)
+
+        self.assertTrue(ready)
+        self.assertEqual([("source", True), ("target", True)], created)
+        self.assertEqual(app.source_area, [0, 0, 100, 50])
         self.assertEqual(app.target_area, [10, 20, 210, 120])
 
-    def test_visible_target_overlay_still_gets_created_during_config_load(self):
-        app = self._build_app(target_visible=True)
+    def test_readiness_reuses_live_overlays(self):
+        app = self._build_app()
+        app.source_area = [0, 0, 100, 50]
+        app.target_area = [10, 20, 210, 120]
+        app.source_overlay = FakeReadyOverlay()
+        app.target_overlay = FakeReadyOverlay()
+        app.translation_text = FakeReadyOverlay()
+
         with patch.object(overlay_manager, "create_source_overlay_om") as create_source, patch.object(
             overlay_manager, "create_target_overlay_om"
         ) as create_target:
-            overlay_manager.load_areas_from_config_om(app)
+            ready = overlay_manager.ensure_overlays_ready_om(app, force_hidden=True)
 
+        self.assertTrue(ready)
         create_source.assert_not_called()
-        create_target.assert_called_once()
+        create_target.assert_not_called()
+
+    def test_readiness_recreates_destroyed_overlays_from_saved_areas(self):
+        app = self._build_app()
+        app.source_area = [0, 0, 100, 50]
+        app.target_area = [10, 20, 210, 120]
+        app.source_overlay = FakeReadyOverlay()
+        app.source_overlay.destroyed = True
+        app.target_overlay = FakeReadyOverlay()
+        app.target_overlay.destroyed = True
+        app.translation_text = FakeReadyOverlay()
+        app.translation_text.destroyed = True
+        created = []
+
+        def create_source(fake_app, force_hidden=False):
+            created.append(("source", force_hidden))
+            fake_app.source_overlay = FakeReadyOverlay()
+
+        def create_target(fake_app, skip_preservation=False, force_hidden=False):
+            created.append(("target", force_hidden))
+            fake_app.target_overlay = FakeReadyOverlay()
+            fake_app.translation_text = FakeReadyOverlay()
+
+        with patch.object(
+            overlay_manager,
+            "create_source_overlay_om",
+            side_effect=create_source,
+        ), patch.object(
+            overlay_manager,
+            "create_target_overlay_om",
+            side_effect=create_target,
+        ):
+            ready = overlay_manager.ensure_overlays_ready_om(app, force_hidden=True)
+
+        self.assertTrue(ready)
+        self.assertEqual([("source", True), ("target", True)], created)
+
+    def test_readiness_rejects_invalid_saved_coordinates(self):
+        app = self._build_app()
+        app.config["Settings"]["source_area_x2"] = "0"
+
+        with patch.object(overlay_manager, "create_source_overlay_om") as create_source, patch.object(
+            overlay_manager,
+            "create_target_overlay_om",
+        ) as create_target:
+            ready = overlay_manager.ensure_overlays_ready_om(app, force_hidden=True)
+
+        self.assertFalse(ready)
+        create_source.assert_not_called()
+        create_target.assert_not_called()
+
+    def test_force_hidden_source_overlay_is_withdrawn_during_construction(self):
+        app = self._build_app(source_visible=True)
+        app.root = object()
+        app.source_colour_var = type("Var", (), {"get": lambda self: "#ffff99"})()
+        overlay = FakeResizableOverlay()
+        overlay.visible = True
+
+        with patch.object(
+            overlay_manager,
+            "ResizableMovableFrame",
+            return_value=overlay,
+        ) as overlay_factory:
+            overlay_manager.create_source_overlay_om(app, force_hidden=True)
+
+        overlay_factory.assert_called_once_with(
+            app.root,
+            app.source_area,
+            bg_color="#ffff99",
+            title="",
+            start_hidden=True,
+        )
+        self.assertFalse(app.source_overlay.winfo_viewable())
 
     def test_toggle_target_visibility_creates_overlay_on_demand(self):
         app = self._build_app(target_visible=False)
         app.target_area = [10, 20, 210, 120]
-        app.root = None
+
+        class Root:
+            def __init__(self):
+                self.idle_updates = 0
+
+            def update_idletasks(self):
+                self.idle_updates += 1
+
+        app.root = Root()
         app.target_colour_var = type("Var", (), {"get": lambda self: "#000000"})()
+
+        class FakeQApplication:
+            def __init__(self):
+                self.process_events_count = 0
+
+            def processEvents(self):
+                self.process_events_count += 1
+
+        qapp = FakeQApplication()
+        manager = type("Manager", (), {"ensure_qapp": lambda self: qapp})()
 
         class FakeOverlay:
             def __init__(self):
-                self.toggled = False
+                self.toggle_count = 0
+                self.color_update_count = 0
+                self.visible = False
 
             def winfo_exists(self):
                 return True
 
             def update_color(self, color):
-                self.color = color
+                self.color_update_count += 1
 
             def toggle_visibility(self):
-                self.toggled = True
+                self.toggle_count += 1
+                self.visible = not self.visible
 
             def winfo_viewable(self):
-                return True
+                return self.visible
 
-        def create_overlay(fake_app):
+        def prepare_overlay(fake_app, **_kwargs):
             fake_app.target_overlay = FakeOverlay()
+            fake_app.translation_text = type(
+                "FakePySideText",
+                (),
+                {
+                    "winfo_exists": lambda self: True,
+                    "set_rtl_text": lambda self, _text: None,
+                },
+            )()
+            return True
 
-        with patch.object(overlay_manager, "create_target_overlay_om", side_effect=create_overlay) as create_target:
+        with patch.object(
+            overlay_manager, "ensure_overlays_ready_om", side_effect=prepare_overlay
+        ) as ensure_ready, patch.object(
+            overlay_manager, "create_target_overlay_om", side_effect=prepare_overlay
+        ), patch.object(
+            overlay_manager,
+            "_get_pyside_api",
+            return_value=(lambda: manager, lambda: True),
+        ):
             overlay_manager.toggle_target_visibility_om(app)
 
-        create_target.assert_called_once_with(app)
-        self.assertTrue(app.target_overlay.toggled)
+        ensure_ready.assert_called_once_with(
+            app,
+            require_source=False,
+            require_target=True,
+            force_hidden=True,
+        )
+        self.assertEqual(1, app.target_overlay.toggle_count)
+        self.assertEqual(0, app.target_overlay.color_update_count)
+        self.assertEqual(1, app.root.idle_updates)
+        self.assertEqual(1, qapp.process_events_count)
+
+    def test_toggle_source_visibility_creates_overlay_on_demand(self):
+        app = self._build_app(source_visible=False)
+        app.source_area = [0, 0, 100, 50]
+        app.root = None
+
+        class FakeOverlay(FakeReadyOverlay):
+            def __init__(self):
+                super().__init__()
+                self.toggle_count = 0
+
+            def toggle_visibility(self):
+                self.toggle_count += 1
+                self.visible = not self.visible
+
+        def prepare_overlay(fake_app, **_kwargs):
+            fake_app.source_overlay = FakeOverlay()
+            return True
+
+        with patch.object(
+            overlay_manager, "ensure_overlays_ready_om", side_effect=prepare_overlay
+        ) as ensure_ready, patch.object(
+            overlay_manager, "create_source_overlay_om", side_effect=prepare_overlay
+        ):
+            overlay_manager.toggle_source_visibility_om(app)
+
+        ensure_ready.assert_called_once_with(
+            app,
+            require_source=True,
+            require_target=False,
+            force_hidden=True,
+        )
+        self.assertEqual(1, app.source_overlay.toggle_count)
+
+    def test_startup_schedules_overlay_readiness_before_paddleocr_prewarm(self):
+        import app_logic
+
+        scheduled = []
+
+        class Root:
+            def after(self, delay_ms, callback):
+                scheduled.append((delay_ms, callback))
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = Root()
+        app.load_initial_overlay_areas = lambda: None
+        app.schedule_initial_paddleocr_prewarm = lambda: None
+
+        app.schedule_initial_ui_readiness()
+
+        self.assertEqual(
+            [
+                (50, app.load_initial_overlay_areas),
+                (250, app.schedule_initial_paddleocr_prewarm),
+            ],
+            scheduled,
+        )
+
+    def test_start_preflight_repairs_missing_overlays(self):
+        import app_lifecycle
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.source_overlay = None
+        app.target_overlay = None
+        app.translation_text = None
+
+        with patch.object(
+            app_lifecycle,
+            "ensure_overlays_ready_om",
+            return_value=True,
+            create=True,
+        ) as ensure_ready:
+            ready = app._ensure_overlays_for_start()
+
+        self.assertTrue(ready)
+        ensure_ready.assert_called_once_with(app, force_hidden=True)
 
     def test_resizable_frame_update_color_does_not_change_window_alpha(self):
         overlay = FakeResizableOverlay()

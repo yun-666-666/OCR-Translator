@@ -26,7 +26,8 @@ from gui_builder import create_main_tab, create_settings_tab, create_custom_prom
 from overlay_manager import (
     select_source_area_om, select_target_area_om,
     create_source_overlay_om, create_target_overlay_om,
-    toggle_source_visibility_om, toggle_target_visibility_om, load_areas_from_config_om
+    toggle_source_visibility_om, toggle_target_visibility_om, load_areas_from_config_om,
+    restore_areas_from_config_om,
 )
 from language_manager import LanguageManager
 from language_ui import UILanguageManager
@@ -242,6 +243,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.ocr_preview_window = None
 
         self.config = load_app_config()
+        restore_areas_from_config_om(self)
         self.language_manager = LanguageManager()
 
         # Initialize UI language manager with the saved language if available
@@ -732,7 +734,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # Initialize localized dropdowns after everything is set up
         self.root.after(50, self.ui_interaction_handler.update_all_dropdowns_for_language_change)
 
-        self.root.after(100, self.load_initial_overlay_areas)
+        self.schedule_initial_ui_readiness()
         self.root.after(200, self.ensure_window_visible)
         self.hotkey_handler.setup_hotkeys()
 
@@ -748,7 +750,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # Ensure OCR model UI is correctly set up on initial load
         if hasattr(self, 'ui_interaction_handler'):
             self.ui_interaction_handler.update_ocr_model_ui()
-        self.schedule_initial_paddleocr_prewarm()
 
     def ensure_window_visible(self):
         """Ensure the main window is visible after all initialization is complete."""
@@ -789,6 +790,11 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarm_generation += 1
             self._paddleocr_prewarm_settings = None
             self._paddleocr_prewarmed_settings = None
+
+    def schedule_initial_ui_readiness(self):
+        """Prepare overlays before starting background OCR initialization."""
+        self.root.after(50, self.load_initial_overlay_areas)
+        self.root.after(250, self.schedule_initial_paddleocr_prewarm)
 
     def schedule_initial_paddleocr_prewarm(self):
         """Start local PaddleOCR loading after the UI is up when it is the selected OCR."""

@@ -173,8 +173,10 @@ def create_scrollable_tab(notebook, tab_name, protect_wheel_inputs=False):
 
 class ResizableMovableFrame(tk.Toplevel):
     """A simple movable and resizable Toplevel window without decorations."""
-    def __init__(self, parent, initial_geometry, bg_color, title="Movable Window"):
+    def __init__(self, parent, initial_geometry, bg_color, title="Movable Window", start_hidden=False):
         super().__init__(parent)
+        if start_hidden:
+            self.withdraw()
         self.overrideredirect(True)  # No window decorations (title bar, borders)
 
         # Set initial geometry
@@ -269,7 +271,7 @@ class ResizableMovableFrame(tk.Toplevel):
         self._resize_direction = None
         self._resize_start_geometry = None
 
-        self.is_visible_during_ocr = True # Flag (though not actively used in capture logic now)
+        self.is_visible_during_ocr = not start_hidden # Flag (though not actively used in capture logic now)
 
     def update_color(self, new_color):
         """Update the color of all overlay components without changing window opacity."""

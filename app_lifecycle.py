@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from config_manager import save_app_config
+from overlay_manager import ensure_overlays_ready_om
 
 
 def _log_debug(message):
@@ -319,6 +320,17 @@ class AppLifecycleMixin:
 
         self.toggle_in_progress = False # Release the lock here
 
+    def _ensure_overlays_for_start(self):
+        """Repair missing overlays from saved geometry before Start validation."""
+        if ensure_overlays_ready_om(self, force_hidden=True):
+            return True
+        messagebox.showerror(
+            "Start Error",
+            "Could not initialize the saved source and target areas. Select the areas again.",
+            parent=self.root,
+        )
+        return False
+
     def toggle_translation(self):
         # Add re-entrancy lock
         if self.toggle_in_progress:
@@ -368,9 +380,9 @@ class AppLifecycleMixin:
                 self.status_label.config(text="Status: Initializing...")
                 self.root.update_idletasks()
 
-                valid_start_flag = True
+                valid_start_flag = self._ensure_overlays_for_start()
 
-                if not self.source_overlay or not self._widget_exists_safely(self.source_overlay):
+                if valid_start_flag and (not self.source_overlay or not self._widget_exists_safely(self.source_overlay)):
                     messagebox.showerror("Start Error", "Source area overlay missing. Select source area.", parent=self.root)
                     valid_start_flag = False
                 if valid_start_flag and (not self.target_overlay or not self._widget_exists_safely(self.target_overlay)):
@@ -610,5 +622,4 @@ class AppLifecycleMixin:
         except Exception as e_drw:
              _log_debug(f"Error destroying root window: {e_drw}")
         _log_debug("Application shutdown sequence complete.")
-
 
