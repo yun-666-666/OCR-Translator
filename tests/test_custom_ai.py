@@ -9606,6 +9606,7 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
             custom_prompt_text="",
             custom_ai_latency_mode_var=DummyVar("safe"),
             translation_model_var=DummyVar("custom_ai"),
+            last_displayed_translation_sequence=0,
         )
         return TranslationHandler(app), primary, fallback
 
@@ -9629,6 +9630,31 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
                 ],
                 [primary["id"], fallback["id"]],
             )
+        finally:
+            handler.close()
+
+    def test_custom_ai_translation_stops_failover_after_newer_result_is_displayed(self):
+        handler, primary, _fallback = self._make_handler()
+        try:
+            attempted_profiles = []
+
+            def translate(profile, *_args, **_kwargs):
+                attempted_profiles.append(profile["id"])
+                if profile["id"] == primary["id"]:
+                    handler.app.last_displayed_translation_sequence = 8
+                    raise ValueError("primary failed after a newer result displayed")
+                return "obsolete fallback translation", {}, 0.01
+
+            handler.custom_ai_provider.translate = Mock(side_effect=translate)
+
+            result = handler._custom_ai_translate(
+                "source",
+                time.monotonic(),
+                translation_sequence=7,
+            )
+
+            self.assertIsNone(result)
+            self.assertEqual(attempted_profiles, [primary["id"]])
         finally:
             handler.close()
 

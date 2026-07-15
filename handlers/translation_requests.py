@@ -1075,6 +1075,37 @@ class TranslationRequestsMixin:
             candidates.append(candidate)
         return candidates
 
+    def _custom_ai_translation_is_obsolete(self, translation_sequence):
+        """Return whether a newer translation has already reached the display."""
+        try:
+            request_sequence = int(translation_sequence)
+            displayed_sequence = int(
+                getattr(
+                    self.app,
+                    "last_displayed_translation_sequence",
+                    0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            return False
+        return (
+            request_sequence > 0
+            and displayed_sequence > 0
+            and request_sequence <= displayed_sequence
+        )
+
+    def _abort_obsolete_custom_ai_failover(self, translation_sequence):
+        if not self._custom_ai_translation_is_obsolete(translation_sequence):
+            return False
+        _log_debug(
+            "LATENCY: custom_ai failover aborted for obsolete translation "
+            f"sequence={translation_sequence} "
+            "last_displayed="
+            f"{getattr(self.app, 'last_displayed_translation_sequence', 0)}"
+        )
+        return True
+
     def _custom_ai_translate_with_failover(
         self,
         primary_profile,
@@ -1121,6 +1152,8 @@ class TranslationRequestsMixin:
             candidate_states.append((candidate, cache_params))
 
         for candidate, cache_params in candidate_states:
+            if self._abort_obsolete_custom_ai_failover(translation_sequence):
+                return None
             cooldown_seconds = self._custom_ai_profile_cooldown_seconds(candidate)
             if cooldown_seconds > 0:
                 _log_debug(
@@ -1175,6 +1208,10 @@ class TranslationRequestsMixin:
                     f"provider={candidate.get('name', 'Custom AI')} "
                     f"{type(error).__name__} - {error_text}"
                 )
+                if self._abort_obsolete_custom_ai_failover(
+                    translation_sequence
+                ):
+                    return None
                 continue
 
             if translated_text and not self._is_error_message(translated_text):
