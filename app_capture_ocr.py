@@ -40,6 +40,10 @@ from paddle_ocr_backend import (
 
 
 CUSTOM_AI_OCR_CONCURRENCY_LIMIT = 2
+LOCAL_OCR_ADAPTIVE_MIN_SAMPLES = 8
+LOCAL_OCR_SCHEDULING_MARGIN_MS = 25
+LOCAL_OCR_INTERVAL_QUANTUM_MS = 25
+LOCAL_OCR_MAX_BASE_MULTIPLIER = 2
 
 
 def _log_debug(message):
@@ -141,6 +145,41 @@ class AppCaptureOcrMixin:
             return min(configured_limit, CUSTOM_AI_OCR_CONCURRENCY_LIMIT)
         return configured_limit
 
+    def _get_local_ocr_adaptive_interval(self, base_interval):
+        """Return a conservative local OCR interval from recent real work."""
+        try:
+            timing = (
+                self.runtime_metrics.snapshot()
+                .get("timings", {})
+                .get("local_ocr_duration", {})
+            )
+            sample_count = int(timing.get("count", 0) or 0)
+            p50_seconds = float(timing.get("p50", 0.0) or 0.0)
+        except (AttributeError, OverflowError, TypeError, ValueError):
+            return int(base_interval), 0, 0.0
+        if (
+            sample_count < LOCAL_OCR_ADAPTIVE_MIN_SAMPLES
+            or not math.isfinite(p50_seconds)
+            or p50_seconds <= 0.0
+        ):
+            return int(base_interval), sample_count, 0.0
+        observed_ms = (
+            p50_seconds * 1000.0
+            + LOCAL_OCR_SCHEDULING_MARGIN_MS
+        )
+        rounded_ms = int(
+            math.ceil(observed_ms / LOCAL_OCR_INTERVAL_QUANTUM_MS)
+            * LOCAL_OCR_INTERVAL_QUANTUM_MS
+        )
+        adaptive_interval = max(
+            int(base_interval),
+            min(
+                int(base_interval) * LOCAL_OCR_MAX_BASE_MULTIPLIER,
+                rounded_ms,
+            ),
+        )
+        return adaptive_interval, sample_count, p50_seconds
+
     def update_adaptive_scan_interval(self):
         """Adjust scan interval based on current OCR API load to prevent bottlenecks."""
         now = time.monotonic()
@@ -151,17 +190,56 @@ class AppCaptureOcrMixin:
 
         self.load_check_timer = now
 
-        # Measure current OCR load
-        active_ocr_count = len(self.active_ocr_calls)
-        max_ocr_calls = self.get_effective_ocr_concurrency_limit()
-        overload_threshold = max(1, math.ceil(max_ocr_calls * 0.75))
-        moderate_threshold = max(1, overload_threshold - 1)
-
         # Get user's preferred base interval
         base_interval = self.scan_interval_var.get()  # User's setting in milliseconds
 
         # Update base_scan_interval to track user changes
         self.base_scan_interval = base_interval
+
+        selected_ocr_model = self.get_ocr_model_setting()
+        if selected_ocr_model == PADDLEOCR_MODEL_CODE:
+            (
+                adaptive_interval,
+                local_sample_count,
+                local_p50_seconds,
+            ) = self._get_local_ocr_adaptive_interval(base_interval)
+            adaptive_state = (
+                "local-runtime"
+                if adaptive_interval > base_interval
+                else "normal"
+            )
+            previous_log_state = getattr(
+                self,
+                "_last_adaptive_log_state",
+                None,
+            )
+            previous_log_time = getattr(
+                self,
+                "_last_adaptive_log_time",
+                0.0,
+            )
+            should_log_state = (
+                adaptive_state != previous_log_state
+                or now - previous_log_time >= 30.0
+            )
+            self.current_scan_interval = adaptive_interval
+            self.overload_detected = adaptive_interval > base_interval
+            if should_log_state:
+                _log_debug(
+                    "ADAPTIVE: local OCR runtime pacing "
+                    f"p50={local_p50_seconds:.3f}s "
+                    f"samples={local_sample_count} "
+                    f"scan interval={adaptive_interval}ms"
+                )
+                self._last_adaptive_log_state = adaptive_state
+                self._last_adaptive_log_time = now
+            return
+
+        # Measure current OCR load
+        active_ocr_count = len(self.active_ocr_calls)
+        max_ocr_calls = self.get_effective_ocr_concurrency_limit()
+        overload_threshold = max(1, math.ceil(max_ocr_calls * 0.75))
+        moderate_threshold = max(1, overload_threshold - 1)
 
         if active_ocr_count >= overload_threshold:
             adaptive_state = "overloaded"

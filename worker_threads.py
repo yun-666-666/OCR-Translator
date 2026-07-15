@@ -313,6 +313,11 @@ def run_ocr_thread(app):
                     PADDLE_OCR_SLOW_SECONDS,
                 )
                 _record_metric_timing(app, "ocr_duration", ocr_duration)
+                _record_metric_timing(
+                    app,
+                    "local_ocr_duration",
+                    ocr_duration,
+                )
 
 
             if app.ocr_debugging_var.get() and processed_cv_img is not None:

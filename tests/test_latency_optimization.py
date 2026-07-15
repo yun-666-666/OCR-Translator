@@ -4405,7 +4405,11 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
 
 class AdaptiveScanLoggingTests(unittest.TestCase):
     @staticmethod
-    def _make_app(active_count=0, ocr_model="custom_ai"):
+    def _make_app(
+        active_count=0,
+        ocr_model="custom_ai",
+        local_ocr_timing=None,
+    ):
         import app_logic
 
         app = object.__new__(app_logic.GameChangingTranslator)
@@ -4417,9 +4421,133 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
         app.overload_detected = False
         app.scan_interval_var = types.SimpleNamespace(get=lambda: 200)
         app.ocr_model_var = types.SimpleNamespace(get=lambda: ocr_model)
+        app.runtime_metrics = types.SimpleNamespace(
+            snapshot=lambda: {
+                "timings": (
+                    {"local_ocr_duration": local_ocr_timing}
+                    if local_ocr_timing is not None
+                    else {}
+                )
+            }
+        )
         app._last_adaptive_log_state = None
         app._last_adaptive_log_time = 0.0
         return app
+
+    def test_completed_local_ocr_work_records_dedicated_duration_metric(self):
+        worker_threads = import_worker_threads_for_tests()
+        image = Image.new("RGB", (16, 10), "white")
+        metrics = RuntimeMetrics()
+        app = types.SimpleNamespace(
+            is_running=True,
+            ocr_queue=queue.Queue(),
+            get_ocr_model_setting=lambda: "paddleocr",
+            is_api_based_ocr_model=lambda _model: False,
+            ocr_debugging_var=types.SimpleNamespace(get=lambda: False),
+            previous_text="",
+            text_stability_counter=0,
+            stable_threshold=2,
+            is_placeholder_text=lambda _text: False,
+            calculate_text_similarity=lambda _current, _previous: 0.0,
+            reset_clear_timeout=Mock(),
+            runtime_metrics=metrics,
+        )
+        app.ocr_queue.put_nowait(image)
+
+        def stop_after_submit(
+            _app,
+            _text,
+            _ocr_sequence_number,
+            requested_at_monotonic=None,
+        ):
+            app.is_running = False
+
+        with (
+            patch.object(
+                worker_threads,
+                "process_local_ocr_frame",
+                return_value=("Clear subtitle text.", None, "PaddleOCR"),
+            ),
+            patch.object(
+                worker_threads,
+                "start_async_translation",
+                side_effect=stop_after_submit,
+            ),
+            patch.object(
+                worker_threads.time,
+                "sleep",
+                side_effect=lambda _seconds: setattr(
+                    app,
+                    "is_running",
+                    False,
+                ),
+            ),
+        ):
+            worker_threads.run_ocr_thread(app)
+
+        self.assertIn(
+            "local_ocr_duration",
+            metrics.snapshot()["timings"],
+        )
+
+    def test_local_ocr_p50_raises_scan_interval_after_enough_samples(self):
+        import app_logic
+
+        app = self._make_app(
+            ocr_model="paddleocr",
+            local_ocr_timing={
+                "count": 8,
+                "latest": 0.219,
+                "p50": 0.219,
+                "p90": 0.359,
+            },
+        )
+        with (
+            patch.object(app_logic.time, "monotonic", return_value=2.1),
+            patch.object(app_logic, "log_debug") as debug_log,
+        ):
+            app.update_adaptive_scan_interval()
+
+        self.assertTrue(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 250)
+        self.assertIn("local ocr", debug_log.call_args.args[0].lower())
+
+    def test_local_ocr_p50_requires_enough_samples(self):
+        import app_logic
+
+        app = self._make_app(
+            ocr_model="paddleocr",
+            local_ocr_timing={
+                "count": 7,
+                "latest": 0.219,
+                "p50": 0.219,
+                "p90": 0.359,
+            },
+        )
+        with (
+            patch.object(app_logic.time, "monotonic", return_value=2.1),
+            patch.object(app_logic, "log_debug"),
+        ):
+            app.update_adaptive_scan_interval()
+
+        self.assertFalse(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 200)
+
+    def test_malformed_local_ocr_timing_keeps_base_interval(self):
+        import app_logic
+
+        app = self._make_app(
+            ocr_model="paddleocr",
+            local_ocr_timing={"count": 8, "p50": "invalid"},
+        )
+        with (
+            patch.object(app_logic.time, "monotonic", return_value=2.1),
+            patch.object(app_logic, "log_debug"),
+        ):
+            app.update_adaptive_scan_interval()
+
+        self.assertFalse(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 200)
 
     def test_effective_limit_caps_custom_ai_and_preserves_generic_capacity(self):
         app = self._make_app()
