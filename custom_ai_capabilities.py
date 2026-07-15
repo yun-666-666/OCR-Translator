@@ -85,13 +85,17 @@ class CustomAICapabilitiesMixin:
             )
         return (self._base_url_cache_key(profile), "")
 
-    def _request_cooldown_cache_key(self, profile):
+    def _request_cooldown_cache_key(self, profile, request_kind=None):
         transport_key = self._rate_limit_cache_key(profile)
         profile = profile if isinstance(profile, dict) else {}
-        return transport_key + (
+        request_key = transport_key + (
             normalize_custom_ai_wire_api(profile.get("wire_api")),
             str(profile.get("model") or "").strip(),
         )
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        if request_kind:
+            return request_key + (request_kind,)
+        return request_key
 
     def _cooldown_scope_for_failure(self, response, detail):
         status_code = int(getattr(response, "status_code", 0) or 0)
@@ -99,15 +103,15 @@ class CustomAICapabilitiesMixin:
             return "transport"
         return "request"
 
-    def _cooldown_cache_key(self, profile, scope):
+    def _cooldown_cache_key(self, profile, scope, request_kind=None):
         if scope == "transport":
             return self._rate_limit_cache_key(profile)
-        return self._request_cooldown_cache_key(profile)
+        return self._request_cooldown_cache_key(profile, request_kind)
 
-    def _cooldown_cache_keys_for_profile(self, profile):
+    def _cooldown_cache_keys_for_profile(self, profile, request_kind=None):
         return (
             self._rate_limit_cache_key(profile),
-            self._request_cooldown_cache_key(profile),
+            self._request_cooldown_cache_key(profile, request_kind),
         )
 
     def _credential_scope_key(self, profile):
@@ -1156,4 +1160,3 @@ class CustomAICapabilitiesMixin:
             payload,
             "ocr",
         )
-

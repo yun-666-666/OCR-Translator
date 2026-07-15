@@ -1742,6 +1742,133 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(convert_calls, [])
         self.assertEqual(app.batch_sequence_counter, 7)
 
+    def test_custom_ai_ocr_cooldown_uses_paddleocr_for_current_frame(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            translation_handler=types.SimpleNamespace(
+                get_active_custom_ai_ocr_cooldown_seconds=lambda: 42.0
+            )
+        )
+
+        self.assertEqual(
+            worker_threads._effective_ocr_model_for_frame(app, "custom_ai"),
+            "paddleocr",
+        )
+
+    def test_custom_ai_ocr_recovers_automatically_after_cooldown(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            translation_handler=types.SimpleNamespace(
+                get_active_custom_ai_ocr_cooldown_seconds=lambda: 0.0
+            )
+        )
+
+        self.assertEqual(
+            worker_threads._effective_ocr_model_for_frame(app, "custom_ai"),
+            "custom_ai",
+        )
+
+    def test_custom_ai_ocr_uses_provider_specific_concurrency_limit(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def submit(self, *args):
+                raise AssertionError("Custom AI OCR should stop at its own limit")
+
+        convert_calls = []
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=7,
+            active_ocr_calls={1, 2},
+            max_concurrent_ocr_calls=8,
+            convert_to_webp_for_api=lambda _image: convert_calls.append("called"),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=Pool(),
+        )
+
+        worker_threads.run_api_ocr(app, object())
+
+        self.assertEqual(convert_calls, [])
+        self.assertEqual(app.batch_sequence_counter, 7)
+
+    def test_other_api_ocr_keeps_generic_concurrency_limit(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "gemini_api",
+            batch_sequence_counter=7,
+            active_ocr_calls={1, 2},
+            max_concurrent_ocr_calls=8,
+            convert_to_webp_for_api=lambda _image: b"webp",
+            translation_model_var=types.SimpleNamespace(get=lambda: "gemini_api"),
+            is_gemini_model=lambda model: model == "gemini_api",
+            is_openai_model=lambda model: False,
+            gemini_source_lang="de",
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+        )
+
+        worker_threads.run_api_ocr(app, object())
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(app.batch_sequence_counter, 8)
+
+    def test_cooling_custom_ai_ocr_error_preserves_current_translation(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            update_translation_text=Mock(),
+            translation_handler=types.SimpleNamespace(
+                get_active_custom_ai_ocr_cooldown_seconds=lambda: 30.0
+            ),
+        )
+
+        worker_threads.process_api_ocr_response(
+            app,
+            "<e>: provider cooling down",
+            3,
+            "en",
+            "custom_ai",
+        )
+
+        app.update_translation_text.assert_not_called()
+        self.assertEqual(app.last_displayed_batch_sequence, 3)
+
+    def test_non_cooling_custom_ai_ocr_error_remains_visible(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            update_translation_text=Mock(),
+            translation_handler=types.SimpleNamespace(
+                get_active_custom_ai_ocr_cooldown_seconds=lambda: 0.0
+            ),
+        )
+
+        worker_threads.process_api_ocr_response(
+            app,
+            "<e>: provider failed",
+            3,
+            "en",
+            "custom_ai",
+        )
+
+        app.update_translation_text.assert_called_once_with(
+            "OCR Error:\nprovider failed"
+        )
+        self.assertEqual(app.last_displayed_batch_sequence, 3)
+
     def test_api_ocr_submit_failure_releases_active_call_slot(self):
         worker_threads = import_worker_threads_for_tests()
 

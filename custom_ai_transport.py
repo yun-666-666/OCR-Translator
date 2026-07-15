@@ -338,7 +338,13 @@ class CustomAITransportMixin:
         except Exception:
             return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
-    def _activate_rate_limit_cooldown(self, profile, response, detail=""):
+    def _activate_rate_limit_cooldown(
+        self,
+        profile,
+        response,
+        detail="",
+        request_kind=None,
+    ):
         status_code = int(getattr(response, "status_code", 0) or 0)
         if (
             status_code not in {429, 503}
@@ -350,7 +356,11 @@ class CustomAITransportMixin:
 
         base_cooldown_seconds = self._parse_retry_after_seconds(response)
         scope = self._cooldown_scope_for_failure(response, detail)
-        cache_key = self._cooldown_cache_key(profile, scope)
+        cache_key = self._cooldown_cache_key(
+            profile,
+            scope,
+            request_kind=request_kind,
+        )
         if not cache_key:
             return base_cooldown_seconds
 
@@ -388,47 +398,149 @@ class CustomAITransportMixin:
         )
         return cooldown_seconds
 
-    def _note_rate_limit_success(self, profile):
-        cache_keys = self._cooldown_cache_keys_for_profile(profile)
+    def _note_rate_limit_success(self, profile, request_kind=None):
+        cache_keys = self._cooldown_cache_keys_for_profile(
+            profile,
+            request_kind=request_kind,
+        )
+        request_key = self._request_cooldown_cache_key(
+            profile,
+            request_kind=request_kind,
+        )
         with self._rate_limit_lock:
             for cache_key in cache_keys:
                 self._rate_limit_backoff_counts.pop(cache_key, None)
+            cleared_request_cooldown = (
+                self._rate_limit_cooldowns.pop(request_key, None) is not None
+            )
+        if cleared_request_cooldown:
+            values = profile if isinstance(profile, dict) else {}
+            _log_debug(
+                "RECOVERY: custom_ai request-scoped cooldown cleared after success "
+                f"provider={values.get('name', 'Custom AI')}"
+            )
 
-    def _profile_unavailable_key(self, profile):
+    def _profile_unavailable_key(self, profile, request_kind=None):
         values = profile if isinstance(profile, dict) else {}
         profile_id = str(values.get("id") or "").strip()
         if profile_id:
-            return ("profile", profile_id)
-        return ("profile-fallback", *self._cooldown_cache_keys_for_profile(values))
+            cache_key = ("profile", profile_id)
+        else:
+            cache_key = (
+                "profile-fallback",
+                *self._cooldown_cache_keys_for_profile(values),
+            )
+        request_kind = normalize_custom_ai_reasoning_request_kind(request_kind)
+        if request_kind:
+            return cache_key + (request_kind,)
+        return cache_key
 
-    def mark_profile_unavailable(self, profile, detail="", seconds=60.0):
+    def begin_profile_request(self, profile, request_kind=None):
+        """Allocate a role-scoped sequence for ordered health updates."""
+        cache_key = self._profile_unavailable_key(profile, request_kind)
+        with self._rate_limit_lock:
+            sequence = self._profile_health_request_sequences.get(cache_key, 0) + 1
+            self._profile_health_request_sequences[cache_key] = sequence
+        return sequence
+
+    def mark_profile_unavailable(
+        self,
+        profile,
+        detail="",
+        seconds=60.0,
+        request_kind=None,
+        request_sequence=None,
+    ):
         try:
             cooldown_seconds = max(1.0, min(300.0, float(seconds)))
         except (TypeError, ValueError):
             cooldown_seconds = 60.0
-        cache_key = self._profile_unavailable_key(profile)
+        cache_key = self._profile_unavailable_key(profile, request_kind)
         now = time.monotonic()
         with self._rate_limit_lock:
-            existing_until = self._profile_unavailable_cooldowns.get(cache_key, 0.0)
-            cooldown_until = max(existing_until, now + cooldown_seconds)
-            self._profile_unavailable_cooldowns[cache_key] = cooldown_until
+            current_sequence = self._profile_health_request_sequences.get(
+                cache_key,
+                0,
+            )
+            if request_sequence is None:
+                request_sequence = current_sequence + 1
+            else:
+                request_sequence = int(request_sequence)
+            self._profile_health_request_sequences[cache_key] = max(
+                current_sequence,
+                request_sequence,
+            )
+            latest_event_sequence = self._profile_health_event_sequences.get(
+                cache_key,
+                0,
+            )
+            applied = request_sequence >= latest_event_sequence
+            if applied:
+                self._profile_health_event_sequences[cache_key] = request_sequence
+                existing_until = self._profile_unavailable_cooldowns.get(
+                    cache_key,
+                    0.0,
+                )
+                cooldown_until = max(existing_until, now + cooldown_seconds)
+                self._profile_unavailable_cooldowns[cache_key] = cooldown_until
+            else:
+                cooldown_until = self._profile_unavailable_cooldowns.get(
+                    cache_key,
+                    0.0,
+                )
         values = profile if isinstance(profile, dict) else {}
-        _log_debug(
-            "LATENCY: custom_ai profile unavailable "
-            f"provider={values.get('name', 'Custom AI')} "
-            f"seconds={cooldown_until - now:.1f} "
-            f"detail={str(detail or '').strip()[:160]}"
-        )
-        return cooldown_until - now
+        if applied:
+            _log_debug(
+                "LATENCY: custom_ai profile unavailable "
+                f"provider={values.get('name', 'Custom AI')} "
+                f"request_kind={request_kind or 'shared'} "
+                f"seconds={max(0.0, cooldown_until - now):.1f} "
+                f"detail={str(detail or '').strip()[:160]}"
+            )
+        else:
+            _log_debug(
+                "RECOVERY: ignored stale Custom AI profile failure "
+                f"provider={values.get('name', 'Custom AI')} "
+                f"request_kind={request_kind or 'shared'}"
+            )
+        return max(0.0, cooldown_until - now)
 
-    def mark_profile_available(self, profile):
-        cache_key = self._profile_unavailable_key(profile)
+    def mark_profile_available(
+        self,
+        profile,
+        request_kind=None,
+        request_sequence=None,
+    ):
+        cache_key = self._profile_unavailable_key(profile, request_kind)
         with self._rate_limit_lock:
+            current_sequence = self._profile_health_request_sequences.get(
+                cache_key,
+                0,
+            )
+            if request_sequence is None:
+                request_sequence = current_sequence + 1
+            else:
+                request_sequence = int(request_sequence)
+            self._profile_health_request_sequences[cache_key] = max(
+                current_sequence,
+                request_sequence,
+            )
+            latest_event_sequence = self._profile_health_event_sequences.get(
+                cache_key,
+                0,
+            )
+            if request_sequence < latest_event_sequence:
+                return False
+            self._profile_health_event_sequences[cache_key] = request_sequence
             self._profile_unavailable_cooldowns.pop(cache_key, None)
+        return True
 
-    def get_cooldown_remaining(self, profile):
-        cache_keys = self._cooldown_cache_keys_for_profile(profile)
-        unavailable_key = self._profile_unavailable_key(profile)
+    def get_cooldown_remaining(self, profile, request_kind=None):
+        cache_keys = self._cooldown_cache_keys_for_profile(
+            profile,
+            request_kind=request_kind,
+        )
+        unavailable_key = self._profile_unavailable_key(profile, request_kind)
 
         with self._rate_limit_lock:
             rate_limit_until = max(
@@ -459,8 +571,11 @@ class CustomAITransportMixin:
             return 0.0
         return remaining
 
-    def _raise_if_rate_limited(self, profile):
-        remaining = self.get_cooldown_remaining(profile)
+    def _raise_if_rate_limited(self, profile, request_kind=None):
+        remaining = self.get_cooldown_remaining(
+            profile,
+            request_kind=request_kind,
+        )
         if remaining > 0:
             raise ValueError(self._rate_limit_message(profile, remaining))
 
@@ -725,7 +840,7 @@ class CustomAITransportMixin:
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
-        self._raise_if_rate_limited(profile)
+        self._raise_if_rate_limited(profile, request_kind=request_kind)
         headers = {
             "Authorization": f"Bearer {profile.get('api_key', '')}",
             "Content-Type": "application/json",
@@ -785,6 +900,7 @@ class CustomAITransportMixin:
                         profile,
                         response,
                         error_message,
+                        request_kind=request_kind,
                     )
                     errors.append(error_message)
                     if (
@@ -799,7 +915,10 @@ class CustomAITransportMixin:
 
                 try:
                     response_json = self._load_response_json(response)
-                    self._note_rate_limit_success(profile)
+                    self._note_rate_limit_success(
+                        profile,
+                        request_kind=request_kind,
+                    )
                     self._remember_successful_url(self._successful_chat_urls, cache_key, url)
                     return response_json, duration
                 except Exception:
@@ -827,7 +946,7 @@ class CustomAITransportMixin:
         timeout_seconds=None,
     ):
         api_key = profile.get("api_key", "")
-        self._raise_if_rate_limited(profile)
+        self._raise_if_rate_limited(profile, request_kind=request_kind)
         request_payload = self.build_responses_payload_from_chat_payload(profile, payload, stream=False)
         request_payload = self._with_responses_prompt_cache_key(
             profile,
@@ -869,6 +988,7 @@ class CustomAITransportMixin:
                         profile,
                         response,
                         error_message,
+                        request_kind=request_kind,
                     )
                     errors.append(error_message)
                     if (
@@ -882,7 +1002,10 @@ class CustomAITransportMixin:
                     continue
                 try:
                     response_json = self._load_response_json(response)
-                    self._note_rate_limit_success(profile)
+                    self._note_rate_limit_success(
+                        profile,
+                        request_kind=request_kind,
+                    )
                     self._remember_successful_url(self._successful_responses_urls, cache_key, url)
                     return response_json, duration
                 except Exception:
@@ -910,7 +1033,7 @@ class CustomAITransportMixin:
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
-        self._raise_if_rate_limited(profile)
+        self._raise_if_rate_limited(profile, request_kind=request_kind)
         headers = {
             "Authorization": f"Bearer {profile.get('api_key', '')}",
             "Content-Type": "application/json",
@@ -975,6 +1098,7 @@ class CustomAITransportMixin:
                         profile,
                         response,
                         error_message,
+                        request_kind=request_kind,
                     )
                     errors.append(error_message)
                     if (
@@ -990,7 +1114,10 @@ class CustomAITransportMixin:
                     response.raise_for_status()
                 response_json = self._parse_streaming_chat_response(response, stream_callback)
                 duration = time.monotonic() - start
-                self._note_rate_limit_success(profile)
+                self._note_rate_limit_success(
+                    profile,
+                    request_kind=request_kind,
+                )
                 self._remember_successful_url(self._successful_chat_urls, cache_key, url)
                 return response_json, duration
             except Exception as e:
@@ -1016,7 +1143,7 @@ class CustomAITransportMixin:
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = http_client or self._get_http_client(latency_mode)
-        self._raise_if_rate_limited(profile)
+        self._raise_if_rate_limited(profile, request_kind=request_kind)
         headers = headers or {
             "Authorization": f"Bearer {profile.get('api_key', '')}",
             "Content-Type": "application/json",
@@ -1062,6 +1189,7 @@ class CustomAITransportMixin:
                         profile,
                         response,
                         error_message,
+                        request_kind=request_kind,
                     )
                     errors.append(error_message)
                     if (
@@ -1077,7 +1205,10 @@ class CustomAITransportMixin:
                     response.raise_for_status()
                 response_json = self._parse_streaming_responses_response(response, stream_callback)
                 duration = time.monotonic() - start
-                self._note_rate_limit_success(profile)
+                self._note_rate_limit_success(
+                    profile,
+                    request_kind=request_kind,
+                )
                 self._remember_successful_url(self._successful_responses_urls, cache_key, url)
                 return response_json, duration
             except Exception as e:
@@ -1332,4 +1463,3 @@ class CustomAITransportMixin:
         self.close()
         _log_debug(f"LATENCY: discarded Custom AI HTTP session after transport error: {type(error).__name__}")
         return True
-

@@ -186,12 +186,106 @@ class TranslationRequestsMixin:
                 pass
         return error_text
 
+    def _custom_ai_profile_failure_cooldown_seconds(self, error_text):
+        lowered = str(error_text or "").strip().lower()
+        permanent_markers = (
+            "http 401",
+            "http 402",
+            "http 403",
+            "insufficient_balance",
+            "insufficient balance",
+            "precharge",
+            "预扣费",
+            "余额不足",
+        )
+        if any(marker in lowered for marker in permanent_markers):
+            return 300.0
+
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "connection",
+            "non-json",
+            "non json",
+            "bad gateway",
+            "gateway",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+        if any(marker in lowered for marker in transient_markers):
+            return 15.0
+
+        empty_markers = (
+            "did not contain message content",
+            "returned an invalid translation",
+            "empty response",
+            "empty content",
+        )
+        if any(marker in lowered for marker in empty_markers):
+            return 10.0
+
+        deterministic_markers = (
+            "http 404",
+            "invalid model",
+            "model not found",
+            "invalid endpoint",
+        )
+        if any(marker in lowered for marker in deterministic_markers):
+            return 300.0
+        return 30.0
+
+    def _begin_custom_ai_profile_request(self, profile, request_kind):
+        begin = getattr(
+            self.custom_ai_provider,
+            "begin_profile_request",
+            None,
+        )
+        if not callable(begin):
+            return None
+        try:
+            return begin(profile, request_kind=request_kind)
+        except Exception as sequence_error:
+            _log_debug(
+                "Custom AI profile request sequencing failed: "
+                f"{type(sequence_error).__name__}"
+            )
+            return None
+
+    def _mark_custom_ai_profile_failure(
+        self,
+        profile,
+        error_text,
+        request_kind="translation",
+        request_sequence=None,
+    ):
+        marker = getattr(
+            self.custom_ai_provider,
+            "mark_profile_unavailable",
+            None,
+        )
+        if callable(marker):
+            marker(
+                profile,
+                error_text,
+                seconds=self._custom_ai_profile_failure_cooldown_seconds(
+                    error_text
+                ),
+                request_kind=request_kind,
+                request_sequence=request_sequence,
+            )
+
     def perform_ocr(self, image_data, source_lang, image_mime_type="image/webp"):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
         profile = self.app.custom_ai_profiles.get_active_profile("ocr")
         if not profile:
             _log_debug("No active custom AI model profile configured for OCR")
             return "<e>: AI model profile for OCR is missing"
+        request_sequence = self._begin_custom_ai_profile_request(
+            profile,
+            "ocr",
+        )
         try:
             latency_mode = self._get_custom_ai_latency_mode()
             if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
@@ -209,12 +303,27 @@ class TranslationRequestsMixin:
                 ),
                 image_mime_type=image_mime_type,
             )
+            available = getattr(
+                self.custom_ai_provider,
+                "mark_profile_available",
+                None,
+            )
+            if callable(available):
+                available(
+                    profile,
+                    request_kind="ocr",
+                    request_sequence=request_sequence,
+                )
             self._log_custom_short_call("ocr", profile, result, usage, duration)
             return result
         except Exception as e:
-            error_text = str(e)
-            if hasattr(self.custom_ai_provider, "_sanitize_error"):
-                error_text = self.custom_ai_provider._sanitize_error(error_text, profile.get("api_key", ""))
+            error_text = self._sanitize_custom_ai_profile_error(e, profile)
+            self._mark_custom_ai_profile_failure(
+                profile,
+                error_text,
+                request_kind="ocr",
+                request_sequence=request_sequence,
+            )
             _log_debug(f"Custom AI OCR error: {type(e).__name__} - {error_text}")
             return f"<e>: Custom AI OCR error: {type(e).__name__} - {error_text}"
 
@@ -584,7 +693,11 @@ class TranslationRequestsMixin:
                 )
         return bool(profile)
 
-    def _custom_ai_profile_cooldown_seconds(self, profile):
+    def _custom_ai_profile_cooldown_seconds(
+        self,
+        profile,
+        request_kind="translation",
+    ):
         if not isinstance(profile, dict):
             return 0.0
         cooldown_getter = getattr(
@@ -595,7 +708,14 @@ class TranslationRequestsMixin:
         if not callable(cooldown_getter):
             return 0.0
         try:
-            return max(0.0, float(cooldown_getter(profile)))
+            try:
+                remaining = cooldown_getter(
+                    profile,
+                    request_kind=request_kind,
+                )
+            except TypeError:
+                remaining = cooldown_getter(profile)
+            return max(0.0, float(remaining))
         except Exception as cooldown_error:
             _log_debug(
                 "Custom AI cooldown check failed: "
@@ -603,27 +723,26 @@ class TranslationRequestsMixin:
             )
             return 0.0
 
+    def get_active_custom_ai_ocr_cooldown_seconds(self):
+        profiles = getattr(self.app, "custom_ai_profiles", None)
+        getter = getattr(profiles, "get_active_profile", None)
+        if not callable(getter):
+            return 0.0
+        return self._custom_ai_profile_cooldown_seconds(
+            getter("ocr"),
+            request_kind="ocr",
+        )
+
     def _get_healthy_custom_ai_race_profiles(self, active_profile):
         if not isinstance(active_profile, dict):
             return []
         candidates = self._get_custom_ai_race_profiles(active_profile)
-        cooldown_getter = getattr(
-            self.custom_ai_provider,
-            "get_cooldown_remaining",
-            None,
-        )
-        if not callable(cooldown_getter):
-            return candidates
         healthy = []
         for candidate in candidates:
-            try:
-                remaining = max(0.0, float(cooldown_getter(candidate)))
-            except Exception as cooldown_error:
-                _log_debug(
-                    "Custom AI adaptive cooldown check failed: "
-                    f"{type(cooldown_error).__name__} - {cooldown_error}"
-                )
-                remaining = 0.0
+            remaining = self._custom_ai_profile_cooldown_seconds(
+                candidate,
+                request_kind="translation",
+            )
             if remaining <= 0.0:
                 healthy.append(candidate)
         return healthy
@@ -694,7 +813,10 @@ class TranslationRequestsMixin:
             else:
                 profiles = self._get_custom_ai_failover_profiles(profile)
             remaining_values = [
-                max(0.0, float(cooldown_getter(candidate)))
+                self._custom_ai_profile_cooldown_seconds(
+                    candidate,
+                    request_kind="translation",
+                )
                 for candidate in profiles
             ]
             remaining = min(remaining_values) if remaining_values else 0.0
@@ -1008,6 +1130,10 @@ class TranslationRequestsMixin:
                 )
                 continue
 
+            request_sequence = self._begin_custom_ai_profile_request(
+                candidate,
+                "translation",
+            )
             try:
                 translated_text, usage, duration = self.custom_ai_provider.translate(
                     candidate,
@@ -1038,13 +1164,12 @@ class TranslationRequestsMixin:
                     success=False,
                     profile=candidate,
                 )
-                marker = getattr(
-                    self.custom_ai_provider,
-                    "mark_profile_unavailable",
-                    None,
+                self._mark_custom_ai_profile_failure(
+                    candidate,
+                    error_text,
+                    request_kind="translation",
+                    request_sequence=request_sequence,
                 )
-                if callable(marker):
-                    marker(candidate, error_text)
                 _log_debug(
                     "Custom AI failover translation error: "
                     f"provider={candidate.get('name', 'Custom AI')} "
@@ -1059,7 +1184,11 @@ class TranslationRequestsMixin:
                     None,
                 )
                 if callable(available):
-                    available(candidate)
+                    available(
+                        candidate,
+                        request_kind="translation",
+                        request_sequence=request_sequence,
+                    )
                 cache_params = self._cache_params_for_profile(
                     candidate,
                     custom_prompt=custom_prompt,
@@ -1099,13 +1228,12 @@ class TranslationRequestsMixin:
             failures.append(
                 f"{candidate.get('name', 'Custom AI')}: returned an invalid translation"
             )
-            marker = getattr(
-                self.custom_ai_provider,
-                "mark_profile_unavailable",
-                None,
+            self._mark_custom_ai_profile_failure(
+                candidate,
+                "returned an invalid translation",
+                request_kind="translation",
+                request_sequence=request_sequence,
             )
-            if callable(marker):
-                marker(candidate, "returned an invalid translation")
 
         if failures:
             _log_debug(

@@ -48,6 +48,7 @@ CAPTURE_SLOW_SECONDS_MSS = 0.050
 CAPTURE_SLOW_SECONDS_PYAUTOGUI = 0.250
 OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
+MAX_CUSTOM_AI_OCR_CONCURRENCY = 2
 
 
 from worker_capture import (
@@ -135,6 +136,53 @@ from worker_translation import (
 
 
 
+def _custom_ai_ocr_cooldown_seconds(app):
+    """Return the active Custom AI OCR profile cooldown without breaking OCR."""
+    try:
+        handler = getattr(app, "translation_handler", None)
+        getter = getattr(handler, "get_active_custom_ai_ocr_cooldown_seconds", None)
+        if not callable(getter):
+            return 0.0
+        return max(0.0, float(getter() or 0.0))
+    except Exception as cooldown_error:
+        log_debug_coalesced(
+            "custom-ai-ocr-cooldown-read-error",
+            "WT: Could not read Custom AI OCR cooldown; keeping selected OCR "
+            f"provider ({type(cooldown_error).__name__})",
+            interval_seconds=10.0,
+        )
+        return 0.0
+
+
+def _effective_ocr_model_for_frame(app, selected_model):
+    """Use PaddleOCR for this frame while the selected AI OCR profile cools down."""
+    if selected_model != "custom_ai":
+        return selected_model
+
+    cooldown_seconds = _custom_ai_ocr_cooldown_seconds(app)
+    if cooldown_seconds <= 0.0:
+        return selected_model
+
+    log_debug_coalesced(
+        "custom-ai-ocr-paddle-fallback",
+        "WT: Custom AI OCR is cooling down for about "
+        f"{math.ceil(cooldown_seconds)}s; temporarily using PaddleOCR",
+        interval_seconds=5.0,
+    )
+    return PADDLEOCR_MODEL_CODE
+
+
+def _api_ocr_concurrency_limit(app, provider_name):
+    """Keep generic API OCR capacity while bounding costly Custom AI bursts."""
+    try:
+        configured_limit = max(0, int(app.max_concurrent_ocr_calls))
+    except (AttributeError, TypeError, ValueError):
+        configured_limit = 1
+    if provider_name == "custom_ai":
+        return min(configured_limit, MAX_CUSTOM_AI_OCR_CONCURRENCY)
+    return configured_limit
+
+
 def run_ocr_thread(app):
     log_debug("WT: OCR thread started.")
     log_debug(f"WT: OCR using {app.get_ocr_model_setting()}")
@@ -151,7 +199,8 @@ def run_ocr_thread(app):
             if now - last_lang_check > 5.0:
                 last_lang_check = now
 
-            ocr_model = app.get_ocr_model_setting()
+            selected_ocr_model = app.get_ocr_model_setting()
+            ocr_model = _effective_ocr_model_for_frame(app, selected_ocr_model)
 
             # No artificial delay for API-based OCR
             if not app.is_api_based_ocr_model(ocr_model):
@@ -449,9 +498,13 @@ def run_api_ocr(app, screenshot_pil):
                 process_api_ocr_response(app, cached_ocr_text, sequence_number, source_lang, provider_name, ocr_cache_key=ocr_cache_key)
                 return
 
-        if len(app.active_ocr_calls) >= app.max_concurrent_ocr_calls:
+        concurrency_limit = _api_ocr_concurrency_limit(app, provider_name)
+        if len(app.active_ocr_calls) >= concurrency_limit:
             _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
-            log_debug(f"Max concurrent OCR calls ({app.max_concurrent_ocr_calls}) reached, skipping {provider_name} OCR before image conversion")
+            log_debug(
+                f"Max concurrent OCR calls ({concurrency_limit}) reached, "
+                f"skipping {provider_name} OCR before image conversion"
+            )
             return
 
         encoded_image = None
@@ -564,6 +617,18 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
                 f"OCR error in {provider_name} batch {sequence_number} "
                 f"{summarize_text_for_log(ocr_result)}"
             )
+            if (
+                provider_name == "custom_ai"
+                and _custom_ai_ocr_cooldown_seconds(app) > 0.0
+            ):
+                log_debug_coalesced(
+                    "custom-ai-ocr-error-hidden-during-fallback",
+                    "WT: Preserving the last useful translation while PaddleOCR "
+                    "covers a Custom AI OCR cooldown",
+                    interval_seconds=5.0,
+                )
+                app.last_displayed_batch_sequence = sequence_number
+                return
             visible_error = ocr_result[len("<e>:"):].strip() or ocr_result
             app.update_translation_text(f"OCR Error:\n{visible_error}")
             app.last_displayed_batch_sequence = sequence_number

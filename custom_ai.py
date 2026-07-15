@@ -154,6 +154,8 @@ class CustomAIProvider(CustomAICapabilitiesMixin, CustomAIRequestsMixin, CustomA
         self._rate_limit_cooldowns = {}
         self._rate_limit_backoff_counts = {}
         self._profile_unavailable_cooldowns = {}
+        self._profile_health_request_sequences = {}
+        self._profile_health_event_sequences = {}
         self._unsupported_output_limit_keys = set()
         self._unsupported_structured_output_keys = set()
         self._unsupported_reasoning_effort_keys = set()

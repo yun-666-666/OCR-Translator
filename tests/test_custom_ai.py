@@ -2783,7 +2783,13 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertIn("Rate limit exceeded", str(ctx.exception))
         self.assertEqual(provider.http_client.calls, 1)
-        self.assertGreater(provider.get_cooldown_remaining(profile), 0)
+        self.assertGreater(
+            provider.get_cooldown_remaining(
+                profile,
+                request_kind="translation",
+            ),
+            0,
+        )
 
         with self.assertRaises(ValueError) as cooldown_ctx:
             provider._post(profile, {"model": "demo", "messages": []})
@@ -2819,7 +2825,13 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertIn("temporarily unavailable", str(ctx.exception).lower())
         self.assertEqual(provider.http_client.calls, 1)
-        self.assertGreater(provider.get_cooldown_remaining(profile), 0)
+        self.assertGreater(
+            provider.get_cooldown_remaining(
+                profile,
+                request_kind="translation",
+            ),
+            0,
+        )
 
         with self.assertRaises(ValueError) as cooldown_ctx:
             provider._post(profile, {"model": "demo", "messages": []})
@@ -2992,6 +3004,204 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(remaining, 90.0)
         self.assertEqual(provider._rate_limit_backoff_counts[cache_key], 1)
         self.assertEqual(provider._rate_limit_cooldowns[cache_key], 191.0)
+
+    def test_success_clears_request_scoped_cooldown(self):
+        class Response:
+            status_code = 502
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "wire_api": "chat_completions",
+            "model": "vision-model",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Upstream gateway unavailable",
+            )
+
+        provider._note_rate_limit_success(profile)
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertEqual(provider.get_cooldown_remaining(profile), 0.0)
+
+    def test_success_preserves_transport_scoped_rate_limit_cooldown(self):
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "wire_api": "chat_completions",
+            "model": "vision-model",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Rate limit exceeded",
+            )
+
+        provider._note_rate_limit_success(profile)
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(provider.get_cooldown_remaining(profile), 0.0)
+
+    def test_ocr_request_cooldown_does_not_block_translation(self):
+        class Response:
+            status_code = 502
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "shared-profile",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "wire_api": "chat_completions",
+            "model": "shared-model",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Upstream gateway unavailable",
+                request_kind="ocr",
+            )
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(
+                provider.get_cooldown_remaining(profile, request_kind="ocr"),
+                0.0,
+            )
+            self.assertEqual(
+                provider.get_cooldown_remaining(
+                    profile,
+                    request_kind="translation",
+                ),
+                0.0,
+            )
+
+    def test_transport_rate_limit_cooldown_still_blocks_all_request_kinds(self):
+        class Response:
+            status_code = 429
+            headers = {"Retry-After": "60"}
+
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "shared-profile",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "wire_api": "chat_completions",
+            "model": "shared-model",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider._activate_rate_limit_cooldown(
+                profile,
+                Response(),
+                "Rate limit exceeded",
+                request_kind="ocr",
+            )
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(
+                provider.get_cooldown_remaining(profile, request_kind="ocr"),
+                0.0,
+            )
+            self.assertGreater(
+                provider.get_cooldown_remaining(
+                    profile,
+                    request_kind="translation",
+                ),
+                0.0,
+            )
+
+    def test_ocr_profile_failure_does_not_block_translation(self):
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "shared-profile",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "model": "shared-model",
+        }
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider.mark_profile_unavailable(
+                profile,
+                "OCR failed",
+                seconds=30.0,
+                request_kind="ocr",
+            )
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(
+                provider.get_cooldown_remaining(profile, request_kind="ocr"),
+                0.0,
+            )
+            self.assertEqual(
+                provider.get_cooldown_remaining(
+                    profile,
+                    request_kind="translation",
+                ),
+                0.0,
+            )
+
+    def test_older_success_cannot_clear_newer_profile_failure(self):
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "shared-profile",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "model": "shared-model",
+        }
+        older_request = provider.begin_profile_request(
+            profile,
+            request_kind="ocr",
+        )
+        newer_request = provider.begin_profile_request(
+            profile,
+            request_kind="ocr",
+        )
+
+        with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+            provider.mark_profile_unavailable(
+                profile,
+                "newer OCR failed",
+                seconds=30.0,
+                request_kind="ocr",
+                request_sequence=newer_request,
+            )
+            provider.mark_profile_available(
+                profile,
+                request_kind="ocr",
+                request_sequence=older_request,
+            )
+
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertGreater(
+                provider.get_cooldown_remaining(profile, request_kind="ocr"),
+                0.0,
+            )
+
+        provider.mark_profile_available(
+            profile,
+            request_kind="ocr",
+            request_sequence=newer_request,
+        )
+        with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+            self.assertEqual(
+                provider.get_cooldown_remaining(profile, request_kind="ocr"),
+                0.0,
+            )
 
     def test_successful_response_resets_rate_limit_backoff_counter(self):
         class Response:
@@ -7360,6 +7570,245 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         result = handler.perform_ocr(b"image", "en")
 
         self.assertTrue(result.startswith("<e>: Custom AI OCR error: ValueError - vision failed"))
+
+    def test_profile_failure_cooldown_classifier(self):
+        handler = TranslationHandler(object())
+        try:
+            cases = (
+                (
+                    "Chat completions request failed (HTTP 402): "
+                    "INSUFFICIENT_BALANCE",
+                    300.0,
+                ),
+                ("precharge failed because balance is insufficient", 300.0),
+                ("API response did not contain message content", 10.0),
+                ("HTTPSConnectionPool read timed out", 15.0),
+                ("Chat completions request failed (HTTP 503)", 15.0),
+                ("unclassified provider failure", 30.0),
+            )
+
+            for error_text, expected_seconds in cases:
+                with self.subTest(error_text=error_text):
+                    self.assertEqual(
+                        handler._custom_ai_profile_failure_cooldown_seconds(
+                            error_text
+                        ),
+                        expected_seconds,
+                    )
+        finally:
+            handler.close()
+
+    def test_custom_ai_ocr_failure_marks_profile_with_classified_cooldown(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Vision",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            handler.custom_ai_provider.recognize = Mock(
+                side_effect=ValueError(
+                    "Chat completions request failed (HTTP 402): "
+                    "INSUFFICIENT_BALANCE"
+                )
+            )
+            handler.custom_ai_provider.mark_profile_unavailable = Mock()
+
+            result = handler.perform_ocr(b"image", "en")
+
+            self.assertTrue(result.startswith("<e>: Custom AI OCR error:"))
+            handler.custom_ai_provider.mark_profile_unavailable.assert_called_once_with(
+                profile,
+                "Chat completions request failed (HTTP 402): "
+                "INSUFFICIENT_BALANCE",
+                seconds=300.0,
+                request_kind="ocr",
+                request_sequence=1,
+            )
+        finally:
+            handler.close()
+
+    def test_custom_ai_ocr_success_marks_profile_available(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Vision",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            handler.custom_ai_provider.recognize = Mock(
+                return_value=("Recognized", {}, 0.2)
+            )
+            handler.custom_ai_provider.mark_profile_available = Mock()
+
+            self.assertEqual(handler.perform_ocr(b"image", "en"), "Recognized")
+            handler.custom_ai_provider.mark_profile_available.assert_called_once_with(
+                profile,
+                request_kind="ocr",
+                request_sequence=1,
+            )
+        finally:
+            handler.close()
+
+    def test_older_ocr_success_does_not_clear_newer_failure(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Vision",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        older_started = threading.Event()
+        release_older = threading.Event()
+        call_lock = threading.Lock()
+        call_count = 0
+
+        def recognize(*args, **kwargs):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+                call_number = call_count
+            if call_number == 1:
+                older_started.set()
+                release_older.wait(timeout=2.0)
+                return "Older success", {}, 0.2
+            raise ValueError("Chat completions request failed (HTTP 503)")
+
+        handler.custom_ai_provider.recognize = recognize
+        older_thread = threading.Thread(
+            target=handler.perform_ocr,
+            args=(b"older-image", "en"),
+        )
+        try:
+            older_thread.start()
+            self.assertTrue(older_started.wait(timeout=1.0))
+            self.assertTrue(
+                handler.perform_ocr(b"newer-image", "en").startswith("<e>:")
+            )
+            release_older.set()
+            older_thread.join(timeout=2.0)
+            self.assertFalse(older_thread.is_alive())
+            self.assertGreater(
+                handler.get_active_custom_ai_ocr_cooldown_seconds(),
+                0.0,
+            )
+        finally:
+            release_older.set()
+            older_thread.join(timeout=2.0)
+            handler.close()
+
+    def test_active_custom_ai_ocr_cooldown_uses_selected_ocr_profile(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Vision",
+            "base_url": "https://host.example/v1",
+            "model": "vision-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                self.requested_kind = kind
+                return profile
+
+        profiles = Profiles()
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_ai_profiles=profiles)
+        )
+        try:
+            handler.custom_ai_provider.get_cooldown_remaining = Mock(
+                return_value=12.5
+            )
+
+            self.assertEqual(
+                handler.get_active_custom_ai_ocr_cooldown_seconds(),
+                12.5,
+            )
+            self.assertEqual(profiles.requested_kind, "ocr")
+        finally:
+            handler.close()
+
+    def test_shared_profile_ocr_cooldown_does_not_pause_translation(self):
+        class Response:
+            status_code = 502
+            headers = {"Retry-After": "60"}
+
+        profile = {
+            "id": "shared-profile",
+            "name": "Shared",
+            "base_url": "https://relay.example/v1",
+            "api_key": "super-secret",
+            "wire_api": "chat_completions",
+            "model": "shared-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, enabled_only=False):
+                return [profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            translation_model_var=DummyVar("custom_ai"),
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+                handler.custom_ai_provider._activate_rate_limit_cooldown(
+                    profile,
+                    Response(),
+                    "Upstream gateway unavailable",
+                    request_kind="ocr",
+                )
+
+            with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+                self.assertGreater(
+                    handler.get_active_custom_ai_ocr_cooldown_seconds(),
+                    0.0,
+                )
+                self.assertEqual(
+                    handler.get_translation_provider_cooldown_seconds(),
+                    0.0,
+                )
+        finally:
+            handler.close()
 
     def test_perform_ocr_passes_image_mime_type_to_custom_ai_provider(self):
         class Profiles:
