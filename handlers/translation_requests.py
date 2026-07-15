@@ -536,6 +536,8 @@ class TranslationRequestsMixin:
             "timeout_reason": timeout_decision.reason,
             "timeout_p90_seconds": timeout_decision.p90_seconds,
             "timeout_sample_count": timeout_decision.sample_count,
+            "route_p90_seconds": timeout_decision.p90_seconds,
+            "route_sample_count": timeout_decision.sample_count,
             "profile": dict(profile) if profile else None,
             "source_lang": source_lang,
             "target_lang": target_lang,

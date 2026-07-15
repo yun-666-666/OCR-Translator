@@ -6569,6 +6569,55 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         finally:
             handler.close()
 
+    def test_safe_translation_snapshot_exposes_route_latency_for_scheduler(self):
+        profile = {
+            "id": "safe-route",
+            "name": "Safe route",
+            "base_url": "https://safe.example/v1",
+            "api_key": "safe-secret",
+            "model": "safe-model",
+            "wire_api": "chat_completions",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+            translation_model_var=DummyVar("custom_ai"),
+        )
+        handler = TranslationHandler(app)
+        try:
+            for duration in (2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0):
+                handler._record_custom_ai_latency_observation(
+                    duration,
+                    success=True,
+                    profile=profile,
+                )
+
+            snapshot = handler.get_custom_ai_translation_request_snapshot(
+                "Safe subtitle",
+                commit=False,
+            )
+
+            self.assertEqual(snapshot["configured_latency_mode"], "safe")
+            self.assertEqual(snapshot["p90_seconds"], 0.0)
+            self.assertEqual(snapshot["sample_count"], 0)
+            self.assertEqual(snapshot.get("route_p90_seconds"), 8.0)
+            self.assertEqual(snapshot.get("route_sample_count"), 8)
+        finally:
+            handler.close()
+
     def test_custom_ai_translation_error_redacts_active_profile_key(self):
         profile = {
             "id": "active",

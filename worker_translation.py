@@ -123,8 +123,20 @@ def _get_translation_supersede_after_seconds(app, request_snapshot=None):
     if not isinstance(request_snapshot, dict):
         return configured
     try:
-        sample_count = int(request_snapshot.get("sample_count", 0) or 0)
-        p90_seconds = float(request_snapshot.get("p90_seconds", 0.0) or 0.0)
+        sample_count = int(
+            request_snapshot.get(
+                "route_sample_count",
+                request_snapshot.get("sample_count", 0),
+            )
+            or 0
+        )
+        p90_seconds = float(
+            request_snapshot.get(
+                "route_p90_seconds",
+                request_snapshot.get("p90_seconds", 0.0),
+            )
+            or 0.0
+        )
     except (OverflowError, TypeError, ValueError):
         return configured
     if (
@@ -582,4 +594,3 @@ def _build_streaming_display_callback(app, translation_sequence):
             raise
 
     return stream_callback
-

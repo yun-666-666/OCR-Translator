@@ -2625,7 +2625,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace()
         resolver = worker_threads._get_translation_supersede_after_seconds
-        snapshot = {"p90_seconds": 8.0, "sample_count": 8}
+        snapshot = {
+            "route_p90_seconds": 8.0,
+            "route_sample_count": 8,
+        }
         threshold = (
             resolver(app, snapshot)
             if "request_snapshot" in inspect.signature(resolver).parameters
@@ -2638,7 +2641,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace()
         resolver = worker_threads._get_translation_supersede_after_seconds
-        snapshot = {"p90_seconds": 20.0, "sample_count": 8}
+        snapshot = {
+            "route_p90_seconds": 20.0,
+            "route_sample_count": 8,
+        }
         threshold = (
             resolver(app, snapshot)
             if "request_snapshot" in inspect.signature(resolver).parameters
@@ -2651,7 +2657,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace()
         resolver = worker_threads._get_translation_supersede_after_seconds
-        snapshot = {"p90_seconds": 4.0, "sample_count": 7}
+        snapshot = {
+            "route_p90_seconds": 4.0,
+            "route_sample_count": 7,
+        }
         threshold = (
             resolver(app, snapshot)
             if "request_snapshot" in inspect.signature(resolver).parameters
@@ -2676,8 +2685,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 return {
                     "inflight_key": ("custom_ai", text, "scope"),
                     "latency_mode": "safe",
-                    "p90_seconds": 8.0,
-                    "sample_count": 8,
+                    "route_p90_seconds": 8.0,
+                    "route_sample_count": 8,
                 }
 
             def get_translation_submit_interval_seconds(self, text_content=None):
@@ -4565,6 +4574,39 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
 
         self.assertTrue(app.overload_detected)
         self.assertEqual(app.current_scan_interval, 300)
+
+    def test_switch_from_local_pacing_resets_api_moderate_interval(self):
+        import app_logic
+
+        selected_model = types.SimpleNamespace(value="paddleocr")
+        app = self._make_app(
+            ocr_model="paddleocr",
+            local_ocr_timing={
+                "count": 8,
+                "latest": 0.5,
+                "p50": 0.5,
+                "p90": 0.6,
+            },
+        )
+        app.ocr_model_var = types.SimpleNamespace(
+            get=lambda: selected_model.value
+        )
+
+        with (
+            patch.object(
+                app_logic.time,
+                "monotonic",
+                side_effect=[2.1, 4.2],
+            ),
+            patch.object(app_logic, "log_debug"),
+        ):
+            app.update_adaptive_scan_interval()
+            selected_model.value = "custom_ai"
+            app.active_ocr_calls = {1}
+            app.update_adaptive_scan_interval()
+
+        self.assertFalse(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 200)
 
     def test_malformed_local_ocr_timing_keeps_base_interval(self):
         import app_logic

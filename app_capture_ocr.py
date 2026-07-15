@@ -254,13 +254,13 @@ class AppCaptureOcrMixin:
             adaptive_state != previous_log_state
             or now - previous_log_time >= 30.0
         )
+        if previous_log_state == "local-runtime":
+            self.current_scan_interval = base_interval
+            self.overload_detected = False
         adaptive_log_message = None
 
         if adaptive_state == "overloaded":
-            if (
-                not self.overload_detected
-                or previous_log_state == "local-runtime"
-            ):
+            if not self.overload_detected:
                 # First detection of overload
                 self.current_scan_interval = int(base_interval * 1.5)  # 150%
                 self.overload_detected = True
