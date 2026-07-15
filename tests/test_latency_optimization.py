@@ -488,6 +488,80 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             1,
         )
 
+    def test_custom_ai_cooldown_bypasses_backpressure_for_paddle_fallback(self):
+        worker_threads = import_worker_threads_for_tests()
+        screenshot = Image.new("RGB", (8, 8), (4, 5, 6))
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+
+        class FakeOverlay:
+            def winfo_exists(self):
+                return True
+
+            def get_geometry(self):
+                return (10, 20, 18, 28)
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            current_scan_interval=200,
+            scan_interval_var=types.SimpleNamespace(get=lambda: 200),
+            update_adaptive_scan_interval=lambda: None,
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: model == "custom_ai",
+            get_effective_ocr_concurrency_limit=lambda provider=None: 2,
+            active_ocr_calls={"first", "second"},
+            max_concurrent_ocr_calls=8,
+            translation_handler=types.SimpleNamespace(
+                get_active_custom_ai_ocr_cooldown_seconds=lambda: 30.0
+            ),
+            source_overlay=FakeOverlay(),
+            capture_backend_var=types.SimpleNamespace(get=lambda: "mss"),
+            capture_backend_selector=types.SimpleNamespace(
+                resolve_backend=lambda configured, region: "mss"
+            ),
+            ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
+            ocr_queue=queue.Queue(maxsize=4),
+            runtime_metrics=metrics,
+            last_processed_subtitle=None,
+            previous_text="",
+            text_stability_counter=0,
+        )
+        original_put_nowait = app.ocr_queue.put_nowait
+
+        def stop_after_put(item):
+            original_put_nowait(item)
+            app.is_running = False
+
+        app.ocr_queue.put_nowait = stop_after_put
+
+        def stop_if_backpressured(_seconds):
+            app.is_running = False
+
+        with (
+            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
+            patch.object(
+                worker_threads,
+                "capture_screen_region",
+                return_value=screenshot,
+            ) as capture,
+            patch.object(
+                worker_threads.time,
+                "sleep",
+                side_effect=stop_if_backpressured,
+            ),
+        ):
+            worker_threads.run_capture_thread(app)
+
+        capture.assert_called_once_with((10, 20, 8, 8), backend="mss")
+        self.assertIs(app.ocr_queue.get_nowait(), screenshot)
+        self.assertEqual(
+            metrics.snapshot()["counters"].get(
+                "api_ocr_capture_backpressure_skip",
+                0,
+            ),
+            0,
+        )
+
     def test_unknown_capture_backend_config_uses_auto_selector(self):
         worker_threads = import_worker_threads_for_tests()
 

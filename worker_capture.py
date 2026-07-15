@@ -58,6 +58,23 @@ def _get_api_ocr_capture_load(app, ocr_model):
         return 0, 0, False
 
     facade = sys.modules.get("worker_threads")
+    effective_model_getter = getattr(
+        facade,
+        "_effective_ocr_model_for_frame",
+        None,
+    )
+    effective_model = ocr_model
+    if callable(effective_model_getter):
+        try:
+            effective_model = effective_model_getter(app, ocr_model)
+        except Exception:
+            effective_model = ocr_model
+    try:
+        if not app.is_api_based_ocr_model(effective_model):
+            return 0, 0, False
+    except Exception:
+        return 0, 0, False
+
     limit_getter = getattr(facade, "_api_ocr_concurrency_limit", None)
     if not callable(limit_getter):
         return 0, 0, False
@@ -587,6 +604,5 @@ def run_capture_thread(app):
             sleep_after_error = current_scan_interval_sec if 'current_scan_interval_sec' in locals() else 0.5
             time.sleep(max(sleep_after_error, 0.5))
     _log_debug("WT: Capture thread finished.")
-
 
 
