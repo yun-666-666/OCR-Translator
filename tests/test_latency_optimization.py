@@ -402,6 +402,92 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         )
         self.assertEqual((last, repeats, enqueue), (changed_signature, 0, True))
 
+    def test_api_capture_saturation_uses_effective_limit(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            active_ocr_calls={"first", "second"},
+            max_concurrent_ocr_calls=8,
+            is_api_based_ocr_model=lambda model: model == "custom_ai",
+            get_effective_ocr_concurrency_limit=lambda provider: 2,
+        )
+
+        self.assertTrue(
+            worker_threads._api_ocr_capture_is_saturated(app, "custom_ai")
+        )
+        self.assertFalse(
+            worker_threads._api_ocr_capture_is_saturated(app, "paddleocr")
+        )
+
+        app.active_ocr_calls.clear()
+        app.get_effective_ocr_concurrency_limit = lambda provider: 0
+        self.assertTrue(
+            worker_threads._api_ocr_capture_is_saturated(app, "custom_ai")
+        )
+
+    def test_saturated_api_capture_waits_then_resumes_with_current_frame(self):
+        worker_threads = import_worker_threads_for_tests()
+        screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+
+        class FakeOverlay:
+            def winfo_exists(self):
+                return True
+
+            def get_geometry(self):
+                return (10, 20, 18, 28)
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            current_scan_interval=200,
+            scan_interval_var=types.SimpleNamespace(get=lambda: 200),
+            update_adaptive_scan_interval=lambda: None,
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: model == "custom_ai",
+            get_effective_ocr_concurrency_limit=lambda provider=None: 2,
+            active_ocr_calls={"first", "second"},
+            max_concurrent_ocr_calls=8,
+            source_overlay=FakeOverlay(),
+            capture_backend_var=types.SimpleNamespace(get=lambda: "mss"),
+            capture_backend_selector=types.SimpleNamespace(
+                resolve_backend=lambda configured, region: "mss"
+            ),
+            ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
+            ocr_queue=queue.Queue(maxsize=4),
+            runtime_metrics=metrics,
+            last_processed_subtitle=None,
+            previous_text="",
+            text_stability_counter=0,
+        )
+        original_put_nowait = app.ocr_queue.put_nowait
+
+        def stop_after_put(item):
+            original_put_nowait(item)
+            app.is_running = False
+
+        app.ocr_queue.put_nowait = stop_after_put
+
+        def release_capacity(_seconds):
+            app.active_ocr_calls.clear()
+
+        with (
+            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
+            patch.object(
+                worker_threads,
+                "capture_screen_region",
+                return_value=screenshot,
+            ) as capture,
+            patch.object(worker_threads.time, "sleep", side_effect=release_capacity),
+        ):
+            worker_threads.run_capture_thread(app)
+
+        capture.assert_called_once_with((10, 20, 8, 8), backend="mss")
+        self.assertIs(app.ocr_queue.get_nowait(), screenshot)
+        self.assertEqual(
+            metrics.snapshot()["counters"]["api_ocr_capture_backpressure_skip"],
+            1,
+        )
+
     def test_unknown_capture_backend_config_uses_auto_selector(self):
         worker_threads = import_worker_threads_for_tests()
 

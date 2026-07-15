@@ -51,6 +51,7 @@ OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
 from worker_capture import (
     run_capture_thread,
+    _api_ocr_capture_is_saturated,
     _log_hot_path_timing,
     _request_snapshot_timeout_seconds,
     _log_paddle_ocr_route,

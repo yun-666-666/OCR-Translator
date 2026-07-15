@@ -49,6 +49,35 @@ def _enqueue_ocr_frame_for_model(*args, **kwargs):
     return sys.modules["worker_threads"].enqueue_ocr_frame_for_model(*args, **kwargs)
 
 
+def _get_api_ocr_capture_load(app, ocr_model):
+    """Return active calls, effective capacity, and source saturation state."""
+    try:
+        if not app.is_api_based_ocr_model(ocr_model):
+            return 0, 0, False
+    except Exception:
+        return 0, 0, False
+
+    facade = sys.modules.get("worker_threads")
+    limit_getter = getattr(facade, "_api_ocr_concurrency_limit", None)
+    if not callable(limit_getter):
+        return 0, 0, False
+    try:
+        effective_limit = max(0, int(limit_getter(app, ocr_model)))
+        active_count = len(getattr(app, "active_ocr_calls", ()))
+    except (AttributeError, TypeError, ValueError):
+        return 0, 0, False
+    return (
+        active_count,
+        effective_limit,
+        effective_limit == 0 or active_count >= effective_limit,
+    )
+
+
+def _api_ocr_capture_is_saturated(app, ocr_model):
+    """Return whether API OCR capture should pause before taking a frame."""
+    return _get_api_ocr_capture_load(app, ocr_model)[2]
+
+
 def _prepare_paddleocr_image(*args, **kwargs):
     return sys.modules["worker_threads"].prepare_paddleocr_image(*args, **kwargs)
 
@@ -388,6 +417,29 @@ def run_capture_thread(app):
             ocr_model = app.get_ocr_model_setting()
             # Use a simpler, more adaptive logic for all API-based OCR models
             if app.is_api_based_ocr_model(ocr_model):
+                (
+                    active_ocr_count,
+                    effective_ocr_limit,
+                    api_ocr_saturated,
+                ) = _get_api_ocr_capture_load(app, ocr_model)
+                if api_ocr_saturated:
+                    _increment_metric(app, "api_ocr_capture_backpressure_skip")
+                    _log_debug_coalesced(
+                        ("api-ocr-capture-backpressure", ocr_model),
+                        "CAPTURE: API OCR saturated "
+                        f"provider={ocr_model} active={active_ocr_count} "
+                        f"limit={effective_ocr_limit}; waiting "
+                        f"{scan_interval_ms}ms before capturing a fresh frame",
+                        interval_seconds=5.0,
+                    )
+                    current_scan_interval_sec = base_scan_interval
+                    slept_time = 0.0
+                    while slept_time < base_scan_interval and app.is_running:
+                        chunk = min(0.05, base_scan_interval - slept_time)
+                        time.sleep(chunk)
+                        slept_time += chunk
+                    continue
+
                 # For API-based OCR: Simple, strict interval - no complex adaptive logic
                 if now - last_cap_time < base_scan_interval:
                     sleep_duration = base_scan_interval - (now - last_cap_time)
@@ -535,7 +587,6 @@ def run_capture_thread(app):
             sleep_after_error = current_scan_interval_sec if 'current_scan_interval_sec' in locals() else 0.5
             time.sleep(max(sleep_after_error, 0.5))
     _log_debug("WT: Capture thread finished.")
-
 
 
 
