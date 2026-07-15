@@ -1,5 +1,6 @@
 """Capture, OCR adaptation, preview, and overlay responsibilities."""
 
+import math
 import sys
 import time
 import tkinter as tk
@@ -36,6 +37,9 @@ from paddle_ocr_backend import (
     prepare_paddleocr_image,
     recognize_with_paddleocr,
 )
+
+
+CUSTOM_AI_OCR_CONCURRENCY_LIMIT = 2
 
 
 def _log_debug(message):
@@ -125,6 +129,18 @@ class AppCaptureOcrMixin:
         """Get the current OCR model setting."""
         return self.ocr_model_var.get()
 
+    def get_effective_ocr_concurrency_limit(self, provider_name=None):
+        """Return the provider-aware OCR request capacity."""
+        if provider_name is None:
+            provider_name = self.get_ocr_model_setting()
+        try:
+            configured_limit = max(0, int(self.max_concurrent_ocr_calls))
+        except (AttributeError, TypeError, ValueError):
+            configured_limit = 1
+        if provider_name == "custom_ai":
+            return min(configured_limit, CUSTOM_AI_OCR_CONCURRENCY_LIMIT)
+        return configured_limit
+
     def update_adaptive_scan_interval(self):
         """Adjust scan interval based on current OCR API load to prevent bottlenecks."""
         now = time.monotonic()
@@ -137,7 +153,9 @@ class AppCaptureOcrMixin:
 
         # Measure current OCR load
         active_ocr_count = len(self.active_ocr_calls)
-        max_ocr_calls = self.max_concurrent_ocr_calls
+        max_ocr_calls = self.get_effective_ocr_concurrency_limit()
+        overload_threshold = max(1, math.ceil(max_ocr_calls * 0.75))
+        moderate_threshold = max(1, overload_threshold - 1)
 
         # Get user's preferred base interval
         base_interval = self.scan_interval_var.get()  # User's setting in milliseconds
@@ -145,15 +163,12 @@ class AppCaptureOcrMixin:
         # Update base_scan_interval to track user changes
         self.base_scan_interval = base_interval
 
-        # Apply the user's specific requirements:
-        # If active OCR API calls > 5, increase scan interval to 150% of current value
-        # If active OCR API calls fall below 5, restore original scan interval
-        if active_ocr_count > 5:
+        if active_ocr_count >= overload_threshold:
             adaptive_state = "overloaded"
-        elif active_ocr_count < 5:
-            adaptive_state = "normal"
-        else:
+        elif active_ocr_count >= moderate_threshold:
             adaptive_state = "moderate"
+        else:
+            adaptive_state = "normal"
 
         previous_log_state = getattr(self, "_last_adaptive_log_state", None)
         previous_log_time = getattr(self, "_last_adaptive_log_time", 0.0)
@@ -163,7 +178,7 @@ class AppCaptureOcrMixin:
         )
         adaptive_log_message = None
 
-        if active_ocr_count > 5:
+        if adaptive_state == "overloaded":
             if not self.overload_detected:
                 # First detection of overload
                 self.current_scan_interval = int(base_interval * 1.5)  # 150%
@@ -180,7 +195,7 @@ class AppCaptureOcrMixin:
                 )
             # Stay at increased interval while overloaded
 
-        elif active_ocr_count < 5:
+        elif adaptive_state == "normal":
             if self.overload_detected:
                 # Load has decreased, return to normal
                 self.current_scan_interval = base_interval
@@ -196,7 +211,7 @@ class AppCaptureOcrMixin:
                     f"scan interval remains at {self.current_scan_interval}ms"
                 )
         else:
-            # At exactly 5 calls, maintain current state
+            # Near the provider limit, maintain the current interval.
             if should_log_state:
                 adaptive_log_message = (
                     f"ADAPTIVE: OCR load moderate ({active_ocr_count} active calls), "
@@ -565,4 +580,3 @@ class AppCaptureOcrMixin:
     def toggle_target_visibility(self):
         toggle_target_visibility_om(self)
         self.save_settings()
-

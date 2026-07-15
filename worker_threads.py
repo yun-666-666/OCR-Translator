@@ -35,6 +35,7 @@ from translation_utils import (
     post_process_translation_text,
 )
 from PIL import Image # For hashing in capture_thread
+from app_capture_ocr import CUSTOM_AI_OCR_CONCURRENCY_LIMIT
 
 
 DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
@@ -48,9 +49,6 @@ CAPTURE_SLOW_SECONDS_MSS = 0.050
 CAPTURE_SLOW_SECONDS_PYAUTOGUI = 0.250
 OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
-MAX_CUSTOM_AI_OCR_CONCURRENCY = 2
-
-
 from worker_capture import (
     run_capture_thread,
     _log_hot_path_timing,
@@ -173,13 +171,19 @@ def _effective_ocr_model_for_frame(app, selected_model):
 
 
 def _api_ocr_concurrency_limit(app, provider_name):
-    """Keep generic API OCR capacity while bounding costly Custom AI bursts."""
+    """Return the same provider-aware limit used by adaptive capture."""
+    getter = getattr(app, "get_effective_ocr_concurrency_limit", None)
+    if callable(getter):
+        try:
+            return max(0, int(getter(provider_name)))
+        except (AttributeError, TypeError, ValueError):
+            pass
     try:
         configured_limit = max(0, int(app.max_concurrent_ocr_calls))
     except (AttributeError, TypeError, ValueError):
         configured_limit = 1
     if provider_name == "custom_ai":
-        return min(configured_limit, MAX_CUSTOM_AI_OCR_CONCURRENCY)
+        return min(configured_limit, CUSTOM_AI_OCR_CONCURRENCY_LIMIT)
     return configured_limit
 
 

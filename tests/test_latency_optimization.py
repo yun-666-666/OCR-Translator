@@ -4142,7 +4142,7 @@ class LatencyLegacyOcrRemovalTests(unittest.TestCase):
 
 class AdaptiveScanLoggingTests(unittest.TestCase):
     @staticmethod
-    def _make_app(active_count=0):
+    def _make_app(active_count=0, ocr_model="custom_ai"):
         import app_logic
 
         app = object.__new__(app_logic.GameChangingTranslator)
@@ -4153,9 +4153,51 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
         app.base_scan_interval = 200
         app.overload_detected = False
         app.scan_interval_var = types.SimpleNamespace(get=lambda: 200)
+        app.ocr_model_var = types.SimpleNamespace(get=lambda: ocr_model)
         app._last_adaptive_log_state = None
         app._last_adaptive_log_time = 0.0
         return app
+
+    def test_effective_limit_caps_custom_ai_and_preserves_generic_capacity(self):
+        app = self._make_app()
+
+        self.assertEqual(app.get_effective_ocr_concurrency_limit("custom_ai"), 2)
+        self.assertEqual(app.get_effective_ocr_concurrency_limit("other_api"), 8)
+
+    def test_effective_limit_preserves_zero_and_recovers_invalid_config(self):
+        app = self._make_app()
+        app.max_concurrent_ocr_calls = 0
+        self.assertEqual(app.get_effective_ocr_concurrency_limit("custom_ai"), 0)
+
+        app.max_concurrent_ocr_calls = "invalid"
+        self.assertEqual(app.get_effective_ocr_concurrency_limit("custom_ai"), 1)
+
+    def test_two_active_custom_ai_calls_trigger_adaptive_overload(self):
+        import app_logic
+
+        app = self._make_app(active_count=2, ocr_model="custom_ai")
+        with (
+            patch.object(app_logic.time, "monotonic", return_value=2.1),
+            patch.object(app_logic, "log_debug") as debug_log,
+        ):
+            app.update_adaptive_scan_interval()
+
+        self.assertTrue(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 300)
+        self.assertIn("overload detected", debug_log.call_args.args[0].lower())
+
+    def test_six_active_generic_calls_keep_historical_overload_threshold(self):
+        import app_logic
+
+        app = self._make_app(active_count=6, ocr_model="other_api")
+        with (
+            patch.object(app_logic.time, "monotonic", return_value=2.1),
+            patch.object(app_logic, "log_debug"),
+        ):
+            app.update_adaptive_scan_interval()
+
+        self.assertTrue(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 300)
 
     def test_unchanged_adaptive_state_logs_once_inside_heartbeat_window(self):
         import app_logic
