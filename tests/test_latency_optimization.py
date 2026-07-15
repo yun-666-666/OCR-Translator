@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import base64
+import inspect
 import io
 import os
 import queue
@@ -2619,6 +2620,108 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             app.active_translation_started_monotonic,
             {1: 100.0, 2: 101.6},
         )
+
+    def test_translation_supersede_threshold_uses_route_p90(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace()
+        resolver = worker_threads._get_translation_supersede_after_seconds
+        snapshot = {"p90_seconds": 8.0, "sample_count": 8}
+        threshold = (
+            resolver(app, snapshot)
+            if "request_snapshot" in inspect.signature(resolver).parameters
+            else resolver(app)
+        )
+
+        self.assertEqual(threshold, 4.0)
+
+    def test_translation_supersede_threshold_caps_slow_route_p90(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace()
+        resolver = worker_threads._get_translation_supersede_after_seconds
+        snapshot = {"p90_seconds": 20.0, "sample_count": 8}
+        threshold = (
+            resolver(app, snapshot)
+            if "request_snapshot" in inspect.signature(resolver).parameters
+            else resolver(app)
+        )
+
+        self.assertEqual(threshold, 4.0)
+
+    def test_translation_supersede_threshold_requires_enough_samples(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace()
+        resolver = worker_threads._get_translation_supersede_after_seconds
+        snapshot = {"p90_seconds": 4.0, "sample_count": 7}
+        threshold = (
+            resolver(app, snapshot)
+            if "request_snapshot" in inspect.signature(resolver).parameters
+            else resolver(app)
+        )
+
+        self.assertEqual(threshold, 1.5)
+
+    def test_route_p90_keeps_young_active_translation_queued(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(
+                self,
+                text,
+                commit=False,
+            ):
+                return {
+                    "inflight_key": ("custom_ai", text, "scope"),
+                    "latency_mode": "safe",
+                    "p90_seconds": 8.0,
+                    "sample_count": 8,
+                }
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **_kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={
+                ("custom_ai", "Old", "scope")
+            },
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=Mock(),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=lambda: False
+            ),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=102.0):
+            worker_threads.start_async_translation(app, "Latest", 2)
+
+        app.translation_thread_pool.submit.assert_not_called()
+        self.assertEqual(app.pending_translation_request["text"], "Latest")
+        self.assertEqual(len(scheduled), 1)
+        self.assertGreaterEqual(scheduled[0][0], 1999)
+        self.assertLessEqual(scheduled[0][0], 2001)
 
     def test_stale_translation_supersession_never_exceeds_two_active_calls(self):
         worker_threads = import_worker_threads_for_tests()

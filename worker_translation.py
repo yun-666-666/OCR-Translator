@@ -1,5 +1,6 @@
 """Pending translation scheduling and streaming display helpers."""
 
+import math
 import sys
 import threading
 import time
@@ -9,6 +10,9 @@ from translation_utils import post_process_translation_text
 from worker_capture import _increment_metric, _refresh_translation_metric_gauges
 
 DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
+ROUTE_SUPERSEDE_MIN_SAMPLES = 8
+ROUTE_SUPERSEDE_P90_FRACTION = 0.5
+ROUTE_SUPERSEDE_MAX_SECONDS = 4.0
 
 
 def _facade():
@@ -104,7 +108,7 @@ def _get_translation_concurrency_limit(app):
     return max(1, int(getattr(app, 'max_concurrent_translation_calls', 1) or 1))
 
 
-def _get_translation_supersede_after_seconds(app):
+def _get_translation_supersede_after_seconds(app, request_snapshot=None):
     try:
         configured = float(
             getattr(
@@ -115,7 +119,25 @@ def _get_translation_supersede_after_seconds(app):
         )
     except (TypeError, ValueError):
         configured = DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS
-    return max(0.25, min(10.0, configured))
+    configured = max(0.25, min(10.0, configured))
+    if not isinstance(request_snapshot, dict):
+        return configured
+    try:
+        sample_count = int(request_snapshot.get("sample_count", 0) or 0)
+        p90_seconds = float(request_snapshot.get("p90_seconds", 0.0) or 0.0)
+    except (OverflowError, TypeError, ValueError):
+        return configured
+    if (
+        sample_count < ROUTE_SUPERSEDE_MIN_SAMPLES
+        or not math.isfinite(p90_seconds)
+        or p90_seconds <= 0.0
+    ):
+        return configured
+    route_threshold = min(
+        ROUTE_SUPERSEDE_MAX_SECONDS,
+        p90_seconds * ROUTE_SUPERSEDE_P90_FRACTION,
+    )
+    return max(configured, route_threshold)
 
 
 def _get_translation_latency_mode(app, latency_mode=None):
@@ -560,5 +582,4 @@ def _build_streaming_display_callback(app, translation_sequence):
             raise
 
     return stream_callback
-
 

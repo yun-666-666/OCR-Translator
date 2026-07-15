@@ -794,7 +794,10 @@ def start_async_translation(
         may_supersede_stale_call = False
         if active_translation_count >= concurrency_limit:
             oldest_active_age = _get_oldest_active_translation_age(app, now)
-            supersede_after = _get_translation_supersede_after_seconds(app)
+            supersede_after = _get_translation_supersede_after_seconds(
+                app,
+                request_snapshot,
+            )
             may_use_overflow_slot = (
                 concurrency_limit == 1
                 and active_translation_count < MAX_SUPERSEDED_TRANSLATION_CONCURRENCY
