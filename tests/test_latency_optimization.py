@@ -4533,6 +4533,39 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
         self.assertFalse(app.overload_detected)
         self.assertEqual(app.current_scan_interval, 200)
 
+    def test_switch_from_local_pacing_recomputes_api_overload_interval(self):
+        import app_logic
+
+        selected_model = types.SimpleNamespace(value="paddleocr")
+        app = self._make_app(
+            ocr_model="paddleocr",
+            local_ocr_timing={
+                "count": 8,
+                "latest": 0.219,
+                "p50": 0.219,
+                "p90": 0.359,
+            },
+        )
+        app.ocr_model_var = types.SimpleNamespace(
+            get=lambda: selected_model.value
+        )
+
+        with (
+            patch.object(
+                app_logic.time,
+                "monotonic",
+                side_effect=[2.1, 4.2],
+            ),
+            patch.object(app_logic, "log_debug"),
+        ):
+            app.update_adaptive_scan_interval()
+            selected_model.value = "custom_ai"
+            app.active_ocr_calls = {1, 2}
+            app.update_adaptive_scan_interval()
+
+        self.assertTrue(app.overload_detected)
+        self.assertEqual(app.current_scan_interval, 300)
+
     def test_malformed_local_ocr_timing_keeps_base_interval(self):
         import app_logic
 
