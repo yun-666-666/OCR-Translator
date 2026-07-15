@@ -177,11 +177,11 @@ def _api_ocr_concurrency_limit(app, provider_name):
     if callable(getter):
         try:
             return max(0, int(getter(provider_name)))
-        except (AttributeError, TypeError, ValueError):
+        except (AttributeError, OverflowError, TypeError, ValueError):
             pass
     try:
         configured_limit = max(0, int(app.max_concurrent_ocr_calls))
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, OverflowError, TypeError, ValueError):
         configured_limit = 1
     if provider_name == "custom_ai":
         return min(configured_limit, CUSTOM_AI_OCR_CONCURRENCY_LIMIT)

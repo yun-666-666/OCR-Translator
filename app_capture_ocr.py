@@ -135,7 +135,7 @@ class AppCaptureOcrMixin:
             provider_name = self.get_ocr_model_setting()
         try:
             configured_limit = max(0, int(self.max_concurrent_ocr_calls))
-        except (AttributeError, TypeError, ValueError):
+        except (AttributeError, OverflowError, TypeError, ValueError):
             configured_limit = 1
         if provider_name == "custom_ai":
             return min(configured_limit, CUSTOM_AI_OCR_CONCURRENCY_LIMIT)

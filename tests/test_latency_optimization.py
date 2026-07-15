@@ -4332,6 +4332,21 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
         app.max_concurrent_ocr_calls = "invalid"
         self.assertEqual(app.get_effective_ocr_concurrency_limit("custom_ai"), 1)
 
+        app.max_concurrent_ocr_calls = float("inf")
+        self.assertEqual(app.get_effective_ocr_concurrency_limit("custom_ai"), 1)
+
+    def test_worker_limit_recovers_from_overflowing_compatibility_value(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            max_concurrent_ocr_calls=float("inf"),
+            get_effective_ocr_concurrency_limit=lambda provider: float("inf"),
+        )
+
+        self.assertEqual(
+            worker_threads._api_ocr_concurrency_limit(app, "custom_ai"),
+            1,
+        )
+
     def test_two_active_custom_ai_calls_trigger_adaptive_overload(self):
         import app_logic
 
