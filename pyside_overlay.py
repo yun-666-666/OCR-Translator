@@ -84,6 +84,31 @@ def qt_rect_to_physical_rect(rect, scale):
     ]
 
 
+def _disable_windows_native_border(window):
+    """Disable the Windows 11 DWM outline around a frameless overlay window."""
+    if sys.platform != "win32" or not PYSIDE6_AVAILABLE:
+        return False
+    try:
+        border_color_attribute = ctypes.c_uint(34)  # DWMWA_BORDER_COLOR
+        no_border_color = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(int(window.winId())),
+            border_color_attribute,
+            ctypes.byref(no_border_color),
+            ctypes.sizeof(no_border_color),
+        )
+        if result != 0:
+            log_debug(
+                "PySide overlay: Windows native border disable returned "
+                f"HRESULT {result}"
+            )
+            return False
+        return True
+    except Exception as exc:
+        log_debug(f"PySide overlay: Could not disable Windows native border: {exc}")
+        return False
+
+
 # -----------------------
 # PySide6-backed classes
 # -----------------------
@@ -563,6 +588,7 @@ if PYSIDE6_AVAILABLE:
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
             self.setWindowFlag(Qt.Tool, True)
+            _disable_windows_native_border(self)
 
             # The main window itself is transparent; opacity is handled by the central widget's background
             self.setStyleSheet("background-color: transparent;")

@@ -472,6 +472,41 @@ class PySideOverlayStartupTests(unittest.TestCase):
         self.assertIn("background-color: rgba(22, 44, 67, 0.0);", style)
         self.assertIn("border: 1px solid rgba(2, 24, 47, 0.0);", style)
 
+    def test_windows_native_border_is_disabled_through_dwm(self):
+        calls = []
+
+        class FakeDwmApi:
+            def DwmSetWindowAttribute(self, hwnd, attribute, value_pointer, size):
+                border_color = pyside_overlay.ctypes.cast(
+                    value_pointer,
+                    pyside_overlay.ctypes.POINTER(pyside_overlay.ctypes.c_uint),
+                ).contents.value
+                calls.append((hwnd.value, attribute.value, border_color, size))
+                return 0
+
+        class FakeWindll:
+            dwmapi = FakeDwmApi()
+
+        class FakeWindow:
+            def winId(self):
+                return 1234
+
+        with patch.object(pyside_overlay.ctypes, "windll", FakeWindll()):
+            disabled = pyside_overlay._disable_windows_native_border(FakeWindow())
+
+        self.assertTrue(disabled)
+        self.assertEqual(
+            [
+                (
+                    1234,
+                    34,
+                    0xFFFFFFFE,
+                    pyside_overlay.ctypes.sizeof(pyside_overlay.ctypes.c_uint),
+                )
+            ],
+            calls,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
