@@ -1554,6 +1554,25 @@ def create_settings_tab(app):
     font_type_combobox.bind('<<ComboboxSelected>>', create_combobox_handler_wrapper(on_font_type_change))
     current_row += 1
 
+    app.target_font_bold_checkbox = ttk.Checkbutton(
+        frame,
+        text=app.ui_lang.get_label(
+            "font_bold_label",
+            "Bold translated subtitle text",
+        ),
+        variable=app.target_font_bold_var,
+        command=app.update_target_font_weight,
+    )
+    app.target_font_bold_checkbox.grid(
+        row=current_row,
+        column=0,
+        columnspan=3,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
+    current_row += 1
+
     app.translation_horizontal_centered_checkbox = ttk.Checkbutton(
         frame,
         text=app.ui_lang.get_label(

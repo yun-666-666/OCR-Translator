@@ -353,6 +353,16 @@ class DisplayManager:
                 text_color = self.app.target_text_colour_var.get()
                 font_size = self.app.target_font_size_var.get()
                 font_type = self.app.target_font_type_var.get()
+                font_bold_var = getattr(
+                    self.app,
+                    'target_font_bold_var',
+                    None,
+                )
+                font_bold = bool(
+                    font_bold_var.get()
+                    if font_bold_var is not None
+                    else False
+                )
                 bg_color = self.app.target_colour_var.get()
 
                 self.app.translation_text.set_rtl_text(
@@ -362,6 +372,7 @@ class DisplayManager:
                     text_color,
                     font_size,
                     font_family=font_type,
+                    font_bold=font_bold,
                     preserve_linebreaks=preserve_linebreaks,
                     horizontal_centered=horizontal_centered,
                 )

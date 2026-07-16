@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import config_manager
 from custom_ai import CustomAIProvider
 from handlers.display_manager import DisplayManager
+from handlers.ui_interaction_handler import UIInteractionHandler
 from pyside_overlay import PYSIDE6_AVAILABLE, RTLTextDisplay
 
 
@@ -35,10 +36,17 @@ class _VisibleOverlay:
 class _TkFallbackText:
     def __init__(self):
         self.content = ""
+        self.configurations = []
         self.tag_configurations = []
 
-    def config(self, **_kwargs):
+    def config(self, **kwargs):
+        self.configurations.append(kwargs)
         return None
+
+    configure = config
+
+    def winfo_exists(self):
+        return True
 
     def delete(self, *_args):
         self.content = ""
@@ -102,6 +110,7 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             target_text_colour_var=_Value("#ffffff"),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
+            target_font_bold_var=_Value(True),
             target_colour_var=_Value("#112233"),
             translation_line_layout_var=_Value("compact"),
             translation_horizontal_centered_var=_Value(True),
@@ -116,6 +125,7 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             "#ffffff",
             20,
             font_family="Microsoft YaHei",
+            font_bold=True,
             preserve_linebreaks=False,
             horizontal_centered=True,
         )
@@ -130,6 +140,7 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             target_text_colour_var=_Value("#ffffff"),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Arial"),
+            target_font_bold_var=_Value(True),
             target_colour_var=_Value("#112233"),
             translation_line_layout_var=_Value("compact"),
             translation_horizontal_centered_var=_Value(True),
@@ -144,6 +155,22 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
         self.assertIn(
             ("translation_alignment", {"justify": "center"}),
             translation_text.tag_configurations,
+        )
+
+    def test_settings_handler_applies_bold_font_tuple(self):
+        translation_text = _TkFallbackText()
+        app = SimpleNamespace(
+            translation_text=translation_text,
+            target_font_size_var=_Value(20),
+            target_font_type_var=_Value("Arial"),
+            target_font_bold_var=_Value(True),
+        )
+
+        UIInteractionHandler(app).update_target_font_weight()
+
+        self.assertIn(
+            {"font": ("Arial", 20, "bold")},
+            translation_text.configurations,
         )
 
 
@@ -177,10 +204,13 @@ class TranslationDisplayLayoutPySideTests(unittest.TestCase):
             "en",
             preserve_linebreaks=False,
             horizontal_centered=True,
+            font_bold=True,
         )
 
         self.assertEqual(self.widget.toPlainText(), "one two three")
         self.assertIn("text-align: center", self.widget.html_calls[-1])
+        self.assertIn("font-weight: 700", self.widget.html_calls[-1])
+        self.assertTrue(self.widget.font().bold())
 
     def test_preserve_layout_keeps_breaks_and_default_left_alignment(self):
         self.widget.set_rtl_text(

@@ -28,6 +28,18 @@ def _safe_configure(widget, **kwargs):
         pass
 
 
+def _configure_spinbox_style(style, palette):
+    style.configure(
+        "TSpinbox",
+        fieldbackground=palette["surface"],
+        foreground=palette["text"],
+        bordercolor=palette["outline"],
+        arrowcolor=palette["text_muted"],
+        arrowsize=16,
+        padding=(5, 3),
+    )
+
+
 def apply_white_clean_theme(root, palette=None):
     """Apply the app-wide white, minimal Tk/ttk theme."""
     palette = dict(WHITE_CLEAN_PALETTE if palette is None else palette)
@@ -77,8 +89,7 @@ def apply_white_clean_theme(root, palette=None):
 
     style.configure("TEntry", fieldbackground=palette["surface"], foreground=palette["text"],
                     bordercolor=palette["outline"], lightcolor=palette["outline"], darkcolor=palette["outline"])
-    style.configure("TSpinbox", fieldbackground=palette["surface"], foreground=palette["text"],
-                    bordercolor=palette["outline"], arrowcolor=palette["text_muted"])
+    _configure_spinbox_style(style, palette)
     style.configure("TCombobox", fieldbackground=palette["surface"], background=palette["surface"],
                     foreground=palette["text"], bordercolor=palette["outline"], arrowcolor=palette["text_muted"])
     style.map("TCombobox",

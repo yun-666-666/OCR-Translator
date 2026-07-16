@@ -108,6 +108,7 @@ translation_line_layout_preserve,Dopasuj liczbę linii do napisów źródłowych
 translation_horizontal_centered,Wyśrodkuj tłumaczone napisy w poziomie
 font_size_label,Rozmiar czcionki okna tłumaczenia:
 font_type_label,Typ czcionki okna tłumaczenia:
+font_bold_label,Pogrub tłumaczone napisy
 opacity_label,Nieprzezroczystość:
 opacity_background_label,Tło:
 opacity_text_label,Tekst:

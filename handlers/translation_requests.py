@@ -1108,6 +1108,23 @@ class TranslationRequestsMixin:
         )
         return True
 
+    def _abort_stopped_custom_ai_failover(self, translation_sequence):
+        if not hasattr(self.app, "is_running"):
+            return False
+        if bool(getattr(self.app, "is_running", True)):
+            return False
+        _log_debug(
+            "LATENCY: custom_ai failover aborted because app stopped "
+            f"sequence={translation_sequence}"
+        )
+        return True
+
+    def _abort_custom_ai_failover(self, translation_sequence):
+        return (
+            self._abort_stopped_custom_ai_failover(translation_sequence)
+            or self._abort_obsolete_custom_ai_failover(translation_sequence)
+        )
+
     def _custom_ai_translate_with_failover(
         self,
         primary_profile,
@@ -1154,7 +1171,7 @@ class TranslationRequestsMixin:
             candidate_states.append((candidate, cache_params))
 
         for candidate, cache_params in candidate_states:
-            if self._abort_obsolete_custom_ai_failover(translation_sequence):
+            if self._abort_custom_ai_failover(translation_sequence):
                 return None
             cooldown_seconds = self._custom_ai_profile_cooldown_seconds(candidate)
             if cooldown_seconds > 0:
@@ -1210,7 +1227,7 @@ class TranslationRequestsMixin:
                     f"provider={candidate.get('name', 'Custom AI')} "
                     f"{type(error).__name__} - {error_text}"
                 )
-                if self._abort_obsolete_custom_ai_failover(
+                if self._abort_custom_ai_failover(
                     translation_sequence
                 ):
                     return None

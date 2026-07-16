@@ -107,6 +107,9 @@ class AppConfigurationMixin:
     def update_target_font_type(self):
         self.ui_interaction_handler.update_target_font_type()
 
+    def update_target_font_weight(self):
+        self.ui_interaction_handler.update_target_font_weight()
+
     def update_target_opacity(self):
         self.ui_interaction_handler.update_target_opacity()
 
@@ -680,4 +683,3 @@ class AppConfigurationMixin:
         except Exception as e:
             _log_debug(f"Error saving custom prompt: {e}")
             return False
-

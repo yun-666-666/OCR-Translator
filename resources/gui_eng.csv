@@ -106,6 +106,7 @@ translation_line_layout_preserve,Match source subtitle lines
 translation_horizontal_centered,Center translated subtitle horizontally
 font_size_label,Target Window Font Size:
 font_type_label,Target Window Font Type:
+font_bold_label,Bold translated subtitle text
 opacity_label,Opacity:
 opacity_background_label,Background:
 opacity_text_label,Text:

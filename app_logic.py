@@ -428,6 +428,15 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.ocr_debugging_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'ocr_debugging', fallback=False))
         self.target_font_size_var = tk.IntVar(value=int(self.config['Settings'].get('target_font_size', '12')))
         self.target_font_type_var = tk.StringVar(value=self.config['Settings'].get('target_font_type', 'Arial'))
+        try:
+            target_font_bold = self.config.getboolean(
+                'Settings',
+                'target_font_bold',
+                fallback=False,
+            )
+        except ValueError:
+            target_font_bold = False
+        self.target_font_bold_var = tk.BooleanVar(value=target_font_bold)
         self.target_opacity_var = tk.DoubleVar(value=float(self.config['Settings'].get('target_opacity', '0.15')))
         self.target_text_opacity_var = tk.DoubleVar(value=float(self.config['Settings'].get('target_text_opacity', '1.0')))
 
@@ -575,6 +584,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.stability_var.trace_add("write", self.settings_changed_callback)
         self.target_font_size_var.trace_add("write", self.settings_changed_callback)
         self.target_font_type_var.trace_add("write", self.settings_changed_callback)
+        self.target_font_bold_var.trace_add("write", self.settings_changed_callback)
         self.target_opacity_var.trace_add("write", self.settings_changed_callback)
         self.target_text_opacity_var.trace_add("write", self.settings_changed_callback)
         self.num_beams_var.trace_add("write", self.settings_changed_callback)

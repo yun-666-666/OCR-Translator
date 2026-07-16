@@ -106,6 +106,7 @@ translation_line_layout_preserve,跟随原字幕行数
 translation_horizontal_centered,翻译字幕水平居中
 font_size_label,目标窗口字体大小：
 font_type_label,目标窗口字体：
+font_bold_label,翻译字幕字体加粗
 opacity_label,不透明度：
 opacity_background_label,背景：
 opacity_text_label,文本：

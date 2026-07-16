@@ -108,6 +108,7 @@ if PYSIDE6_AVAILABLE:
             self._current_language = None
             self._preserve_linebreaks = True
             self._horizontal_centered = False
+            self._font_bold = False
             self.setup_widget()
 
         def setup_widget(self):
@@ -136,8 +137,13 @@ if PYSIDE6_AVAILABLE:
                 }
             """)
 
-        def _apply_font_if_changed(self, font_family=None, font_size=None):
-            """Apply a font only when its effective family or size changed."""
+        def _apply_font_if_changed(
+            self,
+            font_family=None,
+            font_size=None,
+            font_bold=None,
+        ):
+            """Apply a font only when its effective family, size, or weight changed."""
             current_font = self.font()
             target_family = current_font.family()
             has_explicit_family = (
@@ -152,12 +158,18 @@ if PYSIDE6_AVAILABLE:
                 target_size = current_font.pointSize()
             if target_size <= 0:
                 target_size = current_font.pointSize()
+            target_bold = (
+                current_font.bold()
+                if font_bold is None
+                else bool(font_bold)
+            )
 
             family_changed = (
                 has_explicit_family and current_font.family() != target_family
             )
             size_changed = current_font.pointSize() != target_size
-            if not family_changed and not size_changed:
+            weight_changed = current_font.bold() != target_bold
+            if not family_changed and not size_changed and not weight_changed:
                 return False
 
             updated_font = QFont(current_font)
@@ -165,9 +177,13 @@ if PYSIDE6_AVAILABLE:
                 updated_font.setFamily(target_family)
             if size_changed:
                 updated_font.setPointSize(target_size)
+            if weight_changed:
+                updated_font.setBold(target_bold)
             self.setFont(updated_font)
             log_debug(
-                f"PySide RTLTextDisplay: Updated font to {target_family} {target_size}"
+                "PySide RTLTextDisplay: Updated font to "
+                f"{target_family} {target_size} "
+                f"{'bold' if target_bold else 'normal'}"
             )
             return True
 
@@ -181,9 +197,14 @@ if PYSIDE6_AVAILABLE:
             font_family=None,
             preserve_linebreaks=True,
             horizontal_centered=False,
+            font_bold=None,
         ):
             """Set text content while respecting RTL/LTR and applying inline HTML."""
-            self._apply_font_if_changed(font_family, font_size)
+            self._apply_font_if_changed(
+                font_family,
+                font_size,
+                font_bold,
+            )
 
             # Store current state for color updates
             self._current_text = text
@@ -191,6 +212,7 @@ if PYSIDE6_AVAILABLE:
             self._bg_color = bg_color
             self._preserve_linebreaks = bool(preserve_linebreaks)
             self._horizontal_centered = bool(horizontal_centered)
+            self._font_bold = self.font().bold()
             # self._fg_color = text_color
             
             processed = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
@@ -225,12 +247,14 @@ if PYSIDE6_AVAILABLE:
                 if self._horizontal_centered
                 else ('right' if is_rtl else 'left')
             )
+            font_weight_css = "700" if self._font_bold else "400"
             if is_rtl:
                 self.setLayoutDirection(Qt.RightToLeft)
                 html_text = (
                     f"<div style=\"text-align: {alignment_css}; direction: rtl; "
                     f"font-family: '{self.font().family()}'; font-size: "
-                    f"{self.font().pointSize()}pt; color: {self._fg_color};\""
+                    f"{self.font().pointSize()}pt; font-weight: "
+                    f"{font_weight_css}; color: {self._fg_color};\""
                     f">{html_processed}</div>"
                 )
             else:
@@ -238,7 +262,8 @@ if PYSIDE6_AVAILABLE:
                 html_text = (
                     f"<div style=\"text-align: {alignment_css}; direction: ltr; "
                     f"font-family: '{self.font().family()}'; font-size: "
-                    f"{self.font().pointSize()}pt; color: {self._fg_color};\""
+                    f"{self.font().pointSize()}pt; font-weight: "
+                    f"{font_weight_css}; color: {self._fg_color};\""
                     f">{html_processed}</div>"
                 )
 
@@ -327,6 +352,7 @@ if PYSIDE6_AVAILABLE:
                             getattr(self, '_bg_color', '#2c3e50'), 
                             fg_color, 
                             self.font().pointSize(),
+                            font_bold=getattr(self, '_font_bold', False),
                             preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
                             horizontal_centered=getattr(self, '_horizontal_centered', False),
                         )
@@ -342,9 +368,17 @@ if PYSIDE6_AVAILABLE:
                         # Font specified as tuple (family, size, *style)
                         font_family = font_spec[0]
                         font_size = int(font_spec[1])
+                        font_bold = None
+                        if len(font_spec) >= 3:
+                            font_bold = "bold" in {
+                                str(style).strip().lower()
+                                for style in font_spec[2:]
+                            }
                         
                         font_changed = self._apply_font_if_changed(
-                            font_family, font_size
+                            font_family,
+                            font_size,
+                            font_bold,
                         )
 
                         # Re-render current text only after a real font change.
@@ -356,6 +390,7 @@ if PYSIDE6_AVAILABLE:
                                 getattr(self, '_fg_color', '#ecf0f1'), 
                                 font_size,
                                 font_family=font_family,
+                                font_bold=self.font().bold(),
                                 preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
                                 horizontal_centered=getattr(self, '_horizontal_centered', False),
                             )
@@ -451,6 +486,7 @@ if PYSIDE6_AVAILABLE:
                      text_padding: tuple = (5, 5),
                      font_size: int = 14,
                      font_family: str = "Arial",
+                     font_bold: bool = False,
                      border_px: int = 0,
                      opacity: float = 0.85,
                      corner_radius: int = 16,
@@ -468,6 +504,7 @@ if PYSIDE6_AVAILABLE:
                 self._text_padding = (5, 5)
             self._font_size = int(font_size)
             self._font_family = font_family
+            self._font_bold = bool(font_bold)
             self._border_px = int(border_px)
             self._corner_radius = int(corner_radius)
             try:
@@ -569,6 +606,7 @@ if PYSIDE6_AVAILABLE:
             # Set requested font and size
             try:
                 qfont = QFont(self._font_family, self._font_size)
+                qfont.setBold(self._font_bold)
                 self.text_widget.setFont(qfont)
             except Exception:
                 pass
@@ -657,7 +695,15 @@ if PYSIDE6_AVAILABLE:
                 # which supports the RGBA value for opacity. The 'text_color'
                 # parameter was overwriting it with a solid color.
                 final_text_color = self.text_widget._fg_color
-                self.text_widget.set_rtl_text(text, language_code, self.bg_color, final_text_color, font_size)
+                self.text_widget.set_rtl_text(
+                    text,
+                    language_code,
+                    self.bg_color,
+                    final_text_color,
+                    font_size,
+                    font_family=self._font_family,
+                    font_bold=self._font_bold,
+                )
             except Exception as e:
                 log_debug(f"Error setting translation text: {e}")
 

@@ -360,6 +360,17 @@ def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
             font_family = app.target_font_type_var.get() or "Arial"
         except Exception:
             font_family = "Arial"
+        try:
+            font_bold = bool(app.target_font_bold_var.get())
+        except Exception:
+            try:
+                font_bold = app.config.getboolean(
+                    'Settings',
+                    'target_font_bold',
+                    fallback=False,
+                )
+            except (AttributeError, TypeError, ValueError):
+                font_bold = False
 
         pad_x = int(app.config['Settings'].get('target_text_pad_x', '5'))
         pad_y = int(app.config['Settings'].get('target_text_pad_y', '5'))
@@ -391,6 +402,7 @@ def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
                 text_padding=(pad_x, pad_y),
                 font_size=font_size,
                 font_family=font_family,
+                font_bold=font_bold,
                 border_px=border_px,
                 opacity=opacity,
                 corner_radius=16
@@ -453,12 +465,17 @@ def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
 
                 text_justify = tk.RIGHT if is_rtl else tk.LEFT
 
+                target_font = (
+                    (font_family, font_size, "bold")
+                    if font_bold
+                    else (font_family, font_size)
+                )
                 app.translation_text = tk.Text(
                     app.target_overlay.content_frame,
                     wrap=tk.WORD,
                     bg=target_color,
                     fg=app.target_text_colour_var.get(),
-                    font=(font_family, font_size),
+                    font=target_font,
                     bd=border_px,
                     relief="flat",
                     padx=pad_x,

@@ -3,6 +3,7 @@ from tkinter import ttk
 import types
 import unittest
 
+import modern_ui
 from ui_elements import _mousewheel_scroll_units, create_scrollable_tab
 
 
@@ -24,6 +25,39 @@ class MouseWheelUnitTests(unittest.TestCase):
             _mousewheel_scroll_units(types.SimpleNamespace(delta=0, num=5)),
             1,
         )
+
+
+class SpinboxStyleTests(unittest.TestCase):
+    def test_spinbox_arrows_and_padding_are_touch_friendly(self):
+        class RecordingStyle:
+            def __init__(self):
+                self.options = {}
+
+            def configure(self, name, **options):
+                self.asserted_name = name
+                self.options = options
+
+        style = RecordingStyle()
+        configure_spinbox_style = getattr(
+            modern_ui,
+            "_configure_spinbox_style",
+            None,
+        )
+        self.assertIsNotNone(configure_spinbox_style)
+
+        configure_spinbox_style(
+            style,
+            {
+                "surface": "#ffffff",
+                "text": "#111111",
+                "outline": "#cccccc",
+                "text_muted": "#666666",
+            },
+        )
+
+        self.assertEqual(style.asserted_name, "TSpinbox")
+        self.assertEqual(style.options["arrowsize"], 16)
+        self.assertEqual(style.options["padding"], (5, 3))
 
 
 class ScrollableTabInputGuardTests(unittest.TestCase):

@@ -39,6 +39,7 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             target_text_colour_var=_Value("#ffffff"),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
+            target_font_bold_var=_Value(True),
             target_colour_var=_Value("#112233"),
         )
 
@@ -53,6 +54,7 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             "#ffffff",
             20,
             font_family="Microsoft YaHei",
+            font_bold=True,
             preserve_linebreaks=True,
             horizontal_centered=False,
         )
@@ -68,6 +70,7 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             target_text_colour_var=_Value("#ffffff"),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
+            target_font_bold_var=_Value(False),
             target_colour_var=_Value("#112233"),
         )
 
@@ -99,6 +102,7 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             "#ffffff",
             20,
             font_family="Microsoft YaHei",
+            font_bold=False,
             preserve_linebreaks=True,
             horizontal_centered=False,
         )
@@ -122,7 +126,11 @@ class RTLTextDisplayFontTests(unittest.TestCase):
             def setHtml(self, html):
                 self.html_calls.append(html)
                 self.font_at_html.append(
-                    (self.font().family(), self.font().pointSize())
+                    (
+                        self.font().family(),
+                        self.font().pointSize(),
+                        self.font().bold(),
+                    )
                 )
                 return super().setHtml(html)
 
@@ -149,13 +157,16 @@ class RTLTextDisplayFontTests(unittest.TestCase):
             "#ffffff",
             18,
             font_family=family,
+            font_bold=True,
         )
 
         self.assertEqual(self.widget.font().family(), family)
         self.assertEqual(self.widget.font().pointSize(), 18)
+        self.assertTrue(self.widget.font().bold())
         self.assertEqual(len(self.widget.html_calls), 1)
-        self.assertEqual(self.widget.font_at_html, [(family, 18)])
+        self.assertEqual(self.widget.font_at_html, [(family, 18, True)])
         self.assertIn(f"font-family: '{family}'", self.widget.html_calls[0])
+        self.assertIn("font-weight: 700", self.widget.html_calls[0])
 
     def test_five_argument_render_preserves_existing_font_fallbacks(self):
         from PySide6.QtGui import QFont
@@ -172,6 +183,23 @@ class RTLTextDisplayFontTests(unittest.TestCase):
 
         self.assertEqual(self.widget.font().pointSize(), 18)
         self.assertEqual(self.widget.font().families(), original_families)
+
+    def test_legacy_positional_layout_arguments_remain_compatible(self):
+        family = self._target_family()
+
+        self.widget.set_rtl_text(
+            "one<br>two",
+            "en",
+            "#000000",
+            "#ffffff",
+            18,
+            family,
+            False,
+            True,
+        )
+
+        self.assertEqual(self.widget.toPlainText(), "one two")
+        self.assertIn("text-align: center", self.widget.html_calls[-1])
 
     def test_repeating_active_font_through_config_does_not_rerender(self):
         family = self._target_family()
@@ -195,6 +223,25 @@ class RTLTextDisplayFontTests(unittest.TestCase):
 
         self.assertEqual(self.widget.font().pointSize(), 19)
         self.assertEqual(len(self.widget.html_calls), 1)
+
+    def test_weight_change_through_config_rerenders_once(self):
+        family = self._target_family()
+        self.widget.set_rtl_text(
+            "hello",
+            "en",
+            "#000000",
+            "#ffffff",
+            18,
+            font_family=family,
+            font_bold=False,
+        )
+        self.widget.html_calls.clear()
+
+        self.widget.config(font=(family, 18, "bold"))
+
+        self.assertTrue(self.widget.font().bold())
+        self.assertEqual(len(self.widget.html_calls), 1)
+        self.assertIn("font-weight: 700", self.widget.html_calls[0])
 
 
 if __name__ == "__main__":

@@ -1029,21 +1029,35 @@ class UIInteractionHandler:
                 self.app.stable_threshold = new_threshold
         except tk.TclError: pass
 
-    def update_target_font_size(self):
+    def _target_font_spec(self):
+        font_size = self.app.target_font_size_var.get()
+        font_type = self.app.target_font_type_var.get()
+        font_bold_var = getattr(self.app, "target_font_bold_var", None)
+        font_bold = bool(
+            font_bold_var.get()
+            if font_bold_var is not None
+            else False
+        )
+        if font_bold:
+            return (font_type, font_size, "bold")
+        return (font_type, font_size)
+
+    def _update_target_font(self):
         if self.app.translation_text and self.app.translation_text.winfo_exists():
             try:
-                font_size = self.app.target_font_size_var.get()
-                font_type = self.app.target_font_type_var.get()
-                self.app.translation_text.configure(font=(font_type, font_size))
+                self.app.translation_text.configure(
+                    font=self._target_font_spec()
+                )
             except tk.TclError: pass
 
+    def update_target_font_size(self):
+        self._update_target_font()
+
     def update_target_font_type(self):
-        if self.app.translation_text and self.app.translation_text.winfo_exists():
-            try:
-                font_size = self.app.target_font_size_var.get()
-                font_type = self.app.target_font_type_var.get()
-                self.app.translation_text.configure(font=(font_type, font_size))
-            except tk.TclError: pass
+        self._update_target_font()
+
+    def update_target_font_weight(self):
+        self._update_target_font()
 
     def update_target_opacity(self):
         """Update the background opacity of the translation overlay"""
@@ -1259,6 +1273,7 @@ class UIInteractionHandler:
             cfg['target_text_colour'] = self.app.target_text_colour_var.get()
             cfg['target_font_size'] = str(self.app.target_font_size_var.get())
             cfg['target_font_type'] = self.app.target_font_type_var.get()
+            cfg['target_font_bold'] = str(self.app.target_font_bold_var.get())
             cfg['target_opacity'] = str(self.app.target_opacity_var.get())
             cfg['target_text_opacity'] = str(self.app.target_text_opacity_var.get())
             cfg['gui_language'] = self.app.ui_lang.normalize_display_name(self.app.gui_language_var.get())

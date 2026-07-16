@@ -57,6 +57,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'target_opacity': '0.4',
     'target_font_size': '18',
     'target_font_type': 'Arial',
+    'target_font_bold': 'False',
     'num_beams': '2',
     'google_translate_api_key': '',
     'deepl_api_key': '',
