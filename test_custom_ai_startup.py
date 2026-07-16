@@ -105,8 +105,8 @@ class StartupOptimizationTests(unittest.TestCase):
         import app_logic
 
         expected_prompt = (
-            "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-            "tone, and character voice. Keep names and game terms consistent."
+            "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+            "use context only when needed."
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             prompt_path = Path(tmp_dir) / "custom_prompt.txt"
@@ -123,8 +123,8 @@ class StartupOptimizationTests(unittest.TestCase):
         import app_logic
 
         expected_prompt = (
-            "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-            "tone, and character voice. Keep names and game terms consistent."
+            "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+            "use context only when needed."
         )
         shipped_prompt = Path("custom_prompt.txt").read_text(encoding="utf-8-sig").strip()
 

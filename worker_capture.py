@@ -12,7 +12,7 @@ import traceback
 import numpy as np
 from PIL import Image
 
-from ocr_utils import CaptureBackendSelector, build_capture_signature
+from ocr_utils import build_capture_signature
 from paddle_ocr_backend import (
     PADDLEOCR_MODEL_CODE,
     PaddleOCRSettings,
@@ -22,7 +22,6 @@ from paddle_ocr_backend import (
 
 DEFAULT_TRANSLATION_REQUEST_TIMEOUT_SECONDS = 10.0
 CAPTURE_SLOW_SECONDS_MSS = 0.050
-CAPTURE_SLOW_SECONDS_PYAUTOGUI = 0.250
 
 
 def _log_debug(message):
@@ -206,31 +205,6 @@ def _safe_queue_size(queue_obj):
         return 0
 
 
-def _get_capture_backend_selector(app):
-    selector = getattr(app, 'capture_backend_selector', None)
-    if selector is None:
-        selector = CaptureBackendSelector()
-        try:
-            app.capture_backend_selector = selector
-        except Exception:
-            pass
-    return selector
-
-
-def _resolve_capture_backend(app, configured_backend, region):
-    configured_backend = str(configured_backend or 'auto').strip().lower()
-    if configured_backend not in ('auto', 'mss', 'pyautogui'):
-        _log_debug(f"CAPTURE_SELECTOR: unknown configured backend={configured_backend}; using auto")
-        configured_backend = 'auto'
-    if configured_backend != 'auto':
-        return configured_backend
-    selector = _get_capture_backend_selector(app)
-    resolver = getattr(selector, 'resolve_backend', None)
-    if callable(resolver):
-        return resolver(configured_backend, region)
-    return configured_backend
-
-
 def _refresh_translation_metric_gauges(app, concurrency_limit=None, cooldown_remaining=None):
     _set_metric_gauge(
         app,
@@ -345,7 +319,7 @@ def get_paddleocr_settings_from_app(app):
         ocr_version=str(_read_app_var(app, "paddleocr_ocr_version_var", "PP-OCRv6") or "PP-OCRv6"),
         model_size=str(_read_app_var(app, "paddleocr_model_size_var", "tiny") or "tiny"),
         device=str(_read_app_var(app, "paddleocr_device_var", "cpu") or "cpu"),
-        min_score=_coerce_float(_read_app_var(app, "paddleocr_min_score_var", "0.35"), 0.35, 0.0, 1.0),
+        min_score=_coerce_float(_read_app_var(app, "paddleocr_min_score_var", "0.45"), 0.45, 0.0, 1.0),
         upscale=_coerce_float(_read_app_var(app, "paddleocr_upscale_var", "1.0"), 1.0, 1.0, 4.0),
         text_det_limit_side_len=_coerce_int(
             _read_app_var(app, "paddleocr_text_det_limit_side_len_var", "960"),
@@ -503,10 +477,7 @@ def run_capture_thread(app):
             if width <=0 or height <=0: continue
 
             capture_moment = time.monotonic()
-            capture_backend_var = getattr(app, 'capture_backend_var', None)
-            capture_backend = capture_backend_var.get() if capture_backend_var is not None else 'auto'
-            resolved_capture_backend = _resolve_capture_backend(app, capture_backend, (x1, y1, width, height))
-            geometry_signature = (x1, y1, width, height, capture_backend, resolved_capture_backend, ocr_model)
+            geometry_signature = (x1, y1, width, height, "mss", ocr_model)
             if geometry_signature != last_capture_geometry_signature:
                 _log_debug(f"CAPTURE: source context changed to {geometry_signature}; clearing stale OCR state")
                 last_capture_geometry_signature = geometry_signature
@@ -524,34 +495,16 @@ def run_capture_thread(app):
                 except queue.Empty:
                     pass
 
-            screenshot = _capture_screen_region((x1, y1, width, height), backend=resolved_capture_backend)
+            screenshot = _capture_screen_region((x1, y1, width, height))
             capture_duration = time.monotonic() - capture_moment
             last_cap_time = capture_moment
-            actual_capture_backend = getattr(screenshot, '_gct_capture_backend', resolved_capture_backend)
-            fallback_reason = getattr(screenshot, '_gct_capture_fallback_reason', None)
-            if fallback_reason and actual_capture_backend != resolved_capture_backend:
-                selector = getattr(app, 'capture_backend_selector', None)
-                recorder = getattr(selector, 'record_backend_fallback', None)
-                if callable(recorder):
-                    recorder(
-                        capture_backend,
-                        resolved_capture_backend,
-                        actual_capture_backend,
-                        (x1, y1, width, height),
-                        reason=fallback_reason,
-                    )
-            capture_slow_threshold = (
-                CAPTURE_SLOW_SECONDS_PYAUTOGUI
-                if actual_capture_backend == "pyautogui"
-                else CAPTURE_SLOW_SECONDS_MSS
-            )
+            actual_capture_backend = "mss"
             _log_hot_path_timing(
                 ("capture-timing", actual_capture_backend),
                 f"LATENCY: capture backend={actual_capture_backend} "
-                f"configured={capture_backend} resolved={resolved_capture_backend} "
                 f"region={width}x{height} took {capture_duration:.3f}s",
                 capture_duration,
-                capture_slow_threshold,
+                CAPTURE_SLOW_SECONDS_MSS,
             )
             _record_metric_timing(app, "capture_duration", capture_duration)
             _refresh_ocr_queue_metric(app)
@@ -604,5 +557,3 @@ def run_capture_thread(app):
             sleep_after_error = current_scan_interval_sec if 'current_scan_interval_sec' in locals() else 0.5
             time.sleep(max(sleep_after_error, 0.5))
     _log_debug("WT: Capture thread finished.")
-
-

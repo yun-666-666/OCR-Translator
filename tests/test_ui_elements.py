@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 import types
 import unittest
+from pathlib import Path
 
 import modern_ui
 from ui_elements import _mousewheel_scroll_units, create_scrollable_tab
@@ -58,6 +59,31 @@ class SpinboxStyleTests(unittest.TestCase):
         self.assertEqual(style.asserted_name, "TSpinbox")
         self.assertEqual(style.options["arrowsize"], 16)
         self.assertEqual(style.options["padding"], (5, 3))
+
+
+class SettingsLayoutSourceTests(unittest.TestCase):
+    def test_colors_use_one_row_of_clickable_swatches_without_buttons(self):
+        source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("app.colors_row_frame", source)
+        self.assertIn("color_display.bind(", source)
+        self.assertIn('"<Button-1>"', source)
+        self.assertNotIn('get_label("choose_color_btn")', source)
+
+    def test_bold_and_horizontal_center_controls_share_one_row(self):
+        source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn("app.translation_text_style_frame", source)
+        self.assertIn(
+            "app.target_font_bold_checkbox = ttk.Checkbutton(\n"
+            "        app.translation_text_style_frame,",
+            source,
+        )
+        self.assertIn(
+            "app.translation_horizontal_centered_checkbox = ttk.Checkbutton(\n"
+            "        app.translation_text_style_frame,",
+            source,
+        )
 
 
 class ScrollableTabInputGuardTests(unittest.TestCase):

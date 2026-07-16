@@ -44,18 +44,7 @@ from custom_ai import (
     CustomAIProfileManager,
 )
 from ocr_utils import (
-    CaptureBackendSelector,
     OCRFrameCache,
-    API_OCR_IMAGE_DETAIL_DEFAULT,
-    API_OCR_IMAGE_FORMAT_DEFAULT,
-    API_OCR_IMAGE_MODE_DEFAULT,
-    API_OCR_IMAGE_QUALITY_DEFAULT,
-    encode_image_for_api_ocr,
-    encode_image_for_api_ocr_payload,
-    normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_format,
-    normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
 )
 from paddle_ocr_backend import (
     PADDLEOCR_DISPLAY_NAME,
@@ -77,8 +66,8 @@ from handlers import (
 )
 
 DEFAULT_CUSTOM_PROMPT = (
-    "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-    "tone, and character voice. Keep names and game terms consistent."
+    "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+    "use context only when needed."
 )
 
 KEYBOARD_AVAILABLE = False
@@ -216,7 +205,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.last_local_ocr_submitted_scope = None  # Translation scope associated with the last local OCR submit
         self.runtime_metrics = RuntimeMetrics(max_events=240, max_age_seconds=60.0)
         self.runtime_metrics_refresh_after_id = None
-        self.capture_backend_selector = CaptureBackendSelector()
         self.ai_ocr_image_capability_memory = AiOcrImageCapabilityMemory()
         self.ocr_stability_gate = None
 
@@ -289,7 +277,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
             )
         )
-        self.capture_backend_var = tk.StringVar(value=self.config['Settings'].get('capture_backend', 'auto'))
         self.ocr_frame_cache_size_var = tk.IntVar(value=int(self.config['Settings'].get('ocr_frame_cache_size', '64')))
         self.enable_instant_cache_display_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'enable_instant_cache_display', fallback=True))
 
@@ -354,26 +341,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.custom_ai_submit_interval_ms_var = tk.IntVar(
             value=max(0, min(5000, custom_ai_submit_interval_ms))
         )
-        self.custom_ai_ocr_image_format_var = tk.StringVar(
-            value=normalize_api_ocr_image_format(
-                self.config['Settings'].get('custom_ai_ocr_image_format', API_OCR_IMAGE_FORMAT_DEFAULT)
-            )
-        )
-        self.custom_ai_ocr_image_mode_var = tk.StringVar(
-            value=normalize_api_ocr_image_mode(
-                self.config['Settings'].get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
-            )
-        )
-        self.custom_ai_ocr_image_quality_var = tk.IntVar(
-            value=normalize_api_ocr_image_quality(
-                self.config['Settings'].get('custom_ai_ocr_image_quality', str(API_OCR_IMAGE_QUALITY_DEFAULT))
-            )
-        )
-        self.custom_ai_ocr_image_detail_var = tk.StringVar(
-            value=normalize_api_ocr_image_detail(
-                self.config['Settings'].get('custom_ai_ocr_image_detail', API_OCR_IMAGE_DETAIL_DEFAULT)
-            )
-        )
 
         self.paddleocr_source_dir_var = tk.StringVar(
             value=self.config['Settings'].get('paddleocr_source_dir', 'PaddleOCR-3.7.0')
@@ -391,7 +358,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             value=self.config['Settings'].get('paddleocr_device', 'cpu')
         )
         self.paddleocr_min_score_var = tk.StringVar(
-            value=self.config['Settings'].get('paddleocr_min_score', '0.35')
+            value=self.config['Settings'].get('paddleocr_min_score', '0.45')
         )
         self.paddleocr_upscale_var = tk.StringVar(
             value=self.config['Settings'].get('paddleocr_upscale', '1.0')
@@ -431,7 +398,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         log_debug(f"Initialized adaptive scan interval: base={self.base_scan_interval}ms, current={self.current_scan_interval}ms")
 
         self.clear_translation_timeout_var = tk.IntVar(value=int(self.config['Settings'].get('clear_translation_timeout', '3')))
-        self.stability_var = tk.IntVar(value=int(self.config['Settings'].get('stability_threshold', '2')))
+        self.stability_var = tk.IntVar(value=int(self.config['Settings'].get('stability_threshold', '0')))
         self.ocr_debugging_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'ocr_debugging', fallback=False))
         self.target_font_size_var = tk.IntVar(value=int(self.config['Settings'].get('target_font_size', '12')))
         self.target_font_type_var = tk.StringVar(value=self.config['Settings'].get('target_font_type', 'Arial'))
@@ -553,7 +520,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.translation_line_layout_var.trace_add("write", self.settings_changed_callback)
         self.translation_horizontal_centered_var.trace_add("write", self.settings_changed_callback)
         self.keep_linebreaks_var.trace_add("write", self.settings_changed_callback)
-        self.capture_backend_var.trace_add("write", self.settings_changed_callback)
         self.ocr_frame_cache_size_var.trace_add("write", self.settings_changed_callback)
         self.ocr_frame_cache_size_var.trace_add("write", self.on_ocr_frame_cache_size_change)
         self.enable_instant_cache_display_var.trace_add("write", self.settings_changed_callback)
@@ -567,10 +533,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
         self.ai_optimization_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
-        self.custom_ai_ocr_image_format_var.trace_add("write", self.settings_changed_callback)
-        self.custom_ai_ocr_image_mode_var.trace_add("write", self.settings_changed_callback)
-        self.custom_ai_ocr_image_quality_var.trace_add("write", self.settings_changed_callback)
-        self.custom_ai_ocr_image_detail_var.trace_add("write", self.settings_changed_callback)
         for paddleocr_var in (
             self.paddleocr_source_dir_var,
             self.paddleocr_lang_var,

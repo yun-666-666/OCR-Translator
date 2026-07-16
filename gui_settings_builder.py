@@ -54,7 +54,6 @@ def create_settings_tab(app):
     validate_scan_interval = frame.register(lambda P: validate_int_range(P, 50, 2000))
     validate_custom_context_window = frame.register(lambda P: validate_int_range(P, 0, 10))
     validate_custom_ai_submit_interval = frame.register(lambda P: validate_int_range(P, 0, 5000))
-    validate_custom_ai_ocr_image_quality = frame.register(lambda P: validate_int_range(P, 1, 100))
     validate_timeout = frame.register(lambda P: validate_int_range(P, 0, 60))
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_paddleocr_min_score = frame.register(lambda P: validate_float_range(P, 0.0, 1.0))
@@ -1095,51 +1094,84 @@ def create_settings_tab(app):
 
     app.custom_context_window_spinbox.bind("<FocusOut>", on_custom_context_window_focus_out)
 
-    app.custom_ai_latency_mode_label = ttk.Label(
+    app.ai_optimization_mode_label = ttk.Label(
         frame,
-        text=app.ui_lang.get_label("custom_ai_latency_mode_label", "Custom AI response mode:"),
+        text=app.ui_lang.get_label(
+            "ai_optimization_mode_label",
+            "AI optimization:",
+        ),
     )
-    app.custom_ai_latency_mode_label.grid(row=18, column=0, padx=5, pady=5, sticky="w")
-    custom_ai_latency_mode_options = [
-        ("none", app.ui_lang.get_label("custom_ai_latency_mode_none", "None")),
-        ("safe", app.ui_lang.get_label("custom_ai_latency_mode_safe", "Stable low latency")),
-        ("stream", app.ui_lang.get_label("custom_ai_latency_mode_stream", "Streaming subtitles")),
-        ("race", app.ui_lang.get_label("custom_ai_latency_mode_race", "Fastest endpoint")),
-        ("adaptive", app.ui_lang.get_label("custom_ai_latency_mode_adaptive", "Adaptive")),
+    app.ai_optimization_mode_label.grid(
+        row=18,
+        column=0,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
+    ai_optimization_mode_options = [
+        (
+            "auto",
+            app.ui_lang.get_label(
+                "ai_optimization_mode_auto",
+                "Automatic (recommended)",
+            ),
+        ),
+        (
+            "speed",
+            app.ui_lang.get_label(
+                "ai_optimization_mode_speed",
+                "Speed",
+            ),
+        ),
+        (
+            "quality",
+            app.ui_lang.get_label(
+                "ai_optimization_mode_quality",
+                "Quality",
+            ),
+        ),
     ]
-    app.custom_ai_latency_mode_display_var = tk.StringVar()
-    current_latency_mode = app.get_custom_ai_latency_mode() if hasattr(app, 'get_custom_ai_latency_mode') else app.custom_ai_latency_mode_var.get()
-    for value, display in custom_ai_latency_mode_options:
-        if value == current_latency_mode:
-            app.custom_ai_latency_mode_display_var.set(display)
+    app.ai_optimization_mode_display_var = tk.StringVar()
+    current_optimization_mode = app.ai_optimization_mode_var.get()
+    for value, display in ai_optimization_mode_options:
+        if value == current_optimization_mode:
+            app.ai_optimization_mode_display_var.set(display)
             break
     else:
-        app.custom_ai_latency_mode_display_var.set(custom_ai_latency_mode_options[1][1])
+        app.ai_optimization_mode_display_var.set(
+            ai_optimization_mode_options[0][1]
+        )
 
-    app.custom_ai_latency_mode_combobox = ttk.Combobox(
+    app.ai_optimization_mode_combobox = ttk.Combobox(
         frame,
-        textvariable=app.custom_ai_latency_mode_display_var,
-        values=[display for _, display in custom_ai_latency_mode_options],
+        textvariable=app.ai_optimization_mode_display_var,
+        values=[display for _, display in ai_optimization_mode_options],
         width=25,
         state='readonly',
     )
-    app.custom_ai_latency_mode_combobox.grid(row=18, column=1, padx=5, pady=5, sticky="ew")
+    app.ai_optimization_mode_combobox.grid(
+        row=18,
+        column=1,
+        padx=5,
+        pady=5,
+        sticky="ew",
+    )
 
-    def on_custom_ai_latency_mode_changed(event):
-        selected_display = app.custom_ai_latency_mode_display_var.get()
-        for value, display in custom_ai_latency_mode_options:
+    def on_ai_optimization_mode_changed(event):
+        selected_display = app.ai_optimization_mode_display_var.get()
+        for value, display in ai_optimization_mode_options:
             if display == selected_display:
-                app.custom_ai_latency_mode_var.set(value)
-                log_debug(f"Custom AI latency mode changed to: {value}")
+                app.ai_optimization_mode_var.set(value)
+                log_debug(f"AI optimization mode changed to: {value}")
                 if app._fully_initialized:
                     app.save_settings()
                 break
 
-    app.custom_ai_latency_mode_combobox.bind(
+    app.ai_optimization_mode_combobox.bind(
         "<<ComboboxSelected>>",
-        create_combobox_handler_wrapper(on_custom_ai_latency_mode_changed),
+        create_combobox_handler_wrapper(on_ai_optimization_mode_changed),
     )
-    app.custom_ai_latency_mode_options = custom_ai_latency_mode_options
+    app.ai_optimization_mode_options = ai_optimization_mode_options
 
     app.custom_ai_submit_interval_label = ttk.Label(
         frame,
@@ -1174,151 +1206,7 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
-    app.custom_ai_ocr_image_format_label = ttk.Label(
-        frame,
-        text=app.ui_lang.get_label("custom_ai_ocr_image_format_label", "OCR image format:"),
-    )
-    app.custom_ai_ocr_image_format_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
-    custom_ai_ocr_image_format_options = [
-        ("webp", app.ui_lang.get_label("custom_ai_ocr_image_format_webp", "WebP")),
-        ("png", app.ui_lang.get_label("custom_ai_ocr_image_format_png", "PNG")),
-        ("jpeg", app.ui_lang.get_label("custom_ai_ocr_image_format_jpeg", "JPEG")),
-    ]
-    format_display_by_value = {value: display for value, display in custom_ai_ocr_image_format_options}
-    format_value_by_display = {display: value for value, display in custom_ai_ocr_image_format_options}
-    app.custom_ai_ocr_image_format_display_var = tk.StringVar(
-        value=format_display_by_value.get(
-            app.custom_ai_ocr_image_format_var.get(),
-            format_display_by_value["webp"],
-        )
-    )
-    app.custom_ai_ocr_image_format_combobox = ttk.Combobox(
-        frame,
-        textvariable=app.custom_ai_ocr_image_format_display_var,
-        values=[display for _, display in custom_ai_ocr_image_format_options],
-        width=25,
-        state='readonly',
-    )
-    app.custom_ai_ocr_image_format_combobox.grid(row=20, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_custom_ai_ocr_image_format_changed(event):
-        selected_display = app.custom_ai_ocr_image_format_display_var.get()
-        app.custom_ai_ocr_image_format_var.set(format_value_by_display.get(selected_display, "webp"))
-        if app._fully_initialized:
-            app.save_settings()
-
-    app.custom_ai_ocr_image_format_combobox.bind(
-        "<<ComboboxSelected>>",
-        create_combobox_handler_wrapper(on_custom_ai_ocr_image_format_changed),
-    )
-
-    app.custom_ai_ocr_image_mode_label = ttk.Label(
-        frame,
-        text=app.ui_lang.get_label("custom_ai_ocr_image_mode_label", "OCR image mode:"),
-    )
-    app.custom_ai_ocr_image_mode_label.grid(row=21, column=0, padx=5, pady=5, sticky="w")
-    custom_ai_ocr_image_mode_options = [
-        ("lossless_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_lossless", "Lossless WebP")),
-        ("balanced_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_balanced", "Balanced WebP")),
-        ("small_grayscale_webp", app.ui_lang.get_label("custom_ai_ocr_image_mode_grayscale", "Small grayscale WebP")),
-    ]
-    mode_display_by_value = {value: display for value, display in custom_ai_ocr_image_mode_options}
-    mode_value_by_display = {display: value for value, display in custom_ai_ocr_image_mode_options}
-    app.custom_ai_ocr_image_mode_display_var = tk.StringVar(
-        value=mode_display_by_value.get(
-            app.custom_ai_ocr_image_mode_var.get(),
-            mode_display_by_value["balanced_webp"],
-        )
-    )
-    app.custom_ai_ocr_image_mode_combobox = ttk.Combobox(
-        frame,
-        textvariable=app.custom_ai_ocr_image_mode_display_var,
-        values=[display for _, display in custom_ai_ocr_image_mode_options],
-        width=25,
-        state='readonly',
-    )
-    app.custom_ai_ocr_image_mode_combobox.grid(row=21, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_custom_ai_ocr_image_mode_changed(event):
-        selected_display = app.custom_ai_ocr_image_mode_display_var.get()
-        app.custom_ai_ocr_image_mode_var.set(mode_value_by_display.get(selected_display, "balanced_webp"))
-        if app._fully_initialized:
-            app.save_settings()
-
-    app.custom_ai_ocr_image_mode_combobox.bind(
-        "<<ComboboxSelected>>",
-        create_combobox_handler_wrapper(on_custom_ai_ocr_image_mode_changed),
-    )
-
-    app.custom_ai_ocr_image_quality_label = ttk.Label(
-        frame,
-        text=app.ui_lang.get_label("custom_ai_ocr_image_quality_label", "OCR image quality:"),
-    )
-    app.custom_ai_ocr_image_quality_label.grid(row=22, column=0, padx=5, pady=5, sticky="w")
-    app.custom_ai_ocr_image_quality_spinbox = ttk.Spinbox(
-        frame,
-        from_=1,
-        to=100,
-        increment=5,
-        textvariable=app.custom_ai_ocr_image_quality_var,
-        width=10,
-        validate="key",
-        validatecommand=(validate_custom_ai_ocr_image_quality, '%P'),
-    )
-    app.custom_ai_ocr_image_quality_spinbox.grid(row=22, column=1, padx=5, pady=5, sticky="w")
-
-    def on_custom_ai_ocr_image_quality_focus_out(event):
-        try:
-            value = int(app.custom_ai_ocr_image_quality_var.get())
-            app.custom_ai_ocr_image_quality_var.set(max(1, min(100, value)))
-        except (ValueError, tk.TclError):
-            app.custom_ai_ocr_image_quality_var.set(85)
-        app.save_settings()
-
-    app.custom_ai_ocr_image_quality_spinbox.bind(
-        "<FocusOut>",
-        on_custom_ai_ocr_image_quality_focus_out,
-    )
-
-    app.custom_ai_ocr_image_detail_label = ttk.Label(
-        frame,
-        text=app.ui_lang.get_label("custom_ai_ocr_image_detail_label", "OCR image detail:"),
-    )
-    app.custom_ai_ocr_image_detail_label.grid(row=23, column=0, padx=5, pady=5, sticky="w")
-    custom_ai_ocr_image_detail_options = [
-        ("auto", app.ui_lang.get_label("custom_ai_ocr_image_detail_auto", "Auto")),
-        ("low", app.ui_lang.get_label("custom_ai_ocr_image_detail_low", "Low")),
-        ("high", app.ui_lang.get_label("custom_ai_ocr_image_detail_high", "High")),
-    ]
-    detail_display_by_value = {value: display for value, display in custom_ai_ocr_image_detail_options}
-    detail_value_by_display = {display: value for value, display in custom_ai_ocr_image_detail_options}
-    app.custom_ai_ocr_image_detail_display_var = tk.StringVar(
-        value=detail_display_by_value.get(
-            app.custom_ai_ocr_image_detail_var.get(),
-            detail_display_by_value["auto"],
-        )
-    )
-    app.custom_ai_ocr_image_detail_combobox = ttk.Combobox(
-        frame,
-        textvariable=app.custom_ai_ocr_image_detail_display_var,
-        values=[display for _, display in custom_ai_ocr_image_detail_options],
-        width=25,
-        state='readonly',
-    )
-    app.custom_ai_ocr_image_detail_combobox.grid(row=23, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_custom_ai_ocr_image_detail_changed(event):
-        selected_display = app.custom_ai_ocr_image_detail_display_var.get()
-        app.custom_ai_ocr_image_detail_var.set(detail_value_by_display.get(selected_display, "auto"))
-        if app._fully_initialized:
-            app.save_settings()
-
-    app.custom_ai_ocr_image_detail_combobox.bind(
-        "<<ComboboxSelected>>",
-        create_combobox_handler_wrapper(on_custom_ai_ocr_image_detail_changed),
-    )
-
-    row_offset = 24
+    row_offset = 20
     if app.MARIANMT_AVAILABLE:
         texts = [
             app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),
@@ -1393,36 +1281,6 @@ def create_settings_tab(app):
     )
     current_row += 1
 
-    ttk.Label(frame, text=app.ui_lang.get_label("capture_backend_label", "Capture Backend")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
-    capture_backend_display_values = [
-        app.ui_lang.get_label("capture_backend_auto", "Auto (fastest available)"),
-        app.ui_lang.get_label("capture_backend_mss", "MSS (fast)"),
-        app.ui_lang.get_label("capture_backend_pyautogui", "PyAutoGUI (compatible)"),
-    ]
-    capture_backend_code_by_display = {
-        capture_backend_display_values[0]: "auto",
-        capture_backend_display_values[1]: "mss",
-        capture_backend_display_values[2]: "pyautogui",
-    }
-    capture_backend_display_by_code = {v: k for k, v in capture_backend_code_by_display.items()}
-    app.capture_backend_display_var = tk.StringVar(value=capture_backend_display_by_code.get(app.capture_backend_var.get(), capture_backend_display_values[0]))
-    app.capture_backend_combobox = ttk.Combobox(
-        frame,
-        textvariable=app.capture_backend_display_var,
-        values=capture_backend_display_values,
-        width=25,
-        state="readonly",
-    )
-    app.capture_backend_combobox.grid(row=current_row, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_capture_backend_changed(event):
-        selected_backend_display = app.capture_backend_display_var.get()
-        app.capture_backend_var.set(capture_backend_code_by_display.get(selected_backend_display, "auto"))
-        app.save_settings()
-
-    app.capture_backend_combobox.bind("<<ComboboxSelected>>", create_combobox_handler_wrapper(on_capture_backend_changed))
-    current_row += 1
-
     ttk.Label(frame, text=app.ui_lang.get_label("scan_interval_label")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
     scan_spinbox = ttk.Spinbox(frame, from_=50, to=2000, increment=50, textvariable=app.scan_interval_var,
                              width=10, validate="key", validatecommand=(validate_scan_interval, '%P'))
@@ -1488,7 +1346,7 @@ def create_settings_tab(app):
             clamped = max(0.0, min(1.0, value))
             app.paddleocr_min_score_var.set(f"{clamped:.2f}")
         except (ValueError, tk.TclError):
-            app.paddleocr_min_score_var.set("0.35")
+            app.paddleocr_min_score_var.set("0.45")
         app.save_settings()
 
     app.paddleocr_min_score_spinbox.bind("<FocusOut>", on_paddleocr_min_score_focus_out)
@@ -1511,6 +1369,15 @@ def create_settings_tab(app):
     app.ocr_preview_button.pack(side=tk.LEFT, padx=(10,0))
     current_row += 1
 
+    app.colors_row_frame = ttk.Frame(frame)
+    app.colors_row_frame.grid(
+        row=current_row,
+        column=0,
+        columnspan=3,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
     color_options = [
         (app.ui_lang.get_label("source_color_label"), app.source_colour_var, 'source'),
         (app.ui_lang.get_label("target_color_label"), app.target_colour_var, 'target'),
@@ -1518,14 +1385,29 @@ def create_settings_tab(app):
     ]
     app.color_displays = {}
     for i, (label_text, var, color_type) in enumerate(color_options):
-        ttk.Label(frame, text=label_text).grid(row=current_row + i, column=0, padx=5, pady=5, sticky="w")
-        color_frame_inner = ttk.Frame(frame)
-        color_frame_inner.grid(row=current_row + i, column=1, columnspan=2, padx=5, pady=5, sticky="w")
-
-        app.color_displays[color_type] = tk.Label(color_frame_inner, width=3, relief="solid", bg=var.get())
-        app.color_displays[color_type].pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(color_frame_inner, text=app.ui_lang.get_label("choose_color_btn"), command=lambda ct=color_type: app.choose_color_for_settings(ct)).pack(side=tk.LEFT)
-    current_row += len(color_options)
+        color_item_frame = ttk.Frame(app.colors_row_frame)
+        color_item_frame.pack(
+            side=tk.LEFT,
+            padx=(0, 16 if i < len(color_options) - 1 else 0),
+        )
+        ttk.Label(color_item_frame, text=label_text).pack(
+            side=tk.LEFT,
+            padx=(0, 5),
+        )
+        color_display = tk.Label(
+            color_item_frame,
+            width=3,
+            relief="solid",
+            bg=var.get(),
+            cursor="hand2",
+        )
+        color_display.pack(side=tk.LEFT)
+        color_display.bind(
+            "<Button-1>",
+            lambda _event, ct=color_type: app.choose_color_for_settings(ct),
+        )
+        app.color_displays[color_type] = color_display
+    current_row += 1
 
     ttk.Label(frame, text=app.ui_lang.get_label("font_size_label")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
     font_spinbox = ttk.Spinbox(frame, from_=8, to=72, textvariable=app.target_font_size_var,
@@ -1554,16 +1436,8 @@ def create_settings_tab(app):
     font_type_combobox.bind('<<ComboboxSelected>>', create_combobox_handler_wrapper(on_font_type_change))
     current_row += 1
 
-    app.target_font_bold_checkbox = ttk.Checkbutton(
-        frame,
-        text=app.ui_lang.get_label(
-            "font_bold_label",
-            "Bold translated subtitle text",
-        ),
-        variable=app.target_font_bold_var,
-        command=app.update_target_font_weight,
-    )
-    app.target_font_bold_checkbox.grid(
+    app.translation_text_style_frame = ttk.Frame(frame)
+    app.translation_text_style_frame.grid(
         row=current_row,
         column=0,
         columnspan=3,
@@ -1571,19 +1445,29 @@ def create_settings_tab(app):
         pady=5,
         sticky="w",
     )
-    current_row += 1
+    app.target_font_bold_checkbox = ttk.Checkbutton(
+        app.translation_text_style_frame,
+        text=app.ui_lang.get_label(
+            "font_bold_label",
+            "Bold translated subtitle text",
+        ),
+        variable=app.target_font_bold_var,
+        command=app.update_target_font_weight,
+    )
+    app.target_font_bold_checkbox.pack(
+        side=tk.LEFT,
+        padx=(0, 18),
+    )
 
     app.translation_horizontal_centered_checkbox = ttk.Checkbutton(
-        frame,
+        app.translation_text_style_frame,
         text=app.ui_lang.get_label(
             "translation_horizontal_centered",
             "Center translated subtitle horizontally",
         ),
         variable=app.translation_horizontal_centered_var,
     )
-    app.translation_horizontal_centered_checkbox.grid(
-        row=current_row, column=0, columnspan=3, padx=5, pady=5, sticky="w"
-    )
+    app.translation_horizontal_centered_checkbox.pack(side=tk.LEFT)
     current_row += 1
 
     # Opacity controls

@@ -91,7 +91,6 @@ a = Analysis(
         # Core dependencies
         'numpy',
         'cv2',
-        'pyautogui',
 
         # Optional
         'keyboard',

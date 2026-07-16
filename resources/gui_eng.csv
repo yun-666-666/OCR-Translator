@@ -28,10 +28,6 @@ translation_model_marianmt_offline,MarianMT (offline and free)
 ocr_model_label,OCR Model:
 ocr_model_paddleocr,PaddleOCR (offline)
 ocr_model_gemini,Gemini API (online)
-capture_backend_label,Capture Backend:
-capture_backend_auto,Auto (fastest available)
-capture_backend_mss,MSS (fast)
-capture_backend_pyautogui,PyAutoGUI (compatible)
 source_lang_label,Source Language:
 target_lang_label,Target Language:
 marian_model_label,MarianMT Model:
@@ -62,12 +58,10 @@ deepl_context_window_1,1 (Last subtitle)
 deepl_context_window_2,2 (Two subtitles)
 deepl_context_window_3,3 (Three subtitles)
 custom_context_window_label,Custom AI context subtitles:
-custom_ai_latency_mode_label,Custom AI response mode:
-custom_ai_latency_mode_none,None
-custom_ai_latency_mode_safe,Stable low latency
-custom_ai_latency_mode_stream,Streaming subtitles
-custom_ai_latency_mode_race,Fastest endpoint
-custom_ai_latency_mode_adaptive,Adaptive
+ai_optimization_mode_label,AI optimization:
+ai_optimization_mode_auto,Automatic (recommended)
+ai_optimization_mode_speed,Speed
+ai_optimization_mode_quality,Quality
 custom_ai_submit_interval_label,AI translation minimum interval (ms):
 ai_profile_structured_output_label,Structured output
 ai_profile_reasoning_effort_label,Reasoning effort
@@ -75,19 +69,6 @@ custom_ai_reasoning_effort_low,Low
 custom_ai_reasoning_effort_medium,Medium
 custom_ai_reasoning_effort_high,High
 custom_ai_reasoning_effort_ultra,Ultra
-custom_ai_ocr_image_format_label,OCR image format:
-custom_ai_ocr_image_format_webp,WebP
-custom_ai_ocr_image_format_png,PNG
-custom_ai_ocr_image_format_jpeg,JPEG
-custom_ai_ocr_image_mode_label,OCR image mode:
-custom_ai_ocr_image_mode_lossless,Lossless WebP
-custom_ai_ocr_image_mode_balanced,Balanced WebP
-custom_ai_ocr_image_mode_grayscale,Small grayscale WebP
-custom_ai_ocr_image_quality_label,OCR image quality:
-custom_ai_ocr_image_detail_label,OCR image detail:
-custom_ai_ocr_image_detail_auto,Auto
-custom_ai_ocr_image_detail_low,Low
-custom_ai_ocr_image_detail_high,High
 models_file_label,MarianMT Model List:
 beam_size_label,Translation Beam Size (MarianMT):
 scan_interval_label,Scan Interval (ms):

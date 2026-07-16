@@ -496,7 +496,7 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_source_dir"], "PaddleOCR-3.7.0")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_ocr_version"], "PP-OCRv6")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_model_size"], "tiny")
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_min_score"], "0.35")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_min_score"], "0.45")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_upscale"], "1.0")
 
     def test_paddleocr_display_option_is_before_custom_ai_profiles(self):

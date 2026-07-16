@@ -22,8 +22,8 @@ from logger import set_debug_logging_enabled
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 
 DEFAULT_CUSTOM_PROMPT = (
-    "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-    "tone, and character voice. Keep names and game terms consistent."
+    "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+    "use context only when needed."
 )
 
 

@@ -47,7 +47,7 @@ def import_worker_threads_for_tests():
 
 
 class LatencyCaptureBackendTests(unittest.TestCase):
-    def test_auto_capture_uses_mss_when_available(self):
+    def test_capture_uses_mss(self):
         capture_screen_region = import_ocr_utils_for_tests().capture_screen_region
 
         class FakeShot:
@@ -68,9 +68,7 @@ class LatencyCaptureBackendTests(unittest.TestCase):
         fake_mss = FakeMss()
         image = capture_screen_region(
             (10, 20, 30, 40),
-            backend="auto",
             mss_factory=lambda: fake_mss,
-            pyautogui_module=Mock(),
         )
 
         self.assertEqual(image.mode, "RGB")
@@ -78,21 +76,16 @@ class LatencyCaptureBackendTests(unittest.TestCase):
         self.assertEqual(image.getpixel((0, 0)), (10, 20, 30))
         self.assertEqual(fake_mss.monitor, {"left": 10, "top": 20, "width": 30, "height": 40})
 
-    def test_auto_capture_falls_back_to_pyautogui_when_mss_fails(self):
+    def test_capture_reports_mss_failure_without_hidden_backend_switch(self):
         capture_screen_region = import_ocr_utils_for_tests().capture_screen_region
 
-        fallback_image = Image.new("RGB", (2, 2), (1, 2, 3))
-        pyautogui_module = types.SimpleNamespace(screenshot=Mock(return_value=fallback_image))
-
-        image = capture_screen_region(
-            (5, 6, 7, 8),
-            backend="auto",
-            mss_factory=lambda: (_ for _ in ()).throw(RuntimeError("mss unavailable")),
-            pyautogui_module=pyautogui_module,
-        )
-
-        self.assertIs(image, fallback_image)
-        pyautogui_module.screenshot.assert_called_once_with(region=(5, 6, 7, 8))
+        with self.assertRaisesRegex(RuntimeError, "MSS capture failed"):
+            capture_screen_region(
+                (5, 6, 7, 8),
+                mss_factory=lambda: (_ for _ in ()).throw(
+                    RuntimeError("mss unavailable")
+                ),
+            )
 
 
 class CaptureOcrHotPathLoggingTests(unittest.TestCase):
@@ -119,9 +112,7 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
         ) as log_coalesced:
             image = ocr_utils.capture_screen_region(
                 (10, 20, 30, 40),
-                backend="mss",
                 mss_factory=FakeMss,
-                allow_fallback=False,
             )
 
         self.assertEqual(image.size, (1, 1))
@@ -131,39 +122,29 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
             interval_seconds=5.0,
         )
 
-    def test_capture_fallback_remains_immediate_while_success_is_coalesced(self):
+    def test_capture_failure_is_logged_immediately(self):
         ocr_utils = import_ocr_utils_for_tests()
-        fallback_image = Image.new("RGB", (2, 2), (1, 2, 3))
-        pyautogui_module = types.SimpleNamespace(
-            screenshot=Mock(return_value=fallback_image)
-        )
 
         with patch.object(ocr_utils, "log_debug") as immediate_log:
             with patch.object(
                 ocr_utils,
                 "log_debug_coalesced",
             ) as log_coalesced:
-                result = ocr_utils.capture_screen_region(
-                    (5, 6, 7, 8),
-                    backend="auto",
-                    mss_factory=lambda: (_ for _ in ()).throw(
-                        RuntimeError("mss unavailable")
-                    ),
-                    pyautogui_module=pyautogui_module,
-                )
+                with self.assertRaisesRegex(RuntimeError, "MSS capture failed"):
+                    ocr_utils.capture_screen_region(
+                        (5, 6, 7, 8),
+                        mss_factory=lambda: (_ for _ in ()).throw(
+                            RuntimeError("mss unavailable")
+                        ),
+                    )
 
-        self.assertIs(result, fallback_image)
         self.assertTrue(
             any(
-                "falling back to pyautogui" in call.args[0]
+                "mss backend failed" in call.args[0]
                 for call in immediate_log.call_args_list
             )
         )
-        log_coalesced.assert_called_once_with(
-            ("capture-success", "pyautogui", 7, 8),
-            "CAPTURE: pyautogui captured 7x8",
-            interval_seconds=5.0,
-        )
+        log_coalesced.assert_not_called()
 
     def test_ocr_frame_cache_hit_uses_coalesced_log_without_changing_value(self):
         ocr_utils = import_ocr_utils_for_tests()
@@ -234,139 +215,6 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
             "WT: OCR routing to PaddleOCR PP-OCRv6",
             interval_seconds=5.0,
         )
-
-
-class LatencyCaptureBackendSelectorTests(unittest.TestCase):
-    def _make_selector(self, capture_func, monotonic_times=None, sample_count=2):
-        ocr_utils = import_ocr_utils_for_tests()
-        monotonic_values = list(monotonic_times or [100.0, 101.0, 102.0, 103.0])
-
-        def monotonic_clock():
-            if monotonic_values:
-                return monotonic_values.pop(0)
-            return 999.0
-
-        return ocr_utils.CaptureBackendSelector(
-            sample_count=sample_count,
-            min_recheck_interval_seconds=0.0,
-            capture_func=capture_func,
-            monotonic_clock=monotonic_clock,
-        )
-
-    def test_auto_selector_chooses_fastest_available_backend(self):
-        elapsed = {
-            "mss": [0.005, 0.006],
-            "pyautogui": [0.022, 0.020],
-        }
-        current_time = [0.0]
-        calls = []
-
-        def perf_counter():
-            return current_time[0]
-
-        def capture_func(region, backend="auto", **_kwargs):
-            calls.append((backend, region))
-            current_time[0] += elapsed[backend].pop(0)
-            return Image.new("RGB", (2, 2), (1, 2, 3))
-
-        selector = self._make_selector(capture_func)
-        selector.perf_counter = perf_counter
-
-        selected = selector.resolve_backend("auto", (10, 20, 300, 120))
-
-        self.assertEqual(selected, "mss")
-        self.assertEqual(
-            [backend for backend, _region in calls],
-            ["mss", "mss", "pyautogui", "pyautogui"],
-        )
-
-    def test_auto_selector_excludes_failing_mss_backend(self):
-        current_time = [0.0]
-        calls = []
-
-        def perf_counter():
-            return current_time[0]
-
-        def capture_func(region, backend="auto", **_kwargs):
-            calls.append(backend)
-            current_time[0] += 0.01
-            if backend == "mss":
-                raise RuntimeError("mss unavailable")
-            return Image.new("RGB", (2, 2), (1, 2, 3))
-
-        selector = self._make_selector(capture_func)
-        selector.perf_counter = perf_counter
-
-        selected = selector.resolve_backend("auto", (10, 20, 300, 120))
-
-        self.assertEqual(selected, "pyautogui")
-        self.assertIn("mss", calls)
-        self.assertIn("pyautogui", calls)
-
-    def test_explicit_pyautogui_is_not_replaced_by_benchmark_result(self):
-        calls = []
-
-        def capture_func(region, backend="auto", **_kwargs):
-            calls.append((backend, region))
-            return Image.new("RGB", (2, 2), (1, 2, 3))
-
-        selector = self._make_selector(capture_func)
-
-        selected = selector.resolve_backend("pyautogui", (10, 20, 300, 120))
-
-        self.assertEqual(selected, "pyautogui")
-        self.assertEqual(calls, [])
-
-    def test_auto_selector_uses_cached_benchmark_for_same_context(self):
-        current_time = [0.0]
-        calls = []
-
-        def perf_counter():
-            return current_time[0]
-
-        def capture_func(region, backend="auto", **_kwargs):
-            calls.append((backend, region))
-            current_time[0] += 0.01 if backend == "mss" else 0.02
-            return Image.new("RGB", (2, 2), (1, 2, 3))
-
-        selector = self._make_selector(capture_func)
-        selector.perf_counter = perf_counter
-
-        first = selector.resolve_backend("auto", (10, 20, 300, 120))
-        second = selector.resolve_backend("auto", (10, 20, 300, 120))
-
-        self.assertEqual(first, "mss")
-        self.assertEqual(second, "mss")
-        self.assertEqual(len(calls), 4)
-
-    def test_auto_selector_rechecks_when_geometry_changes(self):
-        elapsed = {
-            ((10, 20, 300, 120), "mss"): [0.005, 0.006],
-            ((10, 20, 300, 120), "pyautogui"): [0.025, 0.023],
-            ((50, 60, 200, 80), "mss"): [0.040, 0.042],
-            ((50, 60, 200, 80), "pyautogui"): [0.010, 0.011],
-        }
-        current_time = [0.0]
-        calls = []
-
-        def perf_counter():
-            return current_time[0]
-
-        def capture_func(region, backend="auto", **_kwargs):
-            normalized_region = tuple(region)
-            calls.append((backend, normalized_region))
-            current_time[0] += elapsed[(normalized_region, backend)].pop(0)
-            return Image.new("RGB", (2, 2), (1, 2, 3))
-
-        selector = self._make_selector(capture_func)
-        selector.perf_counter = perf_counter
-
-        first = selector.resolve_backend("auto", (10, 20, 300, 120))
-        second = selector.resolve_backend("auto", (50, 60, 200, 80))
-
-        self.assertEqual(first, "mss")
-        self.assertEqual(second, "pyautogui")
-        self.assertEqual(len(calls), 8)
 
 
 class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
@@ -448,10 +296,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             active_ocr_calls={"first", "second"},
             max_concurrent_ocr_calls=8,
             source_overlay=FakeOverlay(),
-            capture_backend_var=types.SimpleNamespace(get=lambda: "mss"),
-            capture_backend_selector=types.SimpleNamespace(
-                resolve_backend=lambda configured, region: "mss"
-            ),
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
@@ -482,7 +326,7 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         ):
             worker_threads.run_capture_thread(app)
 
-        capture.assert_called_once_with((10, 20, 8, 8), backend="mss")
+        capture.assert_called_once_with((10, 20, 8, 8))
         self.assertIs(app.ocr_queue.get_nowait(), screenshot)
         self.assertEqual(
             metrics.snapshot()["counters"]["api_ocr_capture_backpressure_skip"],
@@ -515,10 +359,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
                 get_active_custom_ai_ocr_cooldown_seconds=lambda: 30.0
             ),
             source_overlay=FakeOverlay(),
-            capture_backend_var=types.SimpleNamespace(get=lambda: "mss"),
-            capture_backend_selector=types.SimpleNamespace(
-                resolve_backend=lambda configured, region: "mss"
-            ),
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
@@ -553,7 +393,7 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         ):
             worker_threads.run_capture_thread(app)
 
-        capture.assert_called_once_with((10, 20, 8, 8), backend="mss")
+        capture.assert_called_once_with((10, 20, 8, 8))
         self.assertIs(app.ocr_queue.get_nowait(), screenshot)
         self.assertEqual(
             metrics.snapshot()["counters"].get(
@@ -563,28 +403,10 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             0,
         )
 
-    def test_unknown_capture_backend_config_uses_auto_selector(self):
-        worker_threads = import_worker_threads_for_tests()
-
-        class FakeSelector:
-            def __init__(self):
-                self.calls = []
-
-            def resolve_backend(self, configured_backend, region):
-                self.calls.append((configured_backend, region))
-                return "mss"
-
-        app = types.SimpleNamespace(capture_backend_selector=FakeSelector())
-
-        selected = worker_threads._resolve_capture_backend(app, "legacy_slow", (1, 2, 3, 4))
-
-        self.assertEqual(selected, "mss")
-        self.assertEqual(app.capture_backend_selector.calls, [("auto", (1, 2, 3, 4))])
-
-    def test_capture_thread_uses_resolved_auto_backend_and_continues_after_capture_error(self):
+    def test_capture_thread_uses_mss_and_continues_after_capture_error(self):
         worker_threads = import_worker_threads_for_tests()
         screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
-        capture_backends = []
+        capture_regions = []
 
         class FakeOverlay:
             def winfo_exists(self):
@@ -592,14 +414,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
 
             def get_geometry(self):
                 return (10, 20, 18, 28)
-
-        class FakeSelector:
-            def __init__(self):
-                self.calls = []
-
-            def resolve_backend(self, configured_backend, region):
-                self.calls.append((configured_backend, region))
-                return "mss"
 
         app = types.SimpleNamespace(
             is_running=True,
@@ -609,8 +423,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             get_ocr_model_setting=lambda: "custom_ai",
             is_api_based_ocr_model=lambda model=None: True,
             source_overlay=FakeOverlay(),
-            capture_backend_var=types.SimpleNamespace(get=lambda: "auto"),
-            capture_backend_selector=FakeSelector(),
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
@@ -627,9 +439,9 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
 
         app.ocr_queue.put_nowait = stop_after_put
 
-        def capture_func(region, backend="auto"):
-            capture_backends.append(backend)
-            if len(capture_backends) == 1:
+        def capture_func(region):
+            capture_regions.append(region)
+            if len(capture_regions) == 1:
                 raise RuntimeError("transient capture failure")
             return screenshot
 
@@ -640,8 +452,7 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         ):
             worker_threads.run_capture_thread(app)
 
-        self.assertEqual(capture_backends, ["mss", "mss"])
-        self.assertEqual(app.capture_backend_selector.calls[0], ("auto", (10, 20, 8, 8)))
+        self.assertEqual(capture_regions, [(10, 20, 8, 8), (10, 20, 8, 8)])
         app.ocr_stability_gate.clear.assert_called()
         self.assertIs(app.ocr_queue.get_nowait(), screenshot)
 
@@ -1708,9 +1519,9 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             is_openai_model=lambda model: False,
             source_lang_var=types.SimpleNamespace(get=lambda: "en"),
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
-            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "balanced_webp"),
-            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 85),
-            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "low"),
+            get_ai_ocr_image_decision=lambda image_size=None: types.SimpleNamespace(
+                contract_key="webp|balanced_webp|85|auto"
+            ),
             ocr_thread_pool=pool,
             ocr_frame_cache=cache,
         )

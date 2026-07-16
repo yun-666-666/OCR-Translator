@@ -732,31 +732,27 @@ remain under their original licenses:
    Licence: HPND Licence (Historical Permission Notice and Disclaimer)
    Copyright (c) 2010-2023 by PIL Software and contributors.
 
-4. PyAutoGUI (https://github.com/asweigart/pyautogui)
-   Licence: BSD 3-Clause Licence
-   Copyright (c) 2014-2023, Al Sweigart
-
-5. Google Cloud Translate Python Client (https://cloud.google.com/translate)
+4. Google Cloud Translate Python Client (https://cloud.google.com/translate)
    Licence: Apache Licence 2.0
    Copyright (c) 2023 Google LLC
 
-6. DeepL Python Library (https://github.com/DeepLcom/deepl-python)
+5. DeepL Python Library (https://github.com/DeepLcom/deepl-python)
    Licence: MIT Licence
    Copyright (c) 2023 DeepL SE
 
-7. Transformers (https://huggingface.co/docs/transformers)
+6. Transformers (https://huggingface.co/docs/transformers)
    Licence: Apache Licence 2.0
    Copyright 2018- The Hugging Face team
 
-8. PyTorch (https://pytorch.org/)
+7. PyTorch (https://pytorch.org/)
    Licence: BSD-style License (similar to BSD 3-Clause)
    Copyright (c) Facebook, Inc. and its affiliates. (see full list in original notice)
 
-9. SentencePiece (https://github.com/google/sentencepiece)
+8. SentencePiece (https://github.com/google/sentencepiece)
     Licence: Apache Licence 2.0
     Copyright (c) 2018 Google Inc.
 
-10. keyboard (https://github.com/boppreh/keyboard)
+9. keyboard (https://github.com/boppreh/keyboard)
     Licence: MIT Licence
     Copyright (c) 2016 BoppreH
 

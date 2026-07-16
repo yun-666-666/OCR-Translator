@@ -6,7 +6,6 @@ import time
 import queue
 import numpy as np
 import cv2
-import pyautogui
 import hashlib
 import math
 import re
@@ -18,11 +17,6 @@ from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 from ocr_utils import (
     capture_screen_region,
     build_capture_signature, build_ocr_frame_cache_key,
-    CaptureBackendSelector,
-    API_OCR_IMAGE_DETAIL_DEFAULT, API_OCR_IMAGE_FORMAT_DEFAULT, API_OCR_IMAGE_MODE_DEFAULT,
-    API_OCR_IMAGE_QUALITY_DEFAULT, normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_format, normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
 )
 from paddle_ocr_backend import (
     PADDLEOCR_MODEL_CODE,
@@ -46,7 +40,6 @@ OCR_STABILITY_GATE_MAX_WAIT_SECONDS = 0.25
 OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH = 12
 OCR_STABILITY_GATE_NOISE_RATIO = 0.35
 CAPTURE_SLOW_SECONDS_MSS = 0.050
-CAPTURE_SLOW_SECONDS_PYAUTOGUI = 0.250
 OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
 from worker_capture import (
@@ -60,8 +53,6 @@ from worker_capture import (
     _increment_metric,
     _set_metric_gauge,
     _safe_queue_size,
-    _get_capture_backend_selector,
-    _resolve_capture_backend,
     _refresh_translation_metric_gauges,
     _refresh_ocr_queue_metric,
     _get_screenshot_frame_hash,

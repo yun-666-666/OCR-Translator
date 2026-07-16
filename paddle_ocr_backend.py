@@ -41,7 +41,7 @@ class PaddleOCRSettings:
     ocr_version: str = "PP-OCRv6"
     model_size: str = "tiny"
     device: str = "cpu"
-    min_score: float = 0.35
+    min_score: float = 0.45
     upscale: float = 1.0
     text_det_limit_side_len: int = 960
     text_det_limit_type: str = "max"
@@ -111,7 +111,7 @@ def normalize_paddleocr_settings(settings):
         ocr_version=str(settings.ocr_version or "PP-OCRv6").strip() or "PP-OCRv6",
         model_size=_normalize_model_size(settings.model_size),
         device=str(settings.device or "cpu").strip() or "cpu",
-        min_score=_coerce_float(settings.min_score, 0.35, 0.0, 1.0),
+        min_score=_coerce_float(settings.min_score, 0.45, 0.0, 1.0),
         upscale=_coerce_float(settings.upscale, 1.0, 1.0, 4.0),
         text_det_limit_side_len=_coerce_int(settings.text_det_limit_side_len, 960, 128, 4096),
         text_det_limit_type=str(settings.text_det_limit_type or "max").strip().lower() or "max",
@@ -431,8 +431,8 @@ def _iter_paddleocr_result_items(result):
         yield item
 
 
-def flatten_paddleocr_result(result, min_score=0.35, keep_linebreaks=False):
-    min_score = _coerce_float(min_score, 0.35, 0.0, 1.0)
+def flatten_paddleocr_result(result, min_score=0.45, keep_linebreaks=False):
+    min_score = _coerce_float(min_score, 0.45, 0.0, 1.0)
     lines = []
     for item in _iter_paddleocr_result_items(result) or ():
         texts = _get_result_value(item, "rec_texts", []) or []
@@ -465,8 +465,8 @@ def flatten_paddleocr_result(result, min_score=0.35, keep_linebreaks=False):
     return separator.join(line.text for line in lines), lines
 
 
-def flatten_paddleocr_text_recognition_result(result, min_score=0.35):
-    min_score = _coerce_float(min_score, 0.35, 0.0, 1.0)
+def flatten_paddleocr_text_recognition_result(result, min_score=0.45):
+    min_score = _coerce_float(min_score, 0.45, 0.0, 1.0)
     lines = []
     for item in _iter_paddleocr_result_items(result) or ():
         nested = _get_result_value(item, "res", None)

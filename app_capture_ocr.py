@@ -532,8 +532,11 @@ class AppCaptureOcrMixin:
                         x1, y1, x2, y2 = map(int, area)
                         width, height = x2-x1, y2-y1
                         if width > 0 and height > 0:
-                            import pyautogui
-                            screenshot_pil = pyautogui.screenshot(region=(x1, y1, width, height))
+                            from ocr_utils import capture_screen_region
+
+                            screenshot_pil = capture_screen_region(
+                                (x1, y1, width, height)
+                            )
                         else:
                             screenshot_pil = None
                     else:

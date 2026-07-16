@@ -33,20 +33,21 @@ class CustomAILanguageTests(unittest.TestCase):
 
 
 class StartupOptimizationTests(unittest.TestCase):
-    def test_default_config_includes_custom_ai_latency_mode(self):
+    def test_default_config_uses_unified_ai_optimization_mode(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"], "safe")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["ai_optimization_mode"], "auto")
+        self.assertNotIn("custom_ai_latency_mode", DEFAULT_CONFIG_SETTINGS)
 
-    def test_example_config_matches_custom_ai_latency_default(self):
+    def test_example_config_matches_ai_optimization_default(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
         example_config = configparser.ConfigParser()
         example_config.read("ocr_translator_config.example.ini", encoding="utf-8-sig")
 
         self.assertEqual(
-            example_config["Settings"]["custom_ai_latency_mode"],
-            DEFAULT_CONFIG_SETTINGS["custom_ai_latency_mode"],
+            example_config["Settings"]["ai_optimization_mode"],
+            DEFAULT_CONFIG_SETTINGS["ai_optimization_mode"],
         )
 
     def test_legacy_removed_ocr_model_config_migrates_to_paddleocr(self):
@@ -75,26 +76,65 @@ class StartupOptimizationTests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_submit_interval_ms"], "300")
 
-    def test_default_config_includes_custom_ai_ocr_image_payload_settings(self):
+    def test_log_tuned_ocr_defaults_are_shipped(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_format"], "webp")
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_mode"], "balanced_webp")
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_quality"], "85")
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["custom_ai_ocr_image_detail"], "auto")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["stability_threshold"], "0")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_min_score"], "0.45")
 
-    def test_custom_ai_ocr_image_payload_controls_are_wired_to_settings(self):
+    def test_default_config_removes_manual_ai_image_payload_settings(self):
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        for key in (
+            "custom_ai_ocr_image_format",
+            "custom_ai_ocr_image_mode",
+            "custom_ai_ocr_image_quality",
+            "custom_ai_ocr_image_detail",
+        ):
+            self.assertNotIn(key, DEFAULT_CONFIG_SETTINGS)
+
+    def test_ai_optimization_control_replaces_legacy_response_and_image_controls(self):
         gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
         save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
 
-        self.assertIn("custom_ai_ocr_image_format_var", gui_builder_source)
-        self.assertIn("custom_ai_ocr_image_mode_var", gui_builder_source)
-        self.assertIn("custom_ai_ocr_image_quality_var", gui_builder_source)
-        self.assertIn("custom_ai_ocr_image_detail_var", gui_builder_source)
-        self.assertIn("custom_ai_ocr_image_format", save_source)
-        self.assertIn("custom_ai_ocr_image_mode", save_source)
-        self.assertIn("custom_ai_ocr_image_quality", save_source)
-        self.assertIn("custom_ai_ocr_image_detail", save_source)
+        self.assertIn("ai_optimization_mode_var", gui_builder_source)
+        self.assertIn("ai_optimization_mode_combobox", gui_builder_source)
+        self.assertIn("ai_optimization_mode", save_source)
+        for legacy_key in (
+            "custom_ai_latency_mode_combobox",
+            "custom_ai_ocr_image_format_var",
+            "custom_ai_ocr_image_mode_var",
+            "custom_ai_ocr_image_quality_var",
+            "custom_ai_ocr_image_detail_var",
+        ):
+            self.assertNotIn(legacy_key, gui_builder_source)
+        for legacy_key in (
+            "cfg['custom_ai_latency_mode']",
+            "cfg['custom_ai_ocr_image_format']",
+            "cfg['custom_ai_ocr_image_mode']",
+            "cfg['custom_ai_ocr_image_quality']",
+            "cfg['custom_ai_ocr_image_detail']",
+        ):
+            self.assertNotIn(legacy_key, save_source)
+
+    def test_capture_backend_setting_and_pyautogui_dependency_are_removed(self):
+        gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+        save_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
+
+        self.assertNotIn("capture_backend_combobox", gui_builder_source)
+        self.assertNotIn("cfg['capture_backend']", save_source)
+        for path in (
+            "requirements.txt",
+            "setup.py",
+            "GameChangingTranslator.spec",
+            "GameChangingTranslator_GPU.spec",
+            "LICENSE",
+        ):
+            self.assertNotIn(
+                "pyautogui",
+                Path(path).read_text(encoding="utf-8-sig").lower(),
+                msg=path,
+            )
 
     def test_custom_ai_submit_interval_is_wired_to_settings_and_localizations(self):
         gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
@@ -146,21 +186,11 @@ class StartupOptimizationTests(unittest.TestCase):
             "custom_ai_reasoning_effort_medium",
             "custom_ai_reasoning_effort_high",
             "custom_ai_reasoning_effort_ultra",
-            "custom_ai_latency_mode_adaptive",
+            "ai_optimization_mode_label",
+            "ai_optimization_mode_auto",
+            "ai_optimization_mode_speed",
+            "ai_optimization_mode_quality",
             "custom_ai_submit_interval_label",
-            "custom_ai_ocr_image_format_label",
-            "custom_ai_ocr_image_format_webp",
-            "custom_ai_ocr_image_format_png",
-            "custom_ai_ocr_image_format_jpeg",
-            "custom_ai_ocr_image_mode_label",
-            "custom_ai_ocr_image_mode_lossless",
-            "custom_ai_ocr_image_mode_balanced",
-            "custom_ai_ocr_image_mode_grayscale",
-            "custom_ai_ocr_image_quality_label",
-            "custom_ai_ocr_image_detail_label",
-            "custom_ai_ocr_image_detail_auto",
-            "custom_ai_ocr_image_detail_low",
-            "custom_ai_ocr_image_detail_high",
         }
 
         for path in ("resources/gui_eng.csv", "resources/gui_zh.csv", "resources/gui_pol.csv"):
@@ -250,8 +280,8 @@ class StartupOptimizationTests(unittest.TestCase):
         import app_logic
 
         expected_prompt = (
-            "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-            "tone, and character voice. Keep names and game terms consistent."
+            "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+            "use context only when needed."
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             prompt_path = Path(tmp_dir) / "custom_prompt.txt"
@@ -268,8 +298,8 @@ class StartupOptimizationTests(unittest.TestCase):
         import app_logic
 
         expected_prompt = (
-            "Use context to resolve ambiguity. Translate naturally and concisely while preserving meaning, "
-            "tone, and character voice. Keep names and game terms consistent."
+            "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
+            "use context only when needed."
         )
         shipped_prompt = Path("custom_prompt.txt").read_text(encoding="utf-8-sig").strip()
 

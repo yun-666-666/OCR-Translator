@@ -92,7 +92,6 @@ a = Analysis(
         # Scientific libraries (simplified to avoid docstring issues)
         'numpy',
         'cv2',
-        'pyautogui',
         # Optional but needed dependencies
         'keyboard',
         'requests',

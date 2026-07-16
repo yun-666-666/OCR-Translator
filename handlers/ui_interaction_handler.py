@@ -136,30 +136,14 @@ class UIInteractionHandler:
         is_marian = (selected_model_ui_code == 'marianmt')
         is_api_model = is_custom
 
-        if hasattr(self.app, 'custom_ai_latency_mode_label'):
-            manage_grid(self.app.custom_ai_latency_mode_label, show=is_custom)
-        if hasattr(self.app, 'custom_ai_latency_mode_combobox'):
-            manage_grid(self.app.custom_ai_latency_mode_combobox, show=is_custom)
+        if hasattr(self.app, 'ai_optimization_mode_label'):
+            manage_grid(self.app.ai_optimization_mode_label, show=is_custom)
+        if hasattr(self.app, 'ai_optimization_mode_combobox'):
+            manage_grid(self.app.ai_optimization_mode_combobox, show=is_custom)
         if hasattr(self.app, 'custom_ai_submit_interval_label'):
             manage_grid(self.app.custom_ai_submit_interval_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_submit_interval_spinbox'):
             manage_grid(self.app.custom_ai_submit_interval_spinbox, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_format_label'):
-            manage_grid(self.app.custom_ai_ocr_image_format_label, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_format_combobox'):
-            manage_grid(self.app.custom_ai_ocr_image_format_combobox, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_mode_label'):
-            manage_grid(self.app.custom_ai_ocr_image_mode_label, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_mode_combobox'):
-            manage_grid(self.app.custom_ai_ocr_image_mode_combobox, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_quality_label'):
-            manage_grid(self.app.custom_ai_ocr_image_quality_label, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_quality_spinbox'):
-            manage_grid(self.app.custom_ai_ocr_image_quality_spinbox, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_detail_label'):
-            manage_grid(self.app.custom_ai_ocr_image_detail_label, show=is_custom)
-        if hasattr(self.app, 'custom_ai_ocr_image_detail_combobox'):
-            manage_grid(self.app.custom_ai_ocr_image_detail_combobox, show=is_custom)
 
         # Manage "Keep Linebreaks" checkbox state
         if hasattr(self.app, 'keep_linebreaks_checkbox'):
@@ -1261,7 +1245,6 @@ class UIInteractionHandler:
             cfg['marian_model'] = self.app.marian_model_var.get()
 
             cfg['scan_interval'] = str(self.app.scan_interval_var.get())
-            cfg['capture_backend'] = self.app.capture_backend_var.get()
             cfg['ocr_frame_cache_size'] = str(self.app.ocr_frame_cache_size_var.get())
             cfg['enable_instant_cache_display'] = str(self.app.enable_instant_cache_display_var.get())
             cfg['stability_threshold'] = str(self.app.stability_var.get())
@@ -1307,29 +1290,9 @@ class UIInteractionHandler:
             cfg['openai_api_key'] = self.app.openai_api_key_var.get()
             cfg['openai_context_window'] = str(self.app.openai_context_window_var.get())
             cfg['custom_context_window'] = str(self.app.custom_context_window_var.get())
-            cfg['custom_ai_latency_mode'] = self.app.get_custom_ai_latency_mode() if hasattr(self.app, 'get_custom_ai_latency_mode') else self.app.custom_ai_latency_mode_var.get()
+            cfg['ai_optimization_mode'] = self.app.get_ai_optimization_mode()
             cfg['custom_ai_submit_interval_ms'] = str(
                 max(0, min(5000, int(self.app.custom_ai_submit_interval_ms_var.get())))
-            )
-            cfg['custom_ai_ocr_image_format'] = (
-                self.app.get_custom_ai_ocr_image_format()
-                if hasattr(self.app, 'get_custom_ai_ocr_image_format')
-                else self.app.custom_ai_ocr_image_format_var.get()
-            )
-            cfg['custom_ai_ocr_image_mode'] = (
-                self.app.get_custom_ai_ocr_image_mode()
-                if hasattr(self.app, 'get_custom_ai_ocr_image_mode')
-                else self.app.custom_ai_ocr_image_mode_var.get()
-            )
-            cfg['custom_ai_ocr_image_quality'] = str(
-                self.app.get_custom_ai_ocr_image_quality()
-                if hasattr(self.app, 'get_custom_ai_ocr_image_quality')
-                else self.app.custom_ai_ocr_image_quality_var.get()
-            )
-            cfg['custom_ai_ocr_image_detail'] = (
-                self.app.get_custom_ai_ocr_image_detail()
-                if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
-                else self.app.custom_ai_ocr_image_detail_var.get()
             )
             cfg['paddleocr_source_dir'] = self.app.paddleocr_source_dir_var.get()
             cfg['paddleocr_lang'] = self.app.paddleocr_lang_var.get()
