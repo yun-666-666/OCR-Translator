@@ -67,6 +67,15 @@ def _valid_scale(scale):
     return scale if scale > 0 else 1.0
 
 
+def _outline_pen_width(configured_width):
+    """Convert the user-facing outline width to Qt's native glyph-pen width."""
+    try:
+        width = float(configured_width)
+    except (TypeError, ValueError):
+        width = 2.0
+    return max(0.0, min(6.0, width)) * 0.25
+
+
 def physical_rect_to_qt_rect(rect, scale):
     """Convert physical screen pixels from Tk selection into Qt logical pixels."""
     scale = _valid_scale(scale)
@@ -266,7 +275,7 @@ if PYSIDE6_AVAILABLE:
                 char_format = QTextCharFormat()
                 if width > 0:
                     outline_pen = QPen(qcolor)
-                    outline_pen.setWidthF(width)
+                    outline_pen.setWidthF(_outline_pen_width(width))
                 else:
                     outline_pen = QPen(Qt.NoPen)
                 char_format.setTextOutline(outline_pen)

@@ -22,6 +22,11 @@ from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 from ui_elements import create_scrollable_tab
 
 
+def _settings_color_grid_position(index):
+    """Return a fixed two-column position for a settings color control."""
+    return divmod(int(index), 2)
+
+
 def create_settings_tab(app):
     # Create a scrollable tab content frame
     scrollable_content = create_scrollable_tab(
@@ -1395,9 +1400,13 @@ def create_settings_tab(app):
     app.color_displays = {}
     for i, (label_text, var, color_type) in enumerate(color_options):
         color_item_frame = ttk.Frame(app.colors_row_frame)
-        color_item_frame.pack(
-            side=tk.LEFT,
-            padx=(0, 16 if i < len(color_options) - 1 else 0),
+        grid_row, grid_column = _settings_color_grid_position(i)
+        color_item_frame.grid(
+            row=grid_row,
+            column=grid_column,
+            padx=(0, 18),
+            pady=(0, 6),
+            sticky="w",
         )
         ttk.Label(color_item_frame, text=label_text).pack(
             side=tk.LEFT,

@@ -15,12 +15,14 @@ which makes the settings page unnecessarily wide and crowded.
 ## Evidence
 
 A real Windows Qt render using the active font, colors, size, weight, and sample
-text compared actual pen widths 2.0, 1.0, 0.75, and 0.5:
+text compared actual pen widths 2.0, 1.0, 0.75, and 0.5. A second render used
+the exact two-line, 22-point bold layout from the reported case:
 
 - 2.0 reproduced the reported almost-solid green glyphs;
-- 1.0 retained clear red fill and a visible green boundary;
-- 0.75 was usable but the boundary became weak;
-- 0.5 was too subtle to provide reliable separation.
+- 1.0 improved the first comparison, but the exact bold layout still left the
+  high-luminance green visually dominant;
+- 0.75 was usable, but still heavier than necessary;
+- 0.5 preserved an obvious red centre while retaining a continuous boundary.
 
 ## Selected rendering correction
 
@@ -28,13 +30,13 @@ Keep the user-facing outline setting range at `0` through `6`, but convert it
 to the native Qt pen width with:
 
 ```python
-pen_width = configured_outline_width * 0.5
+pen_width = configured_outline_width * 0.25
 ```
 
 The configured value remains the persistent state used by settings, overlay
 construction, live updates, and rerenders. Only the final `QPen.setWidthF()`
 value is scaled. This makes the current setting `2` render as the verified
-native width `1.0`.
+native width `0.5`.
 
 Alternatives rejected:
 
@@ -70,8 +72,8 @@ mapping is covered by a real unit test rather than only source-text checks.
 
 ## Tests
 
-1. A configured outline width of `2` produces a native pen width of `1.0`.
-2. A configured width of `3` produces `1.5`; zero still uses `Qt.NoPen`.
+1. A configured outline width of `2` produces a native pen width of `0.5`.
+2. A configured width of `3` produces `0.75`; zero still uses `Qt.NoPen`.
 3. Font and foreground rerenders preserve the configured width while applying
    the scaled native width.
 4. Color indices `0, 1, 2, 3` map to `(0,0), (0,1), (1,0), (1,1)`.

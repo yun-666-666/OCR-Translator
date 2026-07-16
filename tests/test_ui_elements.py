@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import modern_ui
+import gui_settings_builder
 from config_manager import DEFAULT_CONFIG_SETTINGS
 from ui_elements import _mousewheel_scroll_units, create_scrollable_tab
 
@@ -91,7 +92,7 @@ class SettingsLayoutSourceTests(unittest.TestCase):
             app_logic_source,
         )
 
-    def test_colors_use_one_row_of_clickable_swatches_without_buttons(self):
+    def test_colors_use_two_by_two_clickable_swatches_without_buttons(self):
         source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
 
         self.assertIn("app.colors_row_frame", source)
@@ -99,7 +100,22 @@ class SettingsLayoutSourceTests(unittest.TestCase):
         self.assertIn('"<Button-1>"', source)
         self.assertIn("app.target_text_outline_colour_var", source)
         self.assertIn("'target_outline'", source)
+        self.assertIn("color_item_frame.grid(", source)
+        self.assertNotIn("color_item_frame.pack(", source)
         self.assertNotIn('get_label("choose_color_btn")', source)
+
+    def test_color_controls_map_to_two_columns(self):
+        position = getattr(
+            gui_settings_builder,
+            "_settings_color_grid_position",
+            None,
+        )
+
+        self.assertIsNotNone(position)
+        self.assertEqual((0, 0), position(0))
+        self.assertEqual((0, 1), position(1))
+        self.assertEqual((1, 0), position(2))
+        self.assertEqual((1, 1), position(3))
 
     def test_outline_width_control_and_persistence_are_wired(self):
         builder_source = Path("gui_settings_builder.py").read_text(

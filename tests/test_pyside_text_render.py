@@ -172,7 +172,7 @@ class RTLTextDisplayFontTests(unittest.TestCase):
 
         outline = self._document_outline()
         self.assertEqual(outline.color().name(), "#000000")
-        self.assertEqual(outline.widthF(), 2.0)
+        self.assertEqual(outline.widthF(), 0.5)
 
     def test_zero_outline_width_removes_glyph_outline(self):
         from PySide6.QtCore import Qt
@@ -200,12 +200,12 @@ class RTLTextDisplayFontTests(unittest.TestCase):
         self.widget.config(fg="#FFD54F")
         color_outline = self._document_outline()
         self.assertEqual(color_outline.color().name(), "#123456")
-        self.assertEqual(color_outline.widthF(), 3.0)
+        self.assertEqual(color_outline.widthF(), 0.75)
 
         self.widget.config(font=(family, 19, "bold"))
         font_outline = self._document_outline()
         self.assertEqual(font_outline.color().name(), "#123456")
-        self.assertEqual(font_outline.widthF(), 3.0)
+        self.assertEqual(font_outline.widthF(), 0.75)
 
     def test_native_outline_follows_text_opacity(self):
         self.widget.config(fg="rgba(255, 213, 79, 0.25)")
