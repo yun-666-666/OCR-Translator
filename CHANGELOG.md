@@ -5,6 +5,13 @@ All notable changes to the Game-Changing Translator project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.5] - 2026-07-16
+
+### Fixed
+- Removed the Windows 11 DWM system outline from the frameless PySide target overlay.
+- Fully transparent target backgrounds now display only translated text, without a residual rounded rectangle from the desktop compositor.
+- The application-controlled rounded border remains available at non-zero background opacity.
+
 ## [3.10.4] - 2026-07-16
 
 ### Added
