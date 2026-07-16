@@ -5,6 +5,25 @@ All notable changes to the Game-Changing Translator project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.4] - 2026-07-16
+
+### Added
+- A unified AI optimization selector with automatic, speed, and quality modes for response and OCR image policy decisions.
+- Compact and source-line-preserving translated-subtitle layouts, independent horizontal centering, and optional bold translated text.
+- Route-scoped latency and capability evidence for bounded response racing, OCR image format, image detail, and payload-quality decisions.
+
+### Changed
+- MSS is now the single screenshot backend for capture and OCR preview, removing the PyAutoGUI capture path and dependency.
+- The translated-subtitle settings layout is more compact, with larger spinbox controls and clickable source, target, and text color swatches.
+- New/default OCR settings use zero stability delay and a PaddleOCR minimum score of `0.45`.
+- The shipped translation prompt is shorter while retaining meaning, tone, names, and terminology.
+
+### Fixed
+- Sequential Custom AI failover stops when a newer translation has already displayed or the application has stopped.
+- Translation overflow timing now adapts conservatively to route history, and local OCR capture pacing follows measured processing duration.
+- Automatic response and OCR image policies remain bounded by route health, provider capabilities, screenshot geometry, and safe fallbacks.
+- The target overlay border now follows background opacity, so both disappear when background opacity is `0`.
+
 ## [3.10.3] - 2026-07-15
 
 ### Added
