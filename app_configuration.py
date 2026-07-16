@@ -6,7 +6,11 @@ import sys
 import time
 from tkinter import messagebox
 
-from custom_ai import CUSTOM_AI_LATENCY_MODE_SAFE, normalize_custom_ai_latency_mode
+from ai_optimization import (
+    AI_OPTIMIZATION_AUTO,
+    normalize_ai_optimization_mode,
+    resolve_ai_response_mode,
+)
 from gui_builder import (
     create_custom_prompt_tab,
     create_debug_tab,
@@ -436,12 +440,34 @@ class AppConfigurationMixin:
         _log_debug(f"Updated translation model names: {self.translation_model_names}")
 
     def get_custom_ai_latency_mode(self):
-        """Return the selected Custom AI response mode, normalized to a supported value."""
-        var = getattr(self, 'custom_ai_latency_mode_var', None)
+        """Resolve the internal response mode from the unified AI policy."""
+        var = getattr(self, 'ai_optimization_mode_var', None)
         try:
-            return normalize_custom_ai_latency_mode(var.get() if var is not None else CUSTOM_AI_LATENCY_MODE_SAFE)
+            if var is not None:
+                return resolve_ai_response_mode(var.get())
         except Exception:
-            return CUSTOM_AI_LATENCY_MODE_SAFE
+            pass
+
+        legacy_var = getattr(self, 'custom_ai_latency_mode_var', None)
+        try:
+            legacy_mode = str(
+                legacy_var.get() if legacy_var is not None else ""
+            ).strip().lower()
+            if legacy_mode in {"none", "safe", "stream", "race", "adaptive"}:
+                return legacy_mode
+        except Exception:
+            pass
+        return resolve_ai_response_mode(AI_OPTIMIZATION_AUTO)
+
+    def get_ai_optimization_mode(self):
+        """Return the normalized user-facing AI optimization policy."""
+        var = getattr(self, 'ai_optimization_mode_var', None)
+        try:
+            return normalize_ai_optimization_mode(
+                var.get() if var is not None else AI_OPTIMIZATION_AUTO
+            )
+        except Exception:
+            return AI_OPTIMIZATION_AUTO
 
     def get_custom_ai_ocr_image_format(self):
         """Return the selected Custom AI OCR image file format."""

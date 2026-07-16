@@ -13,6 +13,11 @@ import gc
 import traceback
 import concurrent.futures
 
+from ai_optimization import (
+    AI_OPTIMIZATION_AUTO,
+    AiOcrImageCapabilityMemory,
+    normalize_ai_optimization_mode,
+)
 from logger import log_debug, set_debug_logging_enabled, is_debug_logging_enabled
 from resource_handler import get_resource_path
 from config_manager import (
@@ -37,8 +42,6 @@ from modern_ui import apply_white_clean_theme, style_tk_canvas, style_tk_text_wi
 from runtime_metrics import RuntimeMetrics
 from custom_ai import (
     CustomAIProfileManager,
-    CUSTOM_AI_LATENCY_MODE_SAFE,
-    normalize_custom_ai_latency_mode,
 )
 from ocr_utils import (
     CaptureBackendSelector,
@@ -214,6 +217,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.runtime_metrics = RuntimeMetrics(max_events=240, max_age_seconds=60.0)
         self.runtime_metrics_refresh_after_id = None
         self.capture_backend_selector = CaptureBackendSelector()
+        self.ai_ocr_image_capability_memory = AiOcrImageCapabilityMemory()
         self.ocr_stability_gate = None
 
         # Initialize thread pools for optimized performance (especially for compiled version)
@@ -333,9 +337,12 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.openai_api_log_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'openai_api_log_enabled', fallback=True))
         self.openai_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'openai_api_key'))
         self.custom_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('custom_context_window', '5')))
-        self.custom_ai_latency_mode_var = tk.StringVar(
-            value=normalize_custom_ai_latency_mode(
-                self.config['Settings'].get('custom_ai_latency_mode', CUSTOM_AI_LATENCY_MODE_SAFE)
+        self.ai_optimization_mode_var = tk.StringVar(
+            value=normalize_ai_optimization_mode(
+                self.config['Settings'].get(
+                    'ai_optimization_mode',
+                    AI_OPTIMIZATION_AUTO,
+                )
             )
         )
         try:
@@ -558,7 +565,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.deepl_file_cache_var.trace_add("write", self.settings_changed_callback)
         self.deepl_context_window_var.trace_add("write", self.settings_changed_callback)
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
-        self.custom_ai_latency_mode_var.trace_add("write", self.settings_changed_callback)
+        self.ai_optimization_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_format_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_ocr_image_mode_var.trace_add("write", self.settings_changed_callback)

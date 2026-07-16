@@ -903,11 +903,22 @@ def process_translation_async(
 
         stream_callback = None
         if latency_mode is None:
-            latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
-            try:
-                latency_mode = latency_mode_var.get() if latency_mode_var is not None else ""
-            except Exception:
-                latency_mode = ""
+            latency_mode_getter = getattr(app, "get_custom_ai_latency_mode", None)
+            if callable(latency_mode_getter):
+                try:
+                    latency_mode = latency_mode_getter()
+                except Exception:
+                    latency_mode = ""
+            else:
+                latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
+                try:
+                    latency_mode = (
+                        latency_mode_var.get()
+                        if latency_mode_var is not None
+                        else ""
+                    )
+                except Exception:
+                    latency_mode = ""
         latency_mode = str(latency_mode or "").strip().lower()
 
         if latency_mode == "stream":

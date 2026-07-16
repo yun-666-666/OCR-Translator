@@ -155,6 +155,12 @@ def _get_translation_supersede_after_seconds(app, request_snapshot=None):
 def _get_translation_latency_mode(app, latency_mode=None):
     if latency_mode:
         return str(latency_mode).strip().lower()
+    getter = getattr(app, "get_custom_ai_latency_mode", None)
+    if callable(getter):
+        try:
+            return str(getter() or "").strip().lower()
+        except Exception:
+            pass
     latency_mode_var = getattr(app, 'custom_ai_latency_mode_var', None)
     try:
         return str(

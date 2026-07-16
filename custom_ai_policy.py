@@ -378,23 +378,10 @@ class CustomAILatencyModeAdvisor:
         ):
             if self._race_available_locked(now):
                 return CUSTOM_AI_LATENCY_MODE_RACE, "p90_very_high"
-            if stream_supported:
-                return CUSTOM_AI_LATENCY_MODE_STREAM, "race_cooldown"
             return CUSTOM_AI_LATENCY_MODE_SAFE, "race_cooldown"
 
-        if (
-            p90_seconds >= self.stream_latency_threshold_seconds
-            and stream_supported
-        ):
-            return CUSTOM_AI_LATENCY_MODE_STREAM, "p90_high"
-
-        if (
-            self._last_mode == CUSTOM_AI_LATENCY_MODE_STREAM
-            and stream_supported
-            and now - self._last_mode_changed_at < self.min_hold_seconds
-            and p90_seconds >= self.stream_latency_threshold_seconds * 0.75
-        ):
-            return CUSTOM_AI_LATENCY_MODE_STREAM, "hold_stream"
+        if p90_seconds >= self.stream_latency_threshold_seconds:
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "high_latency_safe"
 
         return CUSTOM_AI_LATENCY_MODE_SAFE, "low_latency"
 
@@ -417,6 +404,5 @@ class CustomAILatencyModeAdvisor:
         ordered = sorted(self._durations)
         rank = int(math.ceil(0.90 * len(ordered)))
         return ordered[max(0, min(len(ordered) - 1, rank - 1))]
-
 
 

@@ -11,6 +11,7 @@ from ai_optimization import (
     resolve_ai_ocr_image_policy,
     resolve_ai_response_mode,
 )
+from custom_ai_policy import CustomAILatencyModeAdvisor
 
 
 class AiOptimizationConfigTests(unittest.TestCase):
@@ -92,6 +93,39 @@ class AiResponsePolicyTests(unittest.TestCase):
         self.assertEqual(resolve_ai_response_mode("auto"), "adaptive")
         self.assertEqual(resolve_ai_response_mode("speed"), "safe")
         self.assertEqual(resolve_ai_response_mode("quality"), "safe")
+
+    def test_adaptive_high_p90_without_second_profile_stays_safe(self):
+        advisor = CustomAILatencyModeAdvisor(
+            min_samples=3,
+            stream_latency_threshold_seconds=1.0,
+            race_latency_threshold_seconds=3.0,
+        )
+        for duration in (3.0, 3.5, 4.0):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=1,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+
+    def test_adaptive_very_high_p90_with_two_profiles_uses_bounded_race(self):
+        advisor = CustomAILatencyModeAdvisor(
+            min_samples=3,
+            race_latency_threshold_seconds=3.0,
+        )
+        for duration in (4.0, 4.5, 5.0):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=2,
+        )
+
+        self.assertEqual(decision.mode, "race")
 
 
 class AiOcrImagePolicyTests(unittest.TestCase):

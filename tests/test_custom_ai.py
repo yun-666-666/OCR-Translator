@@ -6342,7 +6342,7 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
         self.assertEqual(decision.mode, "safe")
         self.assertEqual(decision.reason, "low_latency")
 
-    def test_adaptive_high_p90_with_stream_support_resolves_to_stream(self):
+    def test_adaptive_high_p90_stays_safe_instead_of_streaming(self):
         advisor = self._make_advisor()
         for duration in (0.30, 1.70, 1.90):
             advisor.observe_request(duration, success=True)
@@ -6354,8 +6354,8 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
             primary_cooldown_seconds=0.0,
         )
 
-        self.assertEqual(decision.mode, "stream")
-        self.assertEqual(decision.reason, "p90_high")
+        self.assertEqual(decision.mode, "safe")
+        self.assertEqual(decision.reason, "high_latency_safe")
 
     def test_adaptive_very_slow_with_multiple_healthy_profiles_resolves_to_race(self):
         advisor = self._make_advisor()
@@ -6394,7 +6394,7 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
         )
 
         self.assertEqual(first.mode, "race")
-        self.assertEqual(second.mode, "stream")
+        self.assertEqual(second.mode, "safe")
         self.assertEqual(second.reason, "race_cooldown")
 
     def test_provider_cooldown_without_healthy_alternative_resolves_to_safe(self):
@@ -6990,7 +6990,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         key = handler.get_inflight_translation_key("Hello")
 
-        self.assertEqual(key[-1], "stream")
+        self.assertEqual(key[-1], "safe")
         self.assertNotIn("adaptive", key)
         handler.close()
 
@@ -7026,7 +7026,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             advisor.observe_request(duration, success=True)
 
         def translate_then_change_setting(*args, **kwargs):
-            mode.value = "safe"
+            mode.value = "race"
             return "translated", {}, 0.1
 
         handler.custom_ai_provider.translate = Mock(
@@ -7040,7 +7040,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             handler.custom_ai_provider.translate.call_args.kwargs[
                 "latency_mode"
             ],
-            "stream",
+            "safe",
         )
         handler.close()
 
@@ -7095,7 +7095,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             profile=healthy_profile,
         )
 
-        self.assertEqual(slow_decision.mode, "stream")
+        self.assertEqual(slow_decision.mode, "safe")
         self.assertEqual(slow_decision.sample_count, 3)
         self.assertEqual(healthy_decision.mode, "safe")
         self.assertEqual(healthy_decision.reason, "insufficient_samples")
