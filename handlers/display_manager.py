@@ -363,6 +363,30 @@ class DisplayManager:
                     if font_bold_var is not None
                     else False
                 )
+                outline_color_var = getattr(
+                    self.app,
+                    'target_text_outline_colour_var',
+                    None,
+                )
+                outline_color = (
+                    outline_color_var.get()
+                    if outline_color_var is not None
+                    else "#000000"
+                )
+                outline_width_var = getattr(
+                    self.app,
+                    'target_text_outline_width_var',
+                    None,
+                )
+                try:
+                    outline_width = int(
+                        outline_width_var.get()
+                        if outline_width_var is not None
+                        else 2
+                    )
+                except (TypeError, ValueError):
+                    outline_width = 2
+                outline_width = max(0, min(6, outline_width))
                 bg_color = self.app.target_colour_var.get()
 
                 self.app.translation_text.set_rtl_text(
@@ -373,6 +397,8 @@ class DisplayManager:
                     font_size,
                     font_family=font_type,
                     font_bold=font_bold,
+                    outline_color=outline_color,
+                    outline_width=outline_width,
                     preserve_linebreaks=preserve_linebreaks,
                     horizontal_centered=horizontal_centered,
                 )

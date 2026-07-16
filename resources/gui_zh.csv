@@ -81,6 +81,8 @@ preview_btn,预览
 source_color_label,源区域颜色：
 target_color_label,目标区域颜色：
 target_text_color_label,目标文本颜色：
+target_text_outline_color_label,字幕描边颜色：
+target_text_outline_width_label,字幕描边粗细：
 translation_line_layout_label,翻译字幕排版：
 translation_line_layout_compact,尽量单行
 translation_line_layout_preserve,跟随原字幕行数
@@ -125,6 +127,7 @@ browse_marian_models_title,选择 MarianMT 模型 CSV 文件
 choose_source_color_title,选择源区域颜色
 choose_target_color_title,选择目标区域颜色
 choose_target_text_color_title,选择目标文本颜色
+choose_target_text_outline_color_title,选择字幕描边颜色
 dialog_area_selected_title,区域已选择
 dialog_source_area_set_message,源区域已设置为：
 dialog_target_area_set_message,目标显示区域已设置为：

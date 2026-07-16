@@ -58,6 +58,7 @@ def create_settings_tab(app):
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_paddleocr_min_score = frame.register(lambda P: validate_float_range(P, 0.0, 1.0))
     validate_font_size = frame.register(lambda P: validate_int_range(P, 8, 72))
+    validate_outline_width = frame.register(lambda P: validate_int_range(P, 0, 6))
 
     style = ttk.Style()
 
@@ -1381,7 +1382,15 @@ def create_settings_tab(app):
     color_options = [
         (app.ui_lang.get_label("source_color_label"), app.source_colour_var, 'source'),
         (app.ui_lang.get_label("target_color_label"), app.target_colour_var, 'target'),
-        (app.ui_lang.get_label("target_text_color_label"), app.target_text_colour_var, 'target_text')
+        (app.ui_lang.get_label("target_text_color_label"), app.target_text_colour_var, 'target_text'),
+        (
+            app.ui_lang.get_label(
+                "target_text_outline_color_label",
+                "Outline Colour:",
+            ),
+            app.target_text_outline_colour_var,
+            'target_outline',
+        ),
     ]
     app.color_displays = {}
     for i, (label_text, var, color_type) in enumerate(color_options):
@@ -1421,6 +1430,45 @@ def create_settings_tab(app):
         except (ValueError, tk.TclError): app.target_font_size_var.set(12)
         app.save_settings()
     font_spinbox.bind("<FocusOut>", on_font_size_focus_out)
+    current_row += 1
+
+    ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "target_text_outline_width_label",
+            "Outline Width:",
+        ),
+    ).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
+    app.target_text_outline_width_spinbox = ttk.Spinbox(
+        frame,
+        from_=0, to=6,
+        textvariable=app.target_text_outline_width_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_outline_width, '%P'),
+        command=app.update_target_text_outline,
+    )
+    app.target_text_outline_width_spinbox.grid(
+        row=current_row,
+        column=1,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
+
+    def on_outline_width_focus_out(_event):
+        try:
+            value = int(app.target_text_outline_width_var.get())
+            app.target_text_outline_width_var.set(max(0, min(6, value)))
+        except (ValueError, tk.TclError):
+            app.target_text_outline_width_var.set(2)
+        app.update_target_text_outline()
+        app.save_settings()
+
+    app.target_text_outline_width_spinbox.bind(
+        "<FocusOut>",
+        on_outline_width_focus_out,
+    )
     current_row += 1
 
     # Font type dropdown

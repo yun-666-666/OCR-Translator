@@ -33,7 +33,14 @@ except Exception:
 try:
     from PySide6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QMainWindow, QWidget
     from PySide6.QtCore import Qt, QRect, QPoint
-    from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat
+    from PySide6.QtGui import (
+        QColor,
+        QFont,
+        QPen,
+        QTextBlockFormat,
+        QTextCharFormat,
+        QTextCursor,
+    )
     PYSIDE6_AVAILABLE = True
 except Exception:
     PYSIDE6_AVAILABLE = False
@@ -134,6 +141,8 @@ if PYSIDE6_AVAILABLE:
             self._preserve_linebreaks = True
             self._horizontal_centered = False
             self._font_bold = False
+            self._outline_color = "#000000"
+            self._outline_width = 0.0
             self.setup_widget()
 
         def setup_widget(self):
@@ -212,6 +221,52 @@ if PYSIDE6_AVAILABLE:
             )
             return True
 
+        def _apply_text_outline(self, outline_color=None, outline_width=None):
+            """Apply a native Qt outline to every glyph in the document."""
+            color = (
+                self._outline_color
+                if outline_color is None
+                else str(outline_color or "#000000")
+            )
+            qcolor = QColor(color)
+            if not qcolor.isValid():
+                color = "#000000"
+                qcolor = QColor(color)
+            try:
+                width = (
+                    self._outline_width
+                    if outline_width is None
+                    else float(outline_width)
+                )
+            except (TypeError, ValueError):
+                width = 2.0
+            width = max(0.0, min(6.0, width))
+            self._outline_color = color
+            self._outline_width = width
+
+            try:
+                cursor = self.textCursor()
+                cursor.select(QTextCursor.Document)
+                char_format = QTextCharFormat()
+                if width > 0:
+                    outline_pen = QPen(qcolor)
+                    outline_pen.setWidthF(width)
+                else:
+                    outline_pen = QPen(Qt.NoPen)
+                char_format.setTextOutline(outline_pen)
+                cursor.mergeCharFormat(char_format)
+                cursor.clearSelection()
+                cursor.movePosition(QTextCursor.Start)
+                self.setTextCursor(cursor)
+                return True
+            except Exception as e:
+                log_debug(f"Error applying PySide text outline: {e}")
+                return False
+
+        def update_text_outline(self, outline_color, outline_width):
+            """Update the current glyph outline without rebuilding the overlay."""
+            return self._apply_text_outline(outline_color, outline_width)
+
         def set_rtl_text(
             self,
             text: str,
@@ -223,6 +278,8 @@ if PYSIDE6_AVAILABLE:
             preserve_linebreaks=True,
             horizontal_centered=False,
             font_bold=None,
+            outline_color=None,
+            outline_width=None,
         ):
             """Set text content while respecting RTL/LTR and applying inline HTML."""
             self._apply_font_if_changed(
@@ -238,6 +295,16 @@ if PYSIDE6_AVAILABLE:
             self._preserve_linebreaks = bool(preserve_linebreaks)
             self._horizontal_centered = bool(horizontal_centered)
             self._font_bold = self.font().bold()
+            if outline_color is not None:
+                self._outline_color = str(outline_color or "#000000")
+            if outline_width is not None:
+                try:
+                    self._outline_width = max(
+                        0.0,
+                        min(6.0, float(outline_width)),
+                    )
+                except (TypeError, ValueError):
+                    self._outline_width = 2.0
             # self._fg_color = text_color
             
             processed = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
@@ -294,6 +361,7 @@ if PYSIDE6_AVAILABLE:
 
             # Use HTML insertion for richer control
             self.setHtml(html_text)
+            self._apply_text_outline()
 
             # Ensure block alignment matches direction
             cursor = self.textCursor()
@@ -378,6 +446,8 @@ if PYSIDE6_AVAILABLE:
                             fg_color, 
                             self.font().pointSize(),
                             font_bold=getattr(self, '_font_bold', False),
+                            outline_color=getattr(self, '_outline_color', '#000000'),
+                            outline_width=getattr(self, '_outline_width', 0.0),
                             preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
                             horizontal_centered=getattr(self, '_horizontal_centered', False),
                         )
@@ -416,6 +486,8 @@ if PYSIDE6_AVAILABLE:
                                 font_size,
                                 font_family=font_family,
                                 font_bold=self.font().bold(),
+                                outline_color=getattr(self, '_outline_color', '#000000'),
+                                outline_width=getattr(self, '_outline_width', 0.0),
                                 preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
                                 horizontal_centered=getattr(self, '_horizontal_centered', False),
                             )
@@ -512,6 +584,8 @@ if PYSIDE6_AVAILABLE:
                      font_size: int = 14,
                      font_family: str = "Arial",
                      font_bold: bool = False,
+                     text_outline_color: str = "#000000",
+                     text_outline_width: float = 0,
                      border_px: int = 0,
                      opacity: float = 0.85,
                      corner_radius: int = 16,
@@ -530,6 +604,14 @@ if PYSIDE6_AVAILABLE:
             self._font_size = int(font_size)
             self._font_family = font_family
             self._font_bold = bool(font_bold)
+            self._text_outline_color = str(text_outline_color or "#000000")
+            try:
+                self._text_outline_width = max(
+                    0.0,
+                    min(6.0, float(text_outline_width)),
+                )
+            except (TypeError, ValueError):
+                self._text_outline_width = 2.0
             self._border_px = int(border_px)
             self._corner_radius = int(corner_radius)
             try:
@@ -636,6 +718,10 @@ if PYSIDE6_AVAILABLE:
                 self.text_widget.setFont(qfont)
             except Exception:
                 pass
+            self.text_widget.update_text_outline(
+                self._text_outline_color,
+                self._text_outline_width,
+            )
 
             pad_x, pad_y = self._text_padding
             # Set padding and ensure background is transparent for the text widget
@@ -730,6 +816,8 @@ if PYSIDE6_AVAILABLE:
                     font_size,
                     font_family=self._font_family,
                     font_bold=self._font_bold,
+                    outline_color=self._text_outline_color,
+                    outline_width=self._text_outline_width,
                 )
             except Exception as e:
                 log_debug(f"Error setting translation text: {e}")
@@ -778,6 +866,22 @@ if PYSIDE6_AVAILABLE:
                     log_debug(f"PySide overlay: Updated text color to {new_text_color}")
                 except Exception as e:
                     log_debug(f"Error updating PySide text color: {e}")
+
+        def update_text_outline(self, outline_color, outline_width):
+            """Update glyph outline color and width for the translation display."""
+            self._text_outline_color = str(outline_color or "#000000")
+            try:
+                self._text_outline_width = max(
+                    0.0,
+                    min(6.0, float(outline_width)),
+                )
+            except (TypeError, ValueError):
+                self._text_outline_width = 2.0
+            if self.text_widget:
+                self.text_widget.update_text_outline(
+                    self._text_outline_color,
+                    self._text_outline_width,
+                )
 
         def get_geometry(self):
             """Return geometry as [x1, y1, x2, y2] for compatibility with tkinter overlay code."""

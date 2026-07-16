@@ -30,19 +30,22 @@ class UIInteractionHandler:
         if color_type == 'source': initial_color = self.app.source_colour_var.get()
         elif color_type == 'target': initial_color = self.app.target_colour_var.get()
         elif color_type == 'target_text': initial_color = self.app.target_text_colour_var.get()
+        elif color_type == 'target_outline': initial_color = self.app.target_text_outline_colour_var.get()
 
         # Map color_type to appropriate translation key
         title_key_map = {
             'source': 'choose_source_color_title',
             'target': 'choose_target_color_title',
-            'target_text': 'choose_target_text_color_title'
+            'target_text': 'choose_target_text_color_title',
+            'target_outline': 'choose_target_text_outline_color_title',
         }
 
         # Fallback titles for backward compatibility
         fallback_titles = {
             'source': 'Choose Source Color',
             'target': 'Choose Target Color',
-            'target_text': 'Choose Target Text Color'
+            'target_text': 'Choose Target Text Color',
+            'target_outline': 'Choose Target Text Outline Color',
         }
 
         title_key = title_key_map.get(color_type, 'choose_source_color_title')
@@ -82,6 +85,11 @@ class UIInteractionHandler:
                 if (self.app.target_overlay and
                     hasattr(self.app.target_overlay, 'update_text_color')):
                     self.app.target_overlay.update_text_color(hex_color)
+            elif color_type == 'target_outline':
+                self.app.target_text_outline_colour_var.set(hex_color)
+                if hasattr(self.app, 'color_displays') and 'target_outline' in self.app.color_displays:
+                    self.app.color_displays['target_outline'].configure(bg=hex_color)
+                self.update_target_text_outline()
             log_debug(f"Color {color_type} changed to: {hex_color}")
 
     def toggle_api_key_visibility(self, api_type_toggle):
@@ -1071,6 +1079,28 @@ class UIInteractionHandler:
     def update_target_font_weight(self):
         self._update_target_font()
 
+    def update_target_text_outline(self):
+        target_overlay = getattr(self.app, "target_overlay", None)
+        if (
+            target_overlay
+            and target_overlay.winfo_exists()
+            and hasattr(target_overlay, "update_text_outline")
+        ):
+            try:
+                outline_width = int(
+                    self.app.target_text_outline_width_var.get()
+                )
+            except (AttributeError, TypeError, ValueError, tk.TclError):
+                outline_width = 2
+            outline_width = max(0, min(6, outline_width))
+            try:
+                target_overlay.update_text_outline(
+                    self.app.target_text_outline_colour_var.get(),
+                    outline_width,
+                )
+            except Exception as e:
+                log_debug(f"Error updating target text outline: {e}")
+
     def update_target_opacity(self):
         """Update the background opacity of the translation overlay"""
         if self.app.target_overlay and self.app.target_overlay.winfo_exists():
@@ -1282,6 +1312,8 @@ class UIInteractionHandler:
             cfg['source_area_colour'] = self.app.source_colour_var.get()
             cfg['target_area_colour'] = self.app.target_colour_var.get()
             cfg['target_text_colour'] = self.app.target_text_colour_var.get()
+            cfg['target_text_outline_colour'] = self.app.target_text_outline_colour_var.get()
+            cfg['target_text_outline_width'] = str(self.app.target_text_outline_width_var.get())
             cfg['target_font_size'] = str(self.app.target_font_size_var.get())
             cfg['target_font_type'] = self.app.target_font_type_var.get()
             cfg['target_font_bold'] = str(self.app.target_font_bold_var.get())

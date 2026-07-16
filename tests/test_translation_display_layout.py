@@ -108,6 +108,8 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             is_running=True,
             target_lang_var=_Value("zh-CN"),
             target_text_colour_var=_Value("#ffffff"),
+            target_text_outline_colour_var=_Value("#000000"),
+            target_text_outline_width_var=_Value(2),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
             target_font_bold_var=_Value(True),
@@ -126,6 +128,8 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             20,
             font_family="Microsoft YaHei",
             font_bold=True,
+            outline_color="#000000",
+            outline_width=2,
             preserve_linebreaks=False,
             horizontal_centered=True,
         )

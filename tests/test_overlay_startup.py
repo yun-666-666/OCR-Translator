@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import configparser
@@ -408,6 +409,92 @@ class OverlayStartupTests(unittest.TestCase):
 
     def test_default_target_opacity_uses_stable_background_value(self):
         self.assertEqual("0.4", DEFAULT_CONFIG_SETTINGS["target_opacity"])
+
+    def test_target_overlay_creation_forwards_text_outline_settings(self):
+        class Value:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class FakeText:
+            def set_rtl_text(self, *_args, **_kwargs):
+                return None
+
+            def winfo_exists(self):
+                return True
+
+        class FakeOverlay:
+            def __init__(self):
+                self.text_widget = FakeText()
+                self.visible = False
+
+            def update_color(self, *_args):
+                return None
+
+            def update_text_color(self, *_args):
+                return None
+
+            def winfo_exists(self):
+                return True
+
+            def winfo_viewable(self):
+                return self.visible
+
+            def hide(self):
+                self.visible = False
+
+            def show(self):
+                self.visible = True
+
+        create_overlay_calls = []
+        fake_overlay = FakeOverlay()
+
+        class Manager:
+            def create_overlay(self, *args, **kwargs):
+                create_overlay_calls.append((args, kwargs))
+                return fake_overlay
+
+        config = configparser.ConfigParser()
+        config["Settings"] = {
+            "target_area_visible": "False",
+            "target_text_pad_x": "5",
+            "target_text_pad_y": "5",
+            "target_top_bar_height": "10",
+            "target_border_px": "1",
+        }
+        app = SimpleNamespace(
+            config=config,
+            target_area=[10, 20, 210, 120],
+            target_overlay=None,
+            translation_text=None,
+            target_colour_var=Value("#162c43"),
+            target_text_colour_var=Value("#FFD54F"),
+            target_text_outline_colour_var=Value("#000000"),
+            target_text_outline_width_var=Value(2),
+            target_font_size_var=Value(22),
+            target_font_type_var=Value("Microsoft YaHei"),
+            target_font_bold_var=Value(True),
+            target_opacity_var=Value(0.0),
+            target_text_opacity_var=Value(1.0),
+        )
+
+        with patch.object(
+            overlay_manager,
+            "_get_pyside_api",
+            return_value=(lambda: Manager(), lambda: True),
+        ):
+            overlay_manager.create_target_overlay_om(
+                app,
+                skip_preservation=True,
+                force_hidden=True,
+            )
+
+        self.assertEqual(1, len(create_overlay_calls))
+        _args, kwargs = create_overlay_calls[0]
+        self.assertEqual("#000000", kwargs["text_outline_color"])
+        self.assertEqual(2, kwargs["text_outline_width"])
 
 
 @unittest.skipUnless(pyside_overlay.PYSIDE6_AVAILABLE, "PySide6 is not installed")

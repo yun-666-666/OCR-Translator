@@ -83,6 +83,8 @@ preview_btn,Podgląd
 source_color_label,Kolor obszaru źródłowego:
 target_color_label,Kolor obszaru tłumaczenia:
 target_text_color_label,Kolor tekstu tłumaczenia:
+target_text_outline_color_label,Kolor obrysu napisów:
+target_text_outline_width_label,Szerokość obrysu:
 translation_line_layout_label,Układ napisów tłumaczenia:
 translation_line_layout_compact,Preferuj jedną linię
 translation_line_layout_preserve,Dopasuj liczbę linii do napisów źródłowych
@@ -125,6 +127,7 @@ browse_marian_models_title,Wybierz plik CSV modeli MarianMT
 choose_source_color_title,Wybierz kolor obszaru źródłowego
 choose_target_color_title,Wybierz kolor obszaru tłumaczenia
 choose_target_text_color_title,Wybierz kolor tekstu tłumaczenia
+choose_target_text_outline_color_title,Wybierz kolor obrysu napisów
 dialog_area_selected_title,Obszar wybrany
 dialog_source_area_set_message,Obszar źródłowy ustawiony na:
 dialog_target_area_set_message,Obszar docelowy ustawiony na:

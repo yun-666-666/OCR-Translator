@@ -371,6 +371,28 @@ def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
                 )
             except (AttributeError, TypeError, ValueError):
                 font_bold = False
+        try:
+            text_outline_color = app.target_text_outline_colour_var.get()
+        except Exception:
+            text_outline_color = app.config['Settings'].get(
+                'target_text_outline_colour',
+                '#000000',
+            )
+        try:
+            text_outline_width = int(
+                app.target_text_outline_width_var.get()
+            )
+        except Exception:
+            try:
+                text_outline_width = int(
+                    app.config['Settings'].get(
+                        'target_text_outline_width',
+                        '2',
+                    )
+                )
+            except (TypeError, ValueError):
+                text_outline_width = 2
+        text_outline_width = max(0, min(6, text_outline_width))
 
         pad_x = int(app.config['Settings'].get('target_text_pad_x', '5'))
         pad_y = int(app.config['Settings'].get('target_text_pad_y', '5'))
@@ -403,6 +425,8 @@ def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
                 font_size=font_size,
                 font_family=font_family,
                 font_bold=font_bold,
+                text_outline_color=text_outline_color,
+                text_outline_width=text_outline_width,
                 border_px=border_px,
                 opacity=opacity,
                 corner_radius=16

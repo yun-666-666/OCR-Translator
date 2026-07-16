@@ -37,6 +37,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             is_running=True,
             target_lang_var=_Value("zh-CN"),
             target_text_colour_var=_Value("#ffffff"),
+            target_text_outline_colour_var=_Value("#000000"),
+            target_text_outline_width_var=_Value(2),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
             target_font_bold_var=_Value(True),
@@ -55,6 +57,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             20,
             font_family="Microsoft YaHei",
             font_bold=True,
+            outline_color="#000000",
+            outline_width=2,
             preserve_linebreaks=True,
             horizontal_centered=False,
         )
@@ -68,6 +72,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             is_running=True,
             target_lang_var=_Value("zh-CN"),
             target_text_colour_var=_Value("#ffffff"),
+            target_text_outline_colour_var=_Value("#000000"),
+            target_text_outline_width_var=_Value(2),
             target_font_size_var=_Value(20),
             target_font_type_var=_Value("Microsoft YaHei"),
             target_font_bold_var=_Value(False),
@@ -103,6 +109,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             20,
             font_family="Microsoft YaHei",
             font_bold=False,
+            outline_color="#000000",
+            outline_width=2,
             preserve_linebreaks=True,
             horizontal_centered=False,
         )
@@ -146,6 +154,58 @@ class RTLTextDisplayFontTests(unittest.TestCase):
         target = QFont(self.widget.font())
         target.setFamily("Consolas")
         return target.family()
+
+    def _document_outline(self):
+        from PySide6.QtGui import QTextCursor
+
+        cursor = self.widget.textCursor()
+        cursor.select(QTextCursor.Document)
+        return cursor.charFormat().textOutline()
+
+    def test_direct_render_applies_native_glyph_outline(self):
+        self.widget.set_rtl_text(
+            "hello",
+            "en",
+            outline_color="#000000",
+            outline_width=2,
+        )
+
+        outline = self._document_outline()
+        self.assertEqual(outline.color().name(), "#000000")
+        self.assertEqual(outline.widthF(), 2.0)
+
+    def test_zero_outline_width_removes_glyph_outline(self):
+        from PySide6.QtCore import Qt
+
+        self.widget.set_rtl_text(
+            "hello",
+            "en",
+            outline_color="#000000",
+            outline_width=2,
+        )
+        self.widget.update_text_outline("#000000", 0)
+
+        self.assertEqual(self._document_outline().style(), Qt.NoPen)
+
+    def test_color_and_font_rerenders_preserve_native_outline(self):
+        family = self._target_family()
+        self.widget.set_rtl_text(
+            "hello",
+            "en",
+            font_family=family,
+            outline_color="#123456",
+            outline_width=3,
+        )
+
+        self.widget.config(fg="#FFD54F")
+        color_outline = self._document_outline()
+        self.assertEqual(color_outline.color().name(), "#123456")
+        self.assertEqual(color_outline.widthF(), 3.0)
+
+        self.widget.config(font=(family, 19, "bold"))
+        font_outline = self._document_outline()
+        self.assertEqual(font_outline.color().name(), "#123456")
+        self.assertEqual(font_outline.widthF(), 3.0)
 
     def test_direct_render_applies_font_before_one_html_update(self):
         family = self._target_family()

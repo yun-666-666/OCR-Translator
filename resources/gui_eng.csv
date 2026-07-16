@@ -81,6 +81,8 @@ preview_btn,Preview
 source_color_label,Source Area Colour:
 target_color_label,Target Area Colour:
 target_text_color_label,Target Text Colour:
+target_text_outline_color_label,Outline Colour:
+target_text_outline_width_label,Outline Width:
 translation_line_layout_label,Translation subtitle layout:
 translation_line_layout_compact,Prefer one line
 translation_line_layout_preserve,Match source subtitle lines
@@ -125,6 +127,7 @@ browse_marian_models_title,Select MarianMT Models CSV File
 choose_source_color_title,Choose Source Colour
 choose_target_color_title,Choose Target Colour
 choose_target_text_color_title,Choose Target Text Colour
+choose_target_text_outline_color_title,Choose Target Text Outline Colour
 dialog_area_selected_title,Area Selected
 dialog_source_area_set_message,Source area set to:
 dialog_target_area_set_message,Target display area set to:

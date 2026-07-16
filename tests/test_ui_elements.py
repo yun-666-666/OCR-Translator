@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import modern_ui
+from config_manager import DEFAULT_CONFIG_SETTINGS
 from ui_elements import _mousewheel_scroll_units, create_scrollable_tab
 
 
@@ -62,13 +63,64 @@ class SpinboxStyleTests(unittest.TestCase):
 
 
 class SettingsLayoutSourceTests(unittest.TestCase):
+    def test_translated_subtitle_outline_defaults_and_state_are_defined(self):
+        app_logic_source = Path("app_logic.py").read_text(encoding="utf-8-sig")
+
+        self.assertEqual(
+            DEFAULT_CONFIG_SETTINGS["target_text_colour"],
+            "#FFD54F",
+        )
+        self.assertEqual(
+            DEFAULT_CONFIG_SETTINGS["target_text_outline_colour"],
+            "#000000",
+        )
+        self.assertEqual(
+            DEFAULT_CONFIG_SETTINGS["target_text_outline_width"],
+            "2",
+        )
+        self.assertIn("self.target_text_outline_colour_var", app_logic_source)
+        self.assertIn("self.target_text_outline_width_var", app_logic_source)
+        self.assertIn(
+            'self.target_text_outline_colour_var.trace_add("write", '
+            "self.settings_changed_callback)",
+            app_logic_source,
+        )
+        self.assertIn(
+            'self.target_text_outline_width_var.trace_add("write", '
+            "self.settings_changed_callback)",
+            app_logic_source,
+        )
+
     def test_colors_use_one_row_of_clickable_swatches_without_buttons(self):
         source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
 
         self.assertIn("app.colors_row_frame", source)
         self.assertIn("color_display.bind(", source)
         self.assertIn('"<Button-1>"', source)
+        self.assertIn("app.target_text_outline_colour_var", source)
+        self.assertIn("'target_outline'", source)
         self.assertNotIn('get_label("choose_color_btn")', source)
+
+    def test_outline_width_control_and_persistence_are_wired(self):
+        builder_source = Path("gui_settings_builder.py").read_text(
+            encoding="utf-8-sig"
+        )
+        configuration_source = Path("app_configuration.py").read_text(
+            encoding="utf-8-sig"
+        )
+        handler_source = Path("handlers/ui_interaction_handler.py").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn(
+            "app.target_text_outline_width_spinbox = ttk.Spinbox(",
+            builder_source,
+        )
+        self.assertIn("from_=0, to=6", builder_source)
+        self.assertIn("def update_target_text_outline(self):", configuration_source)
+        self.assertIn("def update_target_text_outline(self):", handler_source)
+        self.assertIn("cfg['target_text_outline_colour']", handler_source)
+        self.assertIn("cfg['target_text_outline_width']", handler_source)
 
     def test_bold_and_horizontal_center_controls_share_one_row(self):
         source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")

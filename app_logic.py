@@ -258,7 +258,25 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # Initialize Tkinter Variables FIRST ---
         self.source_colour_var = tk.StringVar(value=self.config['Settings'].get('source_area_colour', '#FFFF99'))
         self.target_colour_var = tk.StringVar(value=self.config['Settings'].get('target_area_colour', '#663399'))
-        self.target_text_colour_var = tk.StringVar(value=self.config['Settings'].get('target_text_colour', '#FFFFFF'))
+        self.target_text_colour_var = tk.StringVar(value=self.config['Settings'].get('target_text_colour', '#FFD54F'))
+        self.target_text_outline_colour_var = tk.StringVar(
+            value=self.config['Settings'].get(
+                'target_text_outline_colour',
+                '#000000',
+            )
+        )
+        try:
+            target_text_outline_width = int(
+                self.config['Settings'].get(
+                    'target_text_outline_width',
+                    '2',
+                )
+            )
+        except (TypeError, ValueError):
+            target_text_outline_width = 2
+        self.target_text_outline_width_var = tk.IntVar(
+            value=max(0, min(6, target_text_outline_width))
+        )
         self.debug_logging_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'debug_logging_enabled', fallback=True))
         self.gui_language_var = tk.StringVar(value=saved_language_display)
         self.translation_line_layout_var = tk.StringVar(
@@ -516,6 +534,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.source_colour_var.trace_add("write", self.settings_changed_callback)
         self.target_colour_var.trace_add("write", self.settings_changed_callback)
         self.target_text_colour_var.trace_add("write", self.settings_changed_callback)
+        self.target_text_outline_colour_var.trace_add("write", self.settings_changed_callback)
+        self.target_text_outline_width_var.trace_add("write", self.settings_changed_callback)
         self.debug_logging_enabled_var.trace_add("write", self.settings_changed_callback)
         self.translation_line_layout_var.trace_add("write", self.settings_changed_callback)
         self.translation_horizontal_centered_var.trace_add("write", self.settings_changed_callback)
