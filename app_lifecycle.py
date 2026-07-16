@@ -92,30 +92,17 @@ class AppLifecycleMixin:
         return self.translation_handler.calculate_text_similarity(text1, text2)
 
     def clear_file_caches(self):
-        self.cache_manager.clear_file_caches()
+        return self.clear_cache()
 
     def clear_cache(self):
         """Clear unified translation cache - FIXED VERSION (No pause/resume needed)."""
         try:
             _log_debug("Clearing unified translation cache...")
 
-            # Notify MarianMT translator about cache clearing FIRST
-            if hasattr(self, 'marian_translator') and self.marian_translator:
-                try:
-                    if hasattr(self.marian_translator, 'notify_cache_cleared'):
-                        self.marian_translator.notify_cache_cleared()
-                        _log_debug("Notified MarianMT translator about cache clearing.")
-                    else:
-                        _log_debug("MarianMT translator does not have notify_cache_cleared method.")
-                except Exception as e_notify:
-                    _log_debug(f"Error notifying MarianMT about cache clearing: {e_notify}")
-
             # Clear unified cache (thread-safe, no need to pause translation)
             self.translation_handler.clear_cache()
 
             # Clear in-memory file cache representations (Level 2 persistence remains)
-            self.google_file_cache.clear()
-            self.deepl_file_cache.clear()
             _log_debug("Cleared in-memory representations of file caches.")
 
             if hasattr(self, 'ocr_frame_cache'):
@@ -137,7 +124,6 @@ class AppLifecycleMixin:
             self.clear_ocr_stability_gate("cache cleared")
             if hasattr(self, 'active_translation_inflight_keys'):
                 self.active_translation_inflight_keys.clear()
-            self.translation_cache.clear()
             _log_debug("Unified translation cache and related states cleared successfully.")
 
             # Update status briefly
@@ -345,7 +331,7 @@ class AppLifecycleMixin:
             self._shutdown_finalized = False
 
             # DO NOT request session ends here. This will be done in _finalize_shutdown.
-            # Context clearing is now handled automatically after session end logging in llm_provider_base.py
+            # Context clearing is now handled automatically after session end logging in the translation handler
 
             self.start_stop_btn.config(text="Start", state=tk.DISABLED)
             self.status_label.config(text="Status: Stopping...")
@@ -451,8 +437,6 @@ class AppLifecycleMixin:
                 self.last_local_ocr_submitted_scope = None
                 self.clear_ocr_stability_gate("translation starting")
 
-                self.cache_manager.load_file_caches()
-
                 self._app_is_closing = False
                 self._shutdown_finalized = False
                 self.is_running = True
@@ -537,14 +521,6 @@ class AppLifecycleMixin:
         #         self.translation_handler.force_end_sessions_on_app_close()
         #     except Exception as e:
         #         _log_debug(f"Error ending sessions on app close: {e}")
-
-        if hasattr(self, 'marian_translator') and self.marian_translator and hasattr(self.marian_translator, 'thread_pool'):
-            try:
-                _log_debug("Shutting down MarianMT thread pool...")
-                self.marian_translator.thread_pool.shutdown(wait=True, cancel_futures=True)
-                _log_debug("MarianMT thread pool shutdown complete.")
-            except Exception as e_mtps:
-                _log_debug(f"Error shutting down MarianMT thread pool: {e_mtps}")
 
         # Shutdown OCR and translation thread pools
         if hasattr(self, 'ocr_thread_pool'):

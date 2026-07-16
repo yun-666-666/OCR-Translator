@@ -1,7 +1,6 @@
 """UI configuration, model selection, diagnostics, and prompt persistence."""
 
 import os
-import re
 import sys
 import time
 from tkinter import messagebox
@@ -115,20 +114,11 @@ class AppConfigurationMixin:
     def save_current_window_geometry(self):
         self.configuration_handler.save_current_window_geometry()
 
-    def browse_marian_models_file(self):
-        self.configuration_handler.browse_marian_models_file()
-
     def update_translation_text(self, text_to_display):
         self.display_manager.update_translation_text(text_to_display)
 
     def update_debug_display(self, original_img_pil, processed_img_cv, ocr_text_content):
         self.display_manager.update_debug_display(original_img_pil, processed_img_cv, ocr_text_content)
-
-    def update_marian_active_model(self, model_name, source_lang=None, target_lang=None):
-        return self.translation_handler.update_marian_active_model(model_name, source_lang, target_lang)
-
-    def update_marian_beam_value(self):
-        self.translation_handler.update_marian_beam_value()
 
     def choose_color_for_settings(self, color_type):
         self.ui_interaction_handler.choose_color_for_settings(color_type)
@@ -160,17 +150,8 @@ class AppConfigurationMixin:
     def save_debug_images(self):
         self.ui_interaction_handler.save_debug_images()
 
-    def toggle_api_key_visibility(self, api_type):
-        self.ui_interaction_handler.toggle_api_key_visibility(api_type)
-
     def update_translation_model_ui(self):
         self.ui_interaction_handler.update_translation_model_ui()
-
-    def on_marian_model_selection_changed(self, event=None, preload=False, initial_setup=False):
-        self.ui_interaction_handler.on_marian_model_selection_changed(event, preload, initial_setup)
-        if not initial_setup and self._fully_initialized :
-             self.save_settings()
-
 
     def on_translation_model_selection_changed(
         self,
@@ -178,31 +159,10 @@ class AppConfigurationMixin:
         initial_setup=False,
         synchronize_ui_only=False,
     ):
-        # Handle session management for translation method changes
-        if (
-            not synchronize_ui_only
-            and hasattr(self, 'translation_handler')
-            and self.is_running
-            and not initial_setup
-        ):
-            current_model = self.translation_model_var.get()
-
-            # End translation session if switching away from Gemini
-            if current_model != 'gemini_api':
-                self.translation_handler.request_end_translation_session()
-
-            # Start translation session if switching to Gemini
-            if current_model == 'gemini_api':
-                self.translation_handler.start_translation_session()
-
-            # Handle OpenAI session management if needed
-            if current_model == 'openai_api':
-                # OpenAI doesn't require special session management like Gemini
-                # But we could add any OpenAI-specific initialization here if needed
-                pass
-                self.translation_handler.start_translation_session()
-
-        self.ui_interaction_handler.on_translation_model_selection_changed(event, initial_setup)
+        self.translation_model_var.set('custom_ai')
+        self.ui_interaction_handler.on_translation_model_selection_changed(
+            event, initial_setup
+        )
         if (
             not synchronize_ui_only
             and not initial_setup
@@ -211,230 +171,9 @@ class AppConfigurationMixin:
             self.save_settings()
 
     def clear_debug_log(self):
+
         self.ui_interaction_handler.clear_debug_log()
 
-    def reset_gemini_api_log(self):
-        """Reset/clear the Gemini API call log file."""
-        try:
-            if hasattr(self.translation_handler, 'gemini_log_file'):
-                log_file_path = self.translation_handler.gemini_log_file
-
-                # Clear the file by truncating it
-                if os.path.exists(log_file_path):
-                    with open(log_file_path, 'w', encoding='utf-8') as f:
-                        f.write('')  # Clear the file
-                    _log_debug(f"Gemini API log file cleared: {log_file_path}")
-
-                    # Reinitialize the log with header
-                    if hasattr(self.translation_handler, '_initialize_gemini_log'):
-                        self.translation_handler._initialize_gemini_log()
-
-                    messagebox.showinfo(
-                        self.ui_lang.get_label("gemini_reset_success_title", "Success"),
-                        self.ui_lang.get_label("gemini_reset_success_msg", "Gemini API log has been reset.")
-                    )
-                else:
-                    _log_debug(f"Gemini API log file does not exist: {log_file_path}")
-                    messagebox.showwarning(
-                        self.ui_lang.get_label("gemini_reset_warning_title", "Warning"),
-                        self.ui_lang.get_label("gemini_reset_warning_msg", "Gemini API log file does not exist.")
-                    )
-            else:
-                _log_debug("Gemini log file path not available")
-                messagebox.showerror(
-                    self.ui_lang.get_label("gemini_reset_error_title", "Error"),
-                    self.ui_lang.get_label("gemini_reset_error_msg", "Could not access Gemini log file.")
-                )
-        except Exception as e:
-            _log_debug(f"Error resetting Gemini API log: {e}")
-            messagebox.showerror(
-                self.ui_lang.get_label("gemini_reset_error_title", "Error"),
-                f"{self.ui_lang.get_label('gemini_reset_error_failed', 'Failed to reset Gemini API log:')} {str(e)}"
-            )
-
-    def update_openai_stats(self):
-        """Update the OpenAI statistics fields by reading the log file."""
-        try:
-            # Check if all required components are available
-            if not hasattr(self, 'openai_total_words_var') or self.openai_total_words_var is None:
-                _log_debug("OpenAI stats variables not initialized yet")
-                return
-
-            if not hasattr(self, 'openai_total_cost_var') or self.openai_total_cost_var is None:
-                _log_debug("OpenAI total cost variable not initialized yet")
-                return
-
-            # Get cumulative totals from OpenAI log file
-            total_words, total_cost = self._get_cumulative_openai_totals()
-
-            # Update GUI fields
-            self.openai_total_words_var.set(self.format_number_with_separators(total_words))
-            self.openai_total_cost_var.set(self.format_cost_for_display(total_cost))
-
-            _log_debug(f"Updated OpenAI stats: {total_words} words, ${total_cost:.8f}")
-        except Exception as e:
-            _log_debug(f"Error updating OpenAI stats: {e}")
-            # Set default values if there's an error
-            if hasattr(self, 'openai_total_words_var') and self.openai_total_words_var is not None:
-                self.openai_total_words_var.set(self.format_number_with_separators(0))
-            if hasattr(self, 'openai_total_cost_var') and self.openai_total_cost_var is not None:
-                self.openai_total_cost_var.set(self.format_cost_for_display(0.0))
-
-    def _get_cumulative_openai_totals(self):
-        """Read the cumulative totals from the OpenAI API log file."""
-        try:
-            # Get the log file path
-            if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-                base_dir = os.path.dirname(sys.executable)
-            else:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-
-            openai_log_file = os.path.join(base_dir, "OpenAI_API_call_logs.txt")
-
-            if not os.path.exists(openai_log_file):
-                _log_debug(f"OpenAI log file does not exist: {openai_log_file}")
-                return 0, 0.0
-
-            # Read the most recent cumulative cost and words from the log
-            cumulative_cost = 0.0
-            cumulative_words = 0
-
-            with open(openai_log_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-                # Find all instances of cumulative totals
-                cost_matches = re.findall(r'Cumulative Log Cost: \$([0-9.]+)', content)
-                word_matches = re.findall(r'Total Translated Words \(so far\): ([0-9,]+)', content)
-
-                if cost_matches:
-                    cumulative_cost = float(cost_matches[-1])  # Get the last (most recent) value
-
-                if word_matches:
-                    # Remove commas from word count and convert to int
-                    word_str = word_matches[-1].replace(',', '')
-                    cumulative_words = int(word_str)
-
-            _log_debug(f"OpenAI cumulative totals: {cumulative_words} words, ${cumulative_cost:.8f}")
-            return cumulative_words, cumulative_cost
-
-        except Exception as e:
-            _log_debug(f"Error reading OpenAI cumulative totals: {e}")
-            return 0, 0.0
-
-    def reset_openai_api_log(self):
-        """Reset/clear the OpenAI API call log file."""
-        try:
-            if hasattr(self.translation_handler, 'openai_log_file'):
-                log_file_path = self.translation_handler.openai_log_file
-
-                # Clear the file by truncating it
-                if os.path.exists(log_file_path):
-                    with open(log_file_path, 'w', encoding='utf-8') as f:
-                        f.write('')  # Clear the file
-                    _log_debug(f"OpenAI API log file cleared: {log_file_path}")
-
-                    # Reinitialize the log with header
-                    if hasattr(self.translation_handler, '_initialize_openai_log'):
-                        self.translation_handler._initialize_openai_log()
-
-                    # Update the GUI fields
-                    self.update_openai_stats()
-
-                    messagebox.showinfo(
-                        self.ui_lang.get_label("openai_reset_success_title", "Success"),
-                        self.ui_lang.get_label("openai_reset_success_msg", "OpenAI API log has been reset.")
-                    )
-                else:
-                    _log_debug(f"OpenAI API log file does not exist: {log_file_path}")
-                    messagebox.showwarning(
-                        self.ui_lang.get_label("openai_reset_warning_title", "Warning"),
-                        self.ui_lang.get_label("openai_reset_warning_msg", "OpenAI API log file does not exist.")
-                    )
-            else:
-                _log_debug("OpenAI log file path not available")
-                messagebox.showerror(
-                    self.ui_lang.get_label("openai_reset_error_title", "Error"),
-                    self.ui_lang.get_label("openai_reset_error_msg", "Could not access OpenAI log file.")
-                )
-        except Exception as e:
-            _log_debug(f"Error resetting OpenAI API log: {e}")
-            messagebox.showerror(
-                self.ui_lang.get_label("openai_reset_error_title", "Error"),
-                f"{self.ui_lang.get_label('openai_reset_error_failed', 'Failed to reset OpenAI API log:')} {str(e)}"
-            )
-
-    def format_currency_for_display(self, amount, unit_suffix=""):
-        """Format currency amount according to current UI language."""
-        try:
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: "0,04941340 USD/min"
-                amount_str = f"{amount:.8f}"
-                amount_str = amount_str.replace('.', ',')  # Replace decimal point with comma
-
-                # Add thousand separators (space) for large numbers
-                parts = amount_str.split(',')
-                integer_part = parts[0]
-                decimal_part = parts[1] if len(parts) > 1 else ""
-
-                # Add space thousand separators to integer part
-                if len(integer_part) > 3:
-                    formatted_integer = ""
-                    for i, digit in enumerate(reversed(integer_part)):
-                        if i > 0 and i % 3 == 0:
-                            formatted_integer = " " + formatted_integer
-                        formatted_integer = digit + formatted_integer
-                    integer_part = formatted_integer
-
-                if decimal_part:
-                    amount_str = f"{integer_part},{decimal_part}"
-                else:
-                    amount_str = integer_part
-
-                # Translate unit suffixes for Polish
-                if unit_suffix == "/min":
-                    unit_suffix = " USD/min"
-                elif unit_suffix == "/hr":
-                    unit_suffix = " USD/godz."
-                elif unit_suffix == "":
-                    unit_suffix = " USD"
-
-                return f"{amount_str}{unit_suffix}"
-            else:
-                # English format: "$0.04941340/min"
-                prefix = "$" if not unit_suffix else "$"
-                return f"{prefix}{amount:.8f}{unit_suffix}"
-        except Exception as e:
-            _log_debug(f"Error formatting currency: {e}")
-            return f"${amount:.8f}{unit_suffix}"  # Fallback to English format
-
-    def format_cost_for_display(self, cost_value):
-        """Format cost value according to current UI language (legacy method)."""
-        return self.format_currency_for_display(cost_value, " USD" if self.ui_lang.current_lang == 'pol' else "")
-
-    def format_number_with_separators(self, number):
-        """Format integer numbers with thousand separators according to current UI language."""
-        try:
-            # Convert to integer to avoid decimal formatting issues
-            num = int(number)
-
-            if self.ui_lang.current_lang == 'pol':
-                # Polish format: use space as thousand separator
-                num_str = str(num)
-                if len(num_str) > 3:
-                    formatted = ""
-                    for i, digit in enumerate(reversed(num_str)):
-                        if i > 0 and i % 3 == 0:
-                            formatted = " " + formatted
-                        formatted = digit + formatted
-                    return formatted
-                else:
-                    return num_str
-            else:
-                # English format: use comma as thousand separator
-                return f"{num:,}"
-        except Exception as e:
-            _log_debug(f"Error formatting number with separators: {e}")
-            return str(number)  # Fallback to string representation
 
     def toggle_debug_logging(self):
         """Toggle debug logging on/off and update button text."""
@@ -573,38 +312,6 @@ class AppConfigurationMixin:
         """Return the automatically resolved Custom AI OCR vision detail."""
         return self.get_ai_ocr_image_decision().image_detail
 
-    def get_current_gemini_model_for_translation(self):
-        """Get the API name of currently selected Gemini translation model."""
-        display_name = self.gemini_translation_model_var.get()
-        return self.gemini_models_manager.get_api_name_by_display_name(display_name)
-
-    def get_current_gemini_model_for_ocr(self):
-        """Get the API name of currently selected Gemini OCR model."""
-        display_name = self.gemini_ocr_model_var.get()
-        return self.gemini_models_manager.get_api_name_by_display_name(display_name)
-
-    def get_current_openai_model_for_translation(self):
-        """Get the API name of currently selected OpenAI translation model."""
-        display_name = self.openai_translation_model_var.get()
-        return self.openai_models_manager.get_api_name_by_display_name(display_name)
-
-    def is_openai_model(self, model_name):
-        """Check if the given model name is an OpenAI model."""
-        return False
-
-    def is_gemini_model(self, model_name):
-        """Check if the given model name is a Gemini model."""
-        return False
-
-    def get_current_openai_model_for_ocr(self):
-        """Get the API name of currently selected OpenAI OCR model."""
-        # Read from the new, specific variable
-        display_name = self.openai_ocr_model_var.get()
-        api_name = self.openai_models_manager.get_api_name_by_display_name(display_name)
-        if api_name:
-            return api_name
-        return 'gpt-4o'  # Default fallback if lookup fails
-
     def is_api_based_ocr_model(self, model_name=None):
         """Check if the given (or current) OCR model is API-based and needs session management."""
         if model_name is None:
@@ -647,15 +354,6 @@ class AppConfigurationMixin:
 
             self.ui_interaction_handler.update_all_dropdowns_for_language_change()
 
-            if hasattr(self, 'update_deepl_model_type_for_language'):
-                self.update_deepl_model_type_for_language()
-            if hasattr(self, 'update_deepl_context_window_for_language'):
-                self.update_deepl_context_window_for_language()
-            if hasattr(self, 'update_gemini_context_window_for_language'):
-                self.update_gemini_context_window_for_language()
-            if hasattr(self, 'update_gemini_labels_for_language'):
-                self.update_gemini_labels_for_language()
-
             def on_tab_changed(event):
                 current_index = self.tab_control.index(self.tab_control.select())
                 if current_index == 0 and hasattr(self, 'main_tab_start_button') and self.main_tab_start_button.winfo_exists():
@@ -692,26 +390,6 @@ class AppConfigurationMixin:
         """Setup periodic network connection cleanup to prevent stack corruption."""
         def cleanup_network_connections():
             try:
-                # Force client recreation to clear connection pools
-                if hasattr(self, 'translation_handler') and hasattr(self.translation_handler, 'gemini_client'):
-                    if self.translation_handler.gemini_client is not None:
-                        old_client = self.translation_handler.gemini_client
-
-                        # Force client refresh
-                        self.translation_handler._force_client_refresh()
-
-                        # Try to close old client connections if possible
-                        try:
-                            if hasattr(old_client, 'close'):
-                                old_client.close()
-                            elif hasattr(old_client, '_transport') and hasattr(old_client._transport, 'close'):
-                                old_client._transport.close()
-                        except Exception as close_error:
-                            _log_debug(f"Error closing old client: {close_error}")
-
-                        _log_debug("Performed periodic network connection cleanup")
-
-                # Also flush DNS cache
                 self.flush_dns_cache_if_needed()
 
             except Exception as e:

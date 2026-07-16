@@ -31,6 +31,18 @@ class CustomAILanguageTests(unittest.TestCase):
             "en",
         )
 
+    def test_language_manager_exposes_only_live_custom_ai_lists(self):
+        manager = LanguageManager()
+
+        self.assertTrue(hasattr(manager, "get_language_lists"))
+        self.assertIn(("English", "en"), manager.get_language_lists("custom_ai", "source"))
+        self.assertIn(("English", "en"), manager.get_language_lists("custom_ai", "target"))
+        self.assertEqual(manager.get_language_lists("deepl_api", "source"), [])
+        self.assertFalse(hasattr(manager, "google_source_languages"))
+        self.assertFalse(hasattr(manager, "deepl_source_languages"))
+        self.assertFalse(hasattr(manager, "gemini_source_languages"))
+        self.assertFalse(hasattr(manager, "openai_source_languages"))
+
 
 class StartupOptimizationTests(unittest.TestCase):
     def test_default_config_uses_unified_ai_optimization_mode(self):
@@ -124,6 +136,172 @@ class StartupOptimizationTests(unittest.TestCase):
             "cfg['custom_ai_ocr_image_detail']",
         ):
             self.assertNotIn(legacy_key, save_source)
+
+    def test_hidden_legacy_provider_controls_and_settings_are_removed(self):
+        sources = {
+            path: Path(path).read_text(encoding="utf-8-sig")
+            for path in (
+                "app_logic.py",
+                "app_lifecycle.py",
+                "gui_settings_builder.py",
+                "handlers/ui_interaction_handler.py",
+                "app_configuration.py",
+                "handlers/configuration_handler.py",
+                "config_manager.py",
+                "ocr_translator_config.example.ini",
+                "resources/gui_eng.csv",
+                "resources/gui_pol.csv",
+                "resources/gui_zh.csv",
+            )
+        }
+        forbidden_by_path = {
+            "gui_settings_builder.py": (
+                "google_api_key_label",
+                "deepl_api_key_label",
+                "gemini_api_key_label",
+                "openai_api_key_label",
+                "marian_model_combobox",
+                "beam_spinbox",
+                "marian_explanation_labels",
+            ),
+            "handlers/ui_interaction_handler.py": (
+                "toggle_api_key_visibility",
+                "google_api_key_label",
+                "deepl_api_key_label",
+                "gemini_api_key_label",
+                "openai_api_key_label",
+                "marian_model_combobox",
+                "num_beams_var",
+                "marian_explanation_labels",
+                "cfg['google_translate_api_key']",
+                "cfg['deepl_api_key']",
+                "cfg['gemini_api_key']",
+                "cfg['openai_api_key']",
+                "cfg['marian_model']",
+            ),
+            "app_logic.py": (
+                "CacheManager",
+                "gemini_models_manager",
+                "openai_models_manager",
+                "google_api_key_var",
+                "deepl_api_key_var",
+                "gemini_api_key_var",
+                "openai_api_key_var",
+                "marian_model_var",
+                "num_beams_var",
+            ),
+            "app_lifecycle.py": (
+                "cache_manager",
+                "google_file_cache",
+                "deepl_file_cache",
+                "notify_cache_cleared",
+            ),
+            "app_configuration.py": (
+                "toggle_api_key_visibility",
+                "browse_marian_models_file",
+                "on_marian_model_selection_changed",
+                "reset_gemini_api_log",
+                "update_openai_stats",
+                "_get_cumulative_openai_totals",
+                "reset_openai_api_log",
+                "get_current_gemini_model_for_translation",
+                "get_current_openai_model_for_translation",
+                "update_deepl_model_type_for_language",
+                "gemini_client",
+            ),
+            "handlers/configuration_handler.py": (
+                "load_marian_models",
+                "browse_marian_models_file",
+            ),
+            "ocr_translator_config.example.ini": (
+                "translation_model = marianmt",
+                "google_translate_api_key =",
+                "deepl_api_key =",
+                "gemini_api_key =",
+                "openai_api_key =",
+                "marian_model =",
+            ),
+        }
+
+        for path, forbidden_tokens in forbidden_by_path.items():
+            for token in forbidden_tokens:
+                self.assertNotIn(token, sources[path], msg=f"{path}: {token}")
+
+        self.assertFalse(Path("handlers/cache_manager.py").exists())
+
+        removed_label_keys = (
+            "translation_model_marianmt_offline",
+            "ocr_model_gemini",
+            "marian_model_label",
+            "google_api_key_label",
+            "deepl_api_key_label",
+            "gemini_api_key_label",
+            "openai_api_key_label",
+            "deepl_model_type_label",
+            "gemini_context_window_label",
+            "openai_context_window_label",
+            "deepl_context_window_label",
+            "models_file_label",
+            "beam_size_label",
+            "google_cache_checkbox",
+            "deepl_cache_checkbox",
+            "gemini_file_cache_checkbox",
+            "openai_file_cache_checkbox",
+            "marian_beam_explanation",
+            "browse_marian_models_title",
+            "gemini_total_words_label",
+            "gemini_enable_api_log_checkbox",
+            "deepl_usage_label",
+            "gemini_reset_success_title",
+        )
+        for path in (
+            "resources/gui_eng.csv",
+            "resources/gui_pol.csv",
+            "resources/gui_zh.csv",
+        ):
+            for key in removed_label_keys:
+                self.assertNotIn(f"{key},", sources[path], msg=f"{path}: {key}")
+
+        self.assertIn("custom_ai_profiles.list_profiles", sources["gui_settings_builder.py"])
+        self.assertIn("build_ocr_model_display_options", sources["gui_settings_builder.py"])
+        self.assertIn("def clear_file_caches(self):\n        return self.clear_cache()", sources["app_lifecycle.py"])
+        self.assertIn("'translation_model': 'custom_ai'", sources["config_manager.py"])
+        self.assertIn("'ocr_model': 'paddleocr'", sources["config_manager.py"])
+
+        from config_manager import DEFAULT_CONFIG_SETTINGS
+
+        for key in (
+            "google_translate_api_key",
+            "deepl_api_key",
+            "gemini_api_key",
+            "openai_api_key",
+            "marian_model",
+            "num_beams",
+        ):
+            self.assertNotIn(key, DEFAULT_CONFIG_SETTINGS)
+
+    def test_live_runtime_state_survives_legacy_ui_cleanup(self):
+        app_logic_source = Path("app_logic.py").read_text(encoding="utf-8-sig")
+        lifecycle_source = Path("app_lifecycle.py").read_text(encoding="utf-8-sig")
+        results_source = Path("handlers/translation_results.py").read_text(
+            encoding="utf-8-sig"
+        )
+
+        self.assertIn(
+            'self.custom_prompt_file = os.path.join(self.base_dir, "custom_prompt.txt")',
+            app_logic_source,
+        )
+        self.assertIn("self.load_custom_prompt()", app_logic_source)
+        self.assertIn(
+            "self.ocr_frame_cache = OCRFrameCache(self.ocr_frame_cache_size_var.get())",
+            app_logic_source,
+        )
+        self.assertIn(
+            "set_debug_logging_enabled(self.debug_logging_enabled_var.get())",
+            app_logic_source,
+        )
+        self.assertNotIn("self.translation_cache.clear()", lifecycle_source)
+        self.assertNotIn("self.app.cache_manager", results_source)
 
     def test_capture_backend_setting_and_pyautogui_dependency_are_removed(self):
         gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")

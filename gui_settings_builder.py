@@ -55,7 +55,6 @@ def create_settings_tab(app):
         except ValueError: return False
 
     # Validation functions for parameters
-    validate_beam_size = frame.register(lambda P: validate_int_range(P, 1, 50))
     validate_scan_interval = frame.register(lambda P: validate_int_range(P, 50, 2000))
     validate_custom_context_window = frame.register(lambda P: validate_int_range(P, 0, 10))
     validate_custom_ai_submit_interval = frame.register(lambda P: validate_int_range(P, 0, 5000))
@@ -171,70 +170,24 @@ def create_settings_tab(app):
 
     def on_source_lang_gui_changed(event):
         selected_display_name = app.source_display_var.get()
-        active_model = app.translation_model_var.get()
-
-        # Get current UI language - more robust detection
         current_ui_language = app.ui_lang.current_lang
         ui_language_for_lookup = 'polish' if current_ui_language == 'pol' else 'english'
-
-        log_debug(f"Source lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{current_ui_language}', lookup='{ui_language_for_lookup}'")
-
-        # Convert localized display name back to API code
-        # Use the correct provider format for lookup
-        provider_for_lookup = active_model  # Keep original format: 'google_api', 'deepl_api'
         api_code = app.language_manager.get_code_from_localized_name(
-            selected_display_name, provider_for_lookup, ui_language_for_lookup)
-
-        log_debug(f"Lookup result: '{selected_display_name}' -> '{api_code}'")
-
-        if api_code:
-            # Guard: Check if we're actually changing to a different value
-            current_stored_value = None
-            if active_model == 'google_api':
-                current_stored_value = app.google_source_lang
-            elif active_model == 'deepl_api':
-                current_stored_value = app.deepl_source_lang
-            elif active_model == 'gemini_api':
-                current_stored_value = app.gemini_source_lang
-            elif app.is_openai_model(active_model):
-                current_stored_value = app.openai_source_lang
-            elif active_model == 'custom_ai':
-                current_stored_value = app.custom_source_lang
-
-            # Only update and save if the value actually changed
-            if api_code != current_stored_value:
-                if active_model == 'google_api':
-                    app.google_source_lang = api_code
-                    log_debug(f"Google source lang set to: {api_code}")
-                elif active_model == 'deepl_api':
-                    app.deepl_source_lang = api_code
-                    log_debug(f"DeepL source lang set to: {api_code}")
-                    # Update DeepL model type options for beta language restriction
-                    if hasattr(app, 'update_deepl_model_type_for_language'):
-                        app.update_deepl_model_type_for_language()
-                elif active_model == 'gemini_api':
-                    app.gemini_source_lang = api_code
-                    log_debug(f"Gemini source lang set to: {api_code}")
-                elif app.is_openai_model(active_model):
-                    app.openai_source_lang = api_code
-                    log_debug(f"OpenAI source lang set to: {api_code}")
-                elif active_model == 'custom_ai':
-                    app.custom_source_lang = api_code
-                    log_debug(f"Custom AI source lang set to: {api_code}")
-
-                # Clear context for currently active provider when source language is changed
-                if (hasattr(app, 'translation_handler') and
-                    hasattr(app.translation_handler, '_clear_active_context')):
-                    app.translation_handler._clear_active_context()
-
-                app.source_lang_var.set(api_code)
-                log_debug(f"Source lang GUI changed for {active_model}: Display='{selected_display_name}', API Code='{api_code}' - SAVING")
-                app.save_settings()
-            else:
-                log_debug(f"Source lang unchanged for {active_model}: '{api_code}' - not saving")
-        else:
-            log_debug(f"ERROR: Could not find API code for source display '{selected_display_name}' / model '{active_model}' / ui_language '{ui_language_for_lookup}' - not saving invalid value")
-            # Don't save invalid values - keep the previous valid selection
+            selected_display_name, 'custom_ai', ui_language_for_lookup
+        )
+        if not api_code:
+            log_debug(f"ERROR: Could not find API code for source display '{selected_display_name}'")
+            return
+        if api_code != app.custom_source_lang:
+            app.custom_source_lang = api_code
+            app.source_lang_var.set(api_code)
+            if (
+                hasattr(app, 'translation_handler')
+                and hasattr(app.translation_handler, '_clear_active_context')
+            ):
+                app.translation_handler._clear_active_context()
+            log_debug(f"Custom AI source lang set to: {api_code}")
+            app.save_settings()
 
     app.source_lang_combobox.bind('<<ComboboxSelected>>',
         create_combobox_handler_wrapper(on_source_lang_gui_changed))
@@ -247,531 +200,27 @@ def create_settings_tab(app):
 
     def on_target_lang_gui_changed(event):
         selected_display_name = app.target_display_var.get()
-        active_model = app.translation_model_var.get()
-
-        # Get current UI language - more robust detection
         current_ui_language = app.ui_lang.current_lang
         ui_language_for_lookup = 'polish' if current_ui_language == 'pol' else 'english'
-
-        log_debug(f"Target lang GUI changed: selected='{selected_display_name}', model='{active_model}', ui_lang='{current_ui_language}', lookup='{ui_language_for_lookup}'")
-
-        # Convert localized display name back to API code
-        # Use the correct provider format for lookup
-        provider_for_lookup = active_model  # Keep original format: 'google_api', 'deepl_api'
         api_code = app.language_manager.get_code_from_localized_name(
-            selected_display_name, provider_for_lookup, ui_language_for_lookup)
+            selected_display_name, 'custom_ai', ui_language_for_lookup
+        )
+        if not api_code:
+            log_debug(f"ERROR: Could not find API code for target display '{selected_display_name}'")
+            return
+        if api_code != app.custom_target_lang:
+            app.custom_target_lang = api_code
+            app.target_lang_var.set(api_code)
+            if (
+                hasattr(app, 'translation_handler')
+                and hasattr(app.translation_handler, '_clear_active_context')
+            ):
+                app.translation_handler._clear_active_context()
+            log_debug(f"Custom AI target lang set to: {api_code}")
+            app.save_settings()
 
-        log_debug(f"Lookup result: '{selected_display_name}' -> '{api_code}'")
-
-        if api_code:
-            # Guard: Check if we're actually changing to a different value
-            current_stored_value = None
-            if active_model == 'google_api':
-                current_stored_value = app.google_target_lang
-            elif active_model == 'deepl_api':
-                current_stored_value = app.deepl_target_lang
-            elif active_model == 'gemini_api':
-                current_stored_value = app.gemini_target_lang
-            elif app.is_openai_model(active_model):
-                current_stored_value = app.openai_target_lang
-            elif active_model == 'custom_ai':
-                current_stored_value = app.custom_target_lang
-
-            # Only update and save if the value actually changed
-            if api_code != current_stored_value:
-                if active_model == 'google_api':
-                    app.google_target_lang = api_code
-                    log_debug(f"Google target lang set to: {api_code}")
-                elif active_model == 'deepl_api':
-                    app.deepl_target_lang = api_code
-                    log_debug(f"DeepL target lang set to: {api_code}")
-                    # Update DeepL model type options for beta language restriction
-                    if hasattr(app, 'update_deepl_model_type_for_language'):
-                        app.update_deepl_model_type_for_language()
-                elif active_model == 'gemini_api':
-                    app.gemini_target_lang = api_code
-                    log_debug(f"Gemini target lang set to: {api_code}")
-                elif app.is_openai_model(active_model):
-                    app.openai_target_lang = api_code
-                    log_debug(f"OpenAI target lang set to: {api_code}")
-                elif active_model == 'custom_ai':
-                    app.custom_target_lang = api_code
-                    log_debug(f"Custom AI target lang set to: {api_code}")
-
-                # Clear context for currently active provider when target language is changed
-                if (hasattr(app, 'translation_handler') and
-                    hasattr(app.translation_handler, '_clear_active_context')):
-                    app.translation_handler._clear_active_context()
-
-                app.target_lang_var.set(api_code)
-                log_debug(f"Target lang GUI changed for {active_model}: Display='{selected_display_name}', API Code='{api_code}' - SAVING")
-
-                # Check if text direction changed and recreate overlay if needed
-                try:
-                    if hasattr(app, 'language_manager') and app.language_manager:
-                        is_rtl = app.language_manager.is_rtl_language(api_code)
-                        current_rtl_status = getattr(app.translation_text, 'is_rtl', False) if app.translation_text else False
-
-                        if is_rtl != current_rtl_status:
-                            log_debug(f"Text direction changed (RTL: {is_rtl}), recreating target overlay")
-                            # Import and recreate the target overlay with new RTL settings (preserve position)
-                            from overlay_manager import create_target_overlay_om
-                            create_target_overlay_om(app)  # System recreation, preserve position
-                except Exception as e:
-                    log_debug(f"Error updating RTL configuration: {e}")
-
-                app.save_settings()
-            else:
-                log_debug(f"Target lang unchanged for {active_model}: '{api_code}' - not saving")
-        else:
-            log_debug(f"ERROR: Could not find API code for target display '{selected_display_name}' / model '{active_model}' / ui_language '{ui_language_for_lookup}' - not saving invalid value")
-            # Don't save invalid values - keep the previous valid selection
     app.target_lang_combobox.bind('<<ComboboxSelected>>',
         create_combobox_handler_wrapper(on_target_lang_gui_changed))
-
-
-    app.marian_model_label = ttk.Label(frame, text=app.ui_lang.get_label("marian_model_label"))
-    app.marian_model_label.grid(row=4, column=0, padx=5, pady=5, sticky="w")
-    app.marian_model_combobox = ttk.Combobox(frame, textvariable=app.marian_model_display_var,
-                                             values=app.marian_models_list, width=25, state='readonly')
-    app.marian_model_combobox.grid(row=4, column=1, padx=5, pady=5, sticky="ew")
-
-    def handle_marian_model_selection(event):
-        # The marian_models_dict now contains localized display names as keys
-        # so we can use the existing logic
-        app.on_marian_model_selection_changed(event=event, initial_setup=False)
-    app.marian_model_combobox.bind('<<ComboboxSelected>>',
-        create_combobox_handler_wrapper(handle_marian_model_selection))
-
-    app.google_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("google_api_key_label"))
-    app.google_api_key_label.grid(row=5, column=0, padx=5, pady=5, sticky="w")
-    app.google_api_key_entry = ttk.Entry(frame, textvariable=app.google_api_key_var, width=40, show="*")
-    app.google_api_key_entry.grid(row=5, column=1, padx=5, pady=5, sticky="ew")
-    # Set initial button text based on visibility
-    initial_google_text = app.ui_lang.get_label("show_btn", "Show")
-    if hasattr(app, 'google_api_key_visible') and app.google_api_key_visible:
-        initial_google_text = app.ui_lang.get_label("hide_btn", "Hide")
-    app.google_api_key_button = ttk.Button(frame, text=initial_google_text, width=5,
-                                          command=lambda: app.toggle_api_key_visibility("google"))
-    app.google_api_key_button.grid(row=5, column=2, padx=5, pady=5, sticky="w")
-
-    app.deepl_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_api_key_label"))
-    app.deepl_api_key_label.grid(row=6, column=0, padx=5, pady=5, sticky="w")
-    app.deepl_api_key_entry = ttk.Entry(frame, textvariable=app.deepl_api_key_var, width=40, show="*")
-    app.deepl_api_key_entry.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
-    # Set initial button text based on visibility
-    initial_deepl_text = app.ui_lang.get_label("show_btn", "Show")
-    if hasattr(app, 'deepl_api_key_visible') and app.deepl_api_key_visible:
-        initial_deepl_text = app.ui_lang.get_label("hide_btn", "Hide")
-    app.deepl_api_key_button = ttk.Button(frame, text=initial_deepl_text, width=5,
-                                         command=lambda: app.toggle_api_key_visibility("deepl"))
-    app.deepl_api_key_button.grid(row=6, column=2, padx=5, pady=5, sticky="w")
-
-    # Gemini API Key input (only visible when Gemini is selected)
-    app.gemini_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("gemini_api_key_label", "Gemini API Key"))
-    app.gemini_api_key_label.grid(row=7, column=0, padx=5, pady=5, sticky="w")
-    app.gemini_api_key_entry = ttk.Entry(frame, textvariable=app.gemini_api_key_var, width=40, show="*")
-    app.gemini_api_key_entry.grid(row=7, column=1, padx=5, pady=5, sticky="ew")
-    # Set initial button text based on visibility
-    initial_gemini_text = app.ui_lang.get_label("show_btn", "Show")
-    if hasattr(app, 'gemini_api_key_visible') and app.gemini_api_key_visible:
-        initial_gemini_text = app.ui_lang.get_label("hide_btn", "Hide")
-    app.gemini_api_key_button = ttk.Button(frame, text=initial_gemini_text, width=5,
-                                          command=lambda: app.toggle_api_key_visibility("gemini"))
-    app.gemini_api_key_button.grid(row=7, column=2, padx=5, pady=5, sticky="w")
-
-    # Gemini Context Window Setting (only visible when Gemini is selected)
-    app.gemini_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("gemini_context_window_label", "Context Window"))
-    app.gemini_context_window_label.grid(row=8, column=0, padx=5, pady=5, sticky="w")
-
-    context_window_options = [
-        (0, app.ui_lang.get_label("gemini_context_window_0", "0 (Disabled)")),
-        (1, app.ui_lang.get_label("gemini_context_window_1", "1 (Last subtitle)")),
-        (2, app.ui_lang.get_label("gemini_context_window_2", "2 (Two subtitles)")),
-        (3, app.ui_lang.get_label("gemini_context_window_3", "3 (Three subtitles)")),
-        (4, app.ui_lang.get_label("gemini_context_window_4", "4 (Four subtitles)")),
-        (5, app.ui_lang.get_label("gemini_context_window_5", "5 (Five subtitles)"))
-    ]
-
-    app.gemini_context_window_display_var = tk.StringVar()
-    # Set initial display value based on current setting
-    current_context_window = app.gemini_context_window_var.get()
-    for value, display in context_window_options:
-        if value == current_context_window:
-            app.gemini_context_window_display_var.set(display)
-            break
-    else:
-        # Fallback if current setting doesn't match any option
-        app.gemini_context_window_display_var.set(context_window_options[1][1])  # Default to 1
-
-    app.gemini_context_window_combobox = ttk.Combobox(frame, textvariable=app.gemini_context_window_display_var,
-                                                     values=[display for _, display in context_window_options],
-                                                     width=25, state='readonly')
-    app.gemini_context_window_combobox.grid(row=8, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_gemini_context_window_changed(event):
-        selected_display = app.gemini_context_window_display_var.get()
-        # Find the corresponding value
-        for value, display in context_window_options:
-            if display == selected_display:
-                app.gemini_context_window_var.set(value)
-                log_debug(f"Gemini context window changed to: {value} (display: {display})")
-                # Clear active context when Gemini context window changes
-                if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, '_clear_active_context'):
-                    app.translation_handler._clear_active_context()
-                    log_debug(f"Active provider context cleared due to Gemini context window setting change")
-                if app._fully_initialized:
-                    app.save_settings()
-                break
-
-    app.gemini_context_window_combobox.bind('<<ComboboxSelected>>',
-        create_combobox_handler_wrapper(on_gemini_context_window_changed))
-
-    # OpenAI API Key input (only visible when OpenAI is selected)
-    app.openai_api_key_label = ttk.Label(frame, text=app.ui_lang.get_label("openai_api_key_label", "OpenAI API Key"))
-    app.openai_api_key_label.grid(row=9, column=0, padx=5, pady=5, sticky="w")
-    app.openai_api_key_entry = ttk.Entry(frame, textvariable=app.openai_api_key_var, width=40, show="*")
-    app.openai_api_key_entry.grid(row=9, column=1, padx=5, pady=5, sticky="ew")
-    # Set initial button text based on visibility
-    initial_openai_text = app.ui_lang.get_label("show_btn", "Show")
-    if hasattr(app, 'openai_api_key_visible') and app.openai_api_key_visible:
-        initial_openai_text = app.ui_lang.get_label("hide_btn", "Hide")
-    app.openai_api_key_button = ttk.Button(frame, text=initial_openai_text, width=5,
-                                          command=lambda: app.toggle_api_key_visibility("openai"))
-    app.openai_api_key_button.grid(row=9, column=2, padx=5, pady=5, sticky="w")
-
-    # OpenAI Context Window Setting (only visible when OpenAI is selected)
-    app.openai_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("openai_context_window_label", "Context Window"))
-    app.openai_context_window_label.grid(row=10, column=0, padx=5, pady=5, sticky="w")
-
-    openai_context_window_options = [
-        (0, app.ui_lang.get_label("openai_context_window_0", "0 (Disabled)")),
-        (1, app.ui_lang.get_label("openai_context_window_1", "1 (Last subtitle)")),
-        (2, app.ui_lang.get_label("openai_context_window_2", "2 (Two subtitles)")),
-        (3, app.ui_lang.get_label("openai_context_window_3", "3 (Three subtitles)")),
-        (4, app.ui_lang.get_label("openai_context_window_4", "4 (Four subtitles)")),
-        (5, app.ui_lang.get_label("openai_context_window_5", "5 (Five subtitles)"))
-    ]
-
-    app.openai_context_window_display_var = tk.StringVar()
-    # Set initial display value based on current setting
-    current_openai_context_window = app.openai_context_window_var.get()
-    for value, display in openai_context_window_options:
-        if value == current_openai_context_window:
-            app.openai_context_window_display_var.set(display)
-            break
-    else:
-        # Fallback if current setting doesn't match any option
-        app.openai_context_window_display_var.set(openai_context_window_options[2][1])  # Default to 2
-
-    app.openai_context_window_combobox = ttk.Combobox(frame, textvariable=app.openai_context_window_display_var,
-                                                     values=[display for _, display in openai_context_window_options],
-                                                     width=25, state='readonly')
-    app.openai_context_window_combobox.grid(row=10, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_openai_context_window_changed(event):
-        selected_display = app.openai_context_window_display_var.get()
-        # Find the corresponding value
-        for value, display in openai_context_window_options:
-            if display == selected_display:
-                app.openai_context_window_var.set(value)
-                log_debug(f"OpenAI context window changed to: {value} (display: {display})")
-                # Clear active context when OpenAI context window changes
-                if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, '_clear_active_context'):
-                    app.translation_handler._clear_active_context()
-                    log_debug(f"Active provider context cleared due to OpenAI context window setting change")
-                if app._fully_initialized:
-                    app.save_settings()
-                break
-
-    app.openai_context_window_combobox.bind('<<ComboboxSelected>>',
-        create_combobox_handler_wrapper(on_openai_context_window_changed))
-
-    # DeepL Model Type Selection (only visible when DeepL is selected)
-    app.deepl_model_type_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_model_type_label", "Quality"))
-    app.deepl_model_type_label.grid(row=11, column=0, padx=5, pady=5, sticky="w")
-
-    # Create model type options with user-friendly names
-    deepl_model_options = [
-        ("latency_optimized", app.ui_lang.get_label("deepl_classic_model", "Classic")),
-        ("quality_optimized", app.ui_lang.get_label("deepl_nextgen_model", "Next-gen"))
-    ]
-
-    app.deepl_model_display_var = tk.StringVar()
-    # Set initial display value based on current setting
-    current_model_type = app.deepl_model_type_var.get()
-    for value, display in deepl_model_options:
-        if value == current_model_type:
-            app.deepl_model_display_var.set(display)
-            break
-    else:
-        # Fallback if current setting doesn't match any option
-        app.deepl_model_display_var.set(deepl_model_options[0][1])  # Default to Classic
-
-    app.deepl_model_type_combobox = ttk.Combobox(frame, textvariable=app.deepl_model_display_var,
-                                               values=[display for _, display in deepl_model_options],
-                                               width=25, state='readonly')
-    app.deepl_model_type_combobox.grid(row=11, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_deepl_model_type_changed(event):
-        selected_display = app.deepl_model_display_var.get()
-        # Find the corresponding value
-        for value, display in deepl_model_options:
-            if display == selected_display:
-                app.deepl_model_type_var.set(value)
-                log_debug(f"DeepL model type changed to: {value} (display: {display})")
-                if app._fully_initialized:
-                    app.save_settings()
-                break
-
-    app.deepl_model_type_combobox.bind('<<ComboboxSelected>>',
-        create_combobox_handler_wrapper(on_deepl_model_type_changed))
-
-    # Store the options for later use when updating language
-    app.deepl_model_options = deepl_model_options
-
-    # DeepL Context Window Setting (only visible when DeepL is selected)
-    app.deepl_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("deepl_context_window_label", "Context Window"))
-    app.deepl_context_window_label.grid(row=12, column=0, padx=5, pady=5, sticky="w")
-
-    deepl_context_window_options = [
-        (0, app.ui_lang.get_label("deepl_context_window_0", "0 (Disabled)")),
-        (1, app.ui_lang.get_label("deepl_context_window_1", "1 (Last subtitle)")),
-        (2, app.ui_lang.get_label("deepl_context_window_2", "2 (Two subtitles)")),
-        (3, app.ui_lang.get_label("deepl_context_window_3", "3 (Three subtitles)"))
-    ]
-
-    app.deepl_context_window_display_var = tk.StringVar()
-    # Set initial display value based on current setting
-    current_deepl_context_window = app.deepl_context_window_var.get()
-    for value, display in deepl_context_window_options:
-        if value == current_deepl_context_window:
-            app.deepl_context_window_display_var.set(display)
-            break
-    else:
-        # Fallback if current setting doesn't match any option
-        app.deepl_context_window_display_var.set(deepl_context_window_options[2][1])  # Default to 2
-
-    app.deepl_context_window_combobox = ttk.Combobox(frame, textvariable=app.deepl_context_window_display_var,
-                                                     values=[display for _, display in deepl_context_window_options],
-                                                     width=25, state='readonly')
-    app.deepl_context_window_combobox.grid(row=12, column=1, padx=5, pady=5, sticky="ew")
-
-    def on_deepl_context_window_changed(event):
-        selected_display = app.deepl_context_window_display_var.get()
-        # Find the corresponding value
-        for value, display in deepl_context_window_options:
-            if display == selected_display:
-                app.deepl_context_window_var.set(value)
-                log_debug(f"DeepL context window changed to: {value} (display: {display})")
-                # Clear DeepL context when context window changes
-                if hasattr(app, 'translation_handler') and hasattr(app.translation_handler, '_clear_deepl_context'):
-                    app.translation_handler._clear_deepl_context()
-                if app._fully_initialized:
-                    app.save_settings()
-                break
-
-    app.deepl_context_window_combobox.bind('<<ComboboxSelected>>',
-        create_combobox_handler_wrapper(on_deepl_context_window_changed))
-
-    # Store the options for later use when updating language
-    app.deepl_context_window_options = deepl_context_window_options
-
-    # Function to update DeepL model type options when language changes
-    def update_deepl_model_type_for_language():
-        if hasattr(app, 'deepl_model_type_combobox') and app.deepl_model_type_combobox.winfo_exists():
-            from constants import DEEPL_BETA_LANGUAGES
-
-            # Get current model type setting
-            current_model_type = app.deepl_model_type_var.get()
-
-            # Check if either source or target language is a beta language
-            is_beta_translation = False
-            deepl_source = getattr(app, 'deepl_source_lang', '')
-            deepl_target = getattr(app, 'deepl_target_lang', '')
-
-            if deepl_source and deepl_source.upper() in DEEPL_BETA_LANGUAGES:
-                is_beta_translation = True
-                log_debug(f"DeepL source language {deepl_source} is a beta language")
-            if deepl_target and deepl_target.upper() in DEEPL_BETA_LANGUAGES:
-                is_beta_translation = True
-                log_debug(f"DeepL target language {deepl_target} is a beta language")
-
-            # Build options based on whether beta languages are involved
-            if is_beta_translation:
-                # Beta languages only support quality_optimized
-                new_deepl_model_options = [
-                    ("quality_optimized", app.ui_lang.get_label("deepl_nextgen_model", "Next-gen"))
-                ]
-                # Force quality_optimized for beta languages
-                if current_model_type != "quality_optimized":
-                    app.deepl_model_type_var.set("quality_optimized")
-                    current_model_type = "quality_optimized"
-                    log_debug("Forced model type to quality_optimized for beta language")
-            else:
-                # Non-beta languages support both models
-                new_deepl_model_options = [
-                    ("latency_optimized", app.ui_lang.get_label("deepl_classic_model", "Classic")),
-                    ("quality_optimized", app.ui_lang.get_label("deepl_nextgen_model", "Next-gen"))
-                ]
-
-            # Update combobox values
-            app.deepl_model_type_combobox['values'] = [display for _, display in new_deepl_model_options]
-
-            # Restore selection based on current setting
-            for value, display in new_deepl_model_options:
-                if value == current_model_type:
-                    app.deepl_model_display_var.set(display)
-                    break
-            else:
-                # Fallback to first option if current setting not found
-                app.deepl_model_display_var.set(new_deepl_model_options[0][1])
-
-            # Update stored options
-            app.deepl_model_options = new_deepl_model_options
-
-            if is_beta_translation:
-                log_debug(f"DeepL model type restricted to Next-gen only (beta language)")
-            else:
-                log_debug(f"DeepL model type options updated (both Classic and Next-gen available)")
-
-    # Store function reference for calling during language updates
-    app.update_deepl_model_type_for_language = update_deepl_model_type_for_language
-
-    # Function to update DeepL context window options when language changes
-    def update_deepl_context_window_for_language():
-        if hasattr(app, 'deepl_context_window_combobox') and app.deepl_context_window_combobox.winfo_exists():
-            # Get current context window setting
-            current_deepl_context_window = app.deepl_context_window_var.get()
-
-            # Update options with new language
-            new_deepl_context_window_options = [
-                (0, app.ui_lang.get_label("deepl_context_window_0", "0 (Disabled)")),
-                (1, app.ui_lang.get_label("deepl_context_window_1", "1 (Last subtitle)")),
-                (2, app.ui_lang.get_label("deepl_context_window_2", "2 (Two subtitles)")),
-                (3, app.ui_lang.get_label("deepl_context_window_3", "3 (Three subtitles)"))
-            ]
-
-            # Update combobox values
-            app.deepl_context_window_combobox['values'] = [display for _, display in new_deepl_context_window_options]
-
-            # Restore selection based on current setting
-            for value, display in new_deepl_context_window_options:
-                if value == current_deepl_context_window:
-                    app.deepl_context_window_display_var.set(display)
-                    break
-            else:
-                # Fallback to default option if current setting not found
-                app.deepl_context_window_display_var.set(new_deepl_context_window_options[2][1])  # Default to 2
-
-            # Update stored options
-            app.deepl_context_window_options = new_deepl_context_window_options
-            log_debug(f"Updated DeepL context window options for language change")
-
-    # Store function reference for calling during language updates
-    app.update_deepl_context_window_for_language = update_deepl_context_window_for_language
-
-    # Function to update Gemini context window options when language changes
-    def update_gemini_context_window_for_language():
-        if hasattr(app, 'gemini_context_window_combobox') and app.gemini_context_window_combobox.winfo_exists():
-            # Get current context window setting
-            current_context_window = app.gemini_context_window_var.get()
-
-            # Update options with new language
-            new_context_window_options = [
-                (0, app.ui_lang.get_label("gemini_context_window_0", "0 (Disabled)")),
-                (1, app.ui_lang.get_label("gemini_context_window_1", "1 (Last subtitle)")),
-                (2, app.ui_lang.get_label("gemini_context_window_2", "2 (Two subtitles)")),
-                (3, app.ui_lang.get_label("gemini_context_window_3", "3 (Three subtitles)")),
-                (4, app.ui_lang.get_label("gemini_context_window_4", "4 (Four subtitles)")),
-                (5, app.ui_lang.get_label("gemini_context_window_5", "5 (Five subtitles)"))
-            ]
-
-            # Update combobox values
-            app.gemini_context_window_combobox['values'] = [display for _, display in new_context_window_options]
-
-            # Restore selection based on current setting
-            for value, display in new_context_window_options:
-                if value == current_context_window:
-                    app.gemini_context_window_display_var.set(display)
-                    break
-            else:
-                # Fallback to default option if current setting not found
-                app.gemini_context_window_display_var.set(new_context_window_options[1][1])  # Default to 1
-
-            log_debug(f"Updated Gemini context window options for language change")
-
-    # Store function reference for calling during language updates
-    app.update_gemini_context_window_for_language = update_gemini_context_window_for_language
-
-    # Function to update Gemini labels when language changes
-    def update_gemini_labels_for_language():
-        if hasattr(app, 'gemini_enable_api_log_checkbox') and app.gemini_enable_api_log_checkbox.winfo_exists():
-            app.gemini_enable_api_log_checkbox.config(text=app.ui_lang.get_label("gemini_enable_api_log_checkbox", "Enable API Log"))
-        if hasattr(app, 'gemini_reset_log_button') and app.gemini_reset_log_button.winfo_exists():
-            app.gemini_reset_log_button.config(text=app.ui_lang.get_label("gemini_reset_log_button", "Reset"))
-        if hasattr(app, 'gemini_refresh_stats_button') and app.gemini_refresh_stats_button.winfo_exists():
-            app.gemini_refresh_stats_button.config(text=app.ui_lang.get_label("gemini_refresh_stats_button", "Refresh"))
-        if hasattr(app, 'gemini_total_words_label') and app.gemini_total_words_label.winfo_exists():
-            app.gemini_total_words_label.config(text=app.ui_lang.get_label("gemini_total_words_label", "Total Words"))
-        if hasattr(app, 'gemini_total_cost_label') and app.gemini_total_cost_label.winfo_exists():
-            app.gemini_total_cost_label.config(text=app.ui_lang.get_label("gemini_total_cost_label", "Total Cost"))
-
-        # Update cost format when language changes
-        if hasattr(app, 'gemini_total_cost_var') and app.gemini_total_cost_var is not None:
-            try:
-                # Get current cost value and reformat it
-                current_value = app.gemini_total_cost_var.get()
-                # Parse the current cost regardless of format
-                import re
-                cost_match = re.search(r'[\d,\.]+', current_value)
-                if cost_match:
-                    cost_str = cost_match.group().replace(',', '.')  # Normalize to decimal point
-                    cost_value = float(cost_str)
-                    app.gemini_total_cost_var.set(app.format_cost_for_display(cost_value))
-            except Exception as e:
-                log_debug(f"Error updating cost format for language change: {e}")
-                # Fallback to default formatted value
-                app.gemini_total_cost_var.set(app.format_cost_for_display(0.0))
-
-        log_debug("Updated Gemini labels for language change")
-
-    # Store function reference for calling during language updates
-    app.update_gemini_labels_for_language = update_gemini_labels_for_language
-
-    # Function to update DeepL usage labels when language changes
-    def update_deepl_usage_for_language():
-        if hasattr(app, 'deepl_usage_label') and app.deepl_usage_label.winfo_exists():
-            app.deepl_usage_label.config(text=app.ui_lang.get_label("deepl_usage_label", "DeepL Usage"))
-
-        log_debug("Updated DeepL usage labels for language change")
-
-    # Store function reference for calling during language updates
-    app.update_deepl_usage_for_language = update_deepl_usage_for_language
-
-    app.models_file_label = ttk.Label(frame, text=app.ui_lang.get_label("models_file_label"))
-    app.models_file_label.grid(row=14, column=0, padx=5, pady=5, sticky="w")
-    app.models_file_frame = ttk.Frame(frame)
-    app.models_file_frame.grid(row=14, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
-    app.models_file_entry = ttk.Entry(app.models_file_frame, textvariable=app.models_file_var)
-    app.models_file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    app.models_file_button = ttk.Button(app.models_file_frame, text=app.ui_lang.get_label("browse_btn"), command=app.browse_marian_models_file)
-    app.models_file_button.pack(side=tk.RIGHT, padx=(5,0))
-
-    app.beam_size_label = ttk.Label(frame, text=app.ui_lang.get_label("beam_size_label"))
-    app.beam_size_label.grid(row=15, column=0, padx=5, pady=5, sticky="w")
-    app.beam_spinbox = ttk.Spinbox(frame, from_=1, to=50, textvariable=app.num_beams_var, width=10,
-                                  validate="key", validatecommand=(validate_beam_size, '%P'))
-    app.beam_spinbox.grid(row=15, column=1, padx=5, pady=5, sticky="w")
-    def on_beam_spinbox_focus_out(event):
-        try:
-            value = int(app.num_beams_var.get())
-            clamped = max(1, min(50, value))
-            if clamped != value: app.num_beams_var.set(clamped)
-            app.update_marian_beam_value()
-        except (ValueError, tk.TclError): app.num_beams_var.set(2)
-        app.save_settings()
-    app.beam_spinbox.bind("<FocusOut>", on_beam_spinbox_focus_out)
 
     app.ai_profile_selected_id = None
     app.ai_profile_name_var = tk.StringVar()
@@ -1072,7 +521,6 @@ def create_settings_tab(app):
 
     refresh_custom_profile_controls()
 
-    app.marian_explanation_labels = []
     app.custom_context_window_label = ttk.Label(frame, text=app.ui_lang.get_label("custom_context_window_label", "Custom AI Context Window"))
     app.custom_context_window_label.grid(row=17, column=0, padx=5, pady=5, sticky="w")
     app.custom_context_window_spinbox = ttk.Spinbox(
@@ -1219,25 +667,7 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
-    row_offset = 20
-    if app.MARIANMT_AVAILABLE:
-        texts = [
-            app.ui_lang.get_label("marian_beam_explanation", "Higher beam values = better but slower translations"),
-            app.ui_lang.get_label("marian_quality_note", "Note: MarianMT provides higher quality translations"),
-            app.ui_lang.get_label("marian_quality_vary", "for many language pairs. Quality may vary by language."),
-            app.ui_lang.get_label("marian_download_note", "Models are downloaded on first use (requires internet).")
-        ]
-    else:
-        texts = [
-            app.ui_lang.get_label("marian_unavailable_line1", "MarianMT is not available. To enable, install:"),
-            app.ui_lang.get_label("marian_unavailable_line2", "pip install transformers torch sentencepiece")
-        ]
-    for i, text_content in enumerate(texts):
-        lbl = ttk.Label(frame, text=text_content)
-        lbl.grid(row=row_offset + i, column=0, columnspan=3, padx=5, pady=0, sticky="w")
-        app.marian_explanation_labels.append(lbl)
-    current_row = row_offset + len(texts)
-
+    current_row = getattr(app, "_settings_next_row", 20)
     ttk.Label(
         frame,
         text=app.ui_lang.get_label(

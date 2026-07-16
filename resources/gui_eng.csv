@@ -24,39 +24,10 @@ status_running,Running (Press ~ to Stop)
 status_stopped,Stopped (Press ~ to Start)
 settings_tab_title,Settings
 translation_model_label,Translation Model:
-translation_model_marianmt_offline,MarianMT (offline and free)
 ocr_model_label,OCR Model:
 ocr_model_paddleocr,PaddleOCR (offline)
-ocr_model_gemini,Gemini API (online)
 source_lang_label,Source Language:
 target_lang_label,Target Language:
-marian_model_label,MarianMT Model:
-google_api_key_label,Google Translate API Key:
-deepl_api_key_label,DeepL API Key:
-gemini_api_key_label,Gemini API Key:
-deepl_model_type_label,Quality:
-gemini_context_window_label,Context Window:
-gemini_context_window_0,0 (Disabled)
-gemini_context_window_1,1 (Last subtitle)
-gemini_context_window_2,2 (Two subtitles)
-gemini_context_window_3,3 (Three subtitles)
-gemini_context_window_4,4 (Four subtitles)
-gemini_context_window_5,5 (Five subtitles)
-openai_api_key_label,OpenAI API Key:
-openai_context_window_label,Context Window:
-openai_context_window_0,0 (Disabled)
-openai_context_window_1,1 (Last subtitle)
-openai_context_window_2,2 (Two subtitles)
-openai_context_window_3,3 (Three subtitles)
-openai_context_window_4,4 (Four subtitles)
-openai_context_window_5,5 (Five subtitles)
-deepl_classic_model,Classic
-deepl_nextgen_model,Next-gen
-deepl_context_window_label,Context Window:
-deepl_context_window_0,0 (Disabled)
-deepl_context_window_1,1 (Last subtitle)
-deepl_context_window_2,2 (Two subtitles)
-deepl_context_window_3,3 (Three subtitles)
 custom_context_window_label,Custom AI context subtitles:
 ai_optimization_mode_label,AI optimization:
 ai_optimization_mode_auto,Automatic (recommended)
@@ -71,8 +42,6 @@ custom_ai_reasoning_effort_none,None
 custom_ai_reasoning_effort_medium,Medium
 custom_ai_reasoning_effort_high,High
 custom_ai_reasoning_effort_ultra,Ultra
-models_file_label,MarianMT Model List:
-beam_size_label,Translation Beam Size (MarianMT):
 scan_interval_label,Scan Interval (ms):
 clear_timeout_label,Clear Translation Timeout (s):
 stability_threshold_label,Text Stability Threshold:
@@ -95,18 +64,10 @@ font_bold_label,Bold translated subtitle text
 opacity_label,Opacity:
 opacity_background_label,Background:
 opacity_text_label,Text:
-file_cache_frame_title,File Caching Options
-file_cache_description,"File caching saves translations to disk to reduce API costs, and improves performance."
-google_cache_checkbox,"Enable Google Translate file cache (saves to disk, reduces API calls)"
-deepl_cache_checkbox,"Enable DeepL file cache (saves to disk, reduces API calls)"
-gemini_file_cache_checkbox,"Enable Gemini file cache (saves to disk, reduces API calls)"
-openai_file_cache_checkbox,"Enable OpenAI file cache (saves to disk, reduces API calls)"
-cache_files_label,Cache files:
-clear_caches_btn,Clear File Caches
+file_cache_frame_title,Translation Cache
+file_cache_description,Clear cached translations for the active Custom AI configuration.
+clear_caches_btn,Clear Translation Cache
 save_settings_btn,Save Settings Now
-browse_btn,Browse
-show_btn,Show
-hide_btn,Hide
 choose_color_btn,Choose Colour
 debug_tab_title,Debugging
 original_image_label,Original Image
@@ -119,13 +80,6 @@ refresh_log_btn,Refresh Log
 settings_saved,Status: Settings Saved
 no_image_captured,No image captured yet
 no_image_processed,No image processed yet
-marian_beam_explanation,Higher beam values = better but slower translations
-marian_quality_note,Note: MarianMT provides high quality translations
-marian_quality_vary,"for many language pairs. Quality may vary by language."
-marian_download_note,"Models are downloaded on first use (requires Internet)."
-marian_unavailable_line1,"MarianMT is not available. To enable, install:"
-marian_unavailable_line2,pip install transformers torch sentencepiece
-browse_marian_models_title,Select MarianMT Models CSV File
 choose_source_color_title,Choose Source Colour
 choose_target_color_title,Choose Target Colour
 choose_target_text_color_title,Choose Target Text Colour
@@ -144,33 +98,6 @@ refresh_preview,Refresh Preview
 close_btn,Close
 no_text_recognized,No text recognized
 no_image_for_ocr,No image available for OCR
-gemini_total_words_label,Total Words
-gemini_total_cost_label,Total Cost
-gemini_enable_api_log_checkbox,Enable API Log
-gemini_reset_log_button,Reset
-gemini_refresh_stats_button,Refresh
-deepl_usage_label,Free Monthly Usage
-deepl_usage_loading,Loading...
-deepl_usage_unavailable,Unable to retrieve usage data
-deepl_usage_error,Error retrieving usage data
-gemini_reset_success_title,Success
-gemini_reset_success_msg,Gemini API log has been reset.
-gemini_reset_warning_title,Warning
-gemini_reset_warning_msg,Gemini API log file does not exist.
-gemini_reset_error_title,Error
-gemini_reset_error_msg,Could not access Gemini log file.
-gemini_reset_error_failed,Failed to reset Gemini API log:
-currency_usd, USD
-mb_progress_of, MB of
-mb_progress_format, MB ({0}%)
-file_type_csv,CSV files
-file_type_text,Text files
-file_type_all,All files
-csv_header_provider,Provider
-csv_header_type,Type
-csv_header_metric,Metric
-csv_header_value,Value
-csv_metric_free_monthly_limit,Free Monthly Limit
 custom_prompt_tab_title,Custom Prompt
 custom_prompt_info,"This text will be added at the beginning of the custom AI translation instruction. It will be used for EVERY API call. Make it as short as possible to save costs. Use English for best results."
 custom_prompt_saved,Custom prompt saved successfully!

@@ -21,7 +21,6 @@ from ai_optimization import (
 from logger import log_debug, set_debug_logging_enabled, is_debug_logging_enabled
 from resource_handler import get_resource_path
 from config_manager import (
-    get_provider_api_key,
     load_app_config,
     save_app_config,
     load_ocr_preview_geometry,
@@ -57,7 +56,6 @@ from paddle_ocr_backend import (
 )
 
 from handlers import (
-    CacheManager,
     ConfigurationHandler,
     DisplayManager,
     HotkeyHandler,
@@ -77,6 +75,7 @@ try:
 except ImportError:
     pass
 
+# Live path only: PaddleOCR + Custom AI profiles.
 GOOGLE_TRANSLATE_API_AVAILABLE = False
 DEEPL_API_AVAILABLE = False
 GEMINI_API_AVAILABLE = False
@@ -84,18 +83,6 @@ OPENAI_API_AVAILABLE = False
 MARIANMT_AVAILABLE = False
 
 
-class _DisabledModelManager:
-    def get_translation_model_names(self):
-        return []
-
-    def get_ocr_model_names(self):
-        return []
-
-    def get_api_name_by_display_name(self, display_name):
-        return None
-
-    def get_model_costs(self, api_name):
-        return {'input_cost': 0.0, 'output_cost': 0.0}
 
 from app_capture_ocr import AppCaptureOcrMixin
 from app_configuration import AppConfigurationMixin
@@ -137,7 +124,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         if not KEYBOARD_AVAILABLE: log_debug("  Keyboard library not available. Hotkeys disabled.")
         else: log_debug("  Keyboard library: available")
         log_debug("  Built-in cloud translation providers disabled; using custom OpenAI-compatible endpoints.")
-        log_debug("  MarianMT disabled to avoid heavy startup imports.")
+        log_debug("  Live path: PaddleOCR + Custom AI OCR/translation only.")
 
         # Process-Level CPU Affinity: Limit application to exactly 3 cores
         if ENABLE_PROCESS_CPU_AFFINITY:
@@ -304,11 +291,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         if configured_ocr_model not in [PADDLEOCR_MODEL_CODE, 'custom_ai']:
             configured_ocr_model = PADDLEOCR_MODEL_CODE
         self.ocr_model_var = tk.StringVar(value=configured_ocr_model)
-
-        self.google_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'google_translate_api_key'))
-        self.deepl_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'deepl_api_key'))
-        self.gemini_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'gemini_api_key'))
-        self.deepl_model_type_var = tk.StringVar(value=self.config['Settings'].get('deepl_model_type', 'latency_optimized'))
         translation_model_val = self.config['Settings'].get('translation_model', 'custom_ai')
         if translation_model_val != 'custom_ai':
             log_debug(f"Configured legacy translation model '{translation_model_val}' migrated to custom_ai")
@@ -318,30 +300,11 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # Define translation model names and values earlier
         # Initialize with default values, will be updated with localized versions
         self.translation_model_names = {'custom_ai': 'Custom AI Translation'}
-        self.gemini_models_manager = _DisabledModelManager()
-        self.openai_models_manager = _DisabledModelManager()
         self.custom_ai_profiles = CustomAIProfileManager(self.config['Settings'].get('custom_ai_profiles_file', 'custom_ai_profiles.json'))
 
         # Update with localized names after UI language is loaded
         self.update_translation_model_names()
         self.translation_model_values = {v: k for k, v in self.translation_model_names.items()}
-
-        self.models_file_var = tk.StringVar(value=self.config['Settings'].get('marian_models_file'))
-        self.num_beams_var = tk.IntVar(value=int(self.config['Settings'].get('num_beams', '2')))
-        self.marian_model_var = tk.StringVar(value=self.config['Settings'].get('marian_model', '')) # Stores path
-
-        self.google_file_cache_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'google_file_cache', fallback=True))
-        self.deepl_file_cache_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'deepl_file_cache', fallback=True))
-        self.deepl_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('deepl_context_window', '2')))
-        self.gemini_file_cache_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'gemini_file_cache', fallback=True))
-        self.gemini_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('gemini_context_window', '1')))
-        self.gemini_api_log_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'gemini_api_log_enabled', fallback=True))
-
-        # OpenAI API variables
-        self.openai_file_cache_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'openai_file_cache', fallback=True))
-        self.openai_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('openai_context_window', '2')))
-        self.openai_api_log_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'openai_api_log_enabled', fallback=True))
-        self.openai_api_key_var = tk.StringVar(value=get_provider_api_key(self.config, 'openai_api_key'))
         self.custom_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('custom_context_window', '5')))
         self.ai_optimization_mode_var = tk.StringVar(
             value=normalize_ai_optimization_mode(
@@ -392,22 +355,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             value=self.config.getboolean('Settings', 'paddleocr_use_textline_orientation', fallback=False)
         )
 
-        # Separate Gemini model selection for OCR and Translation
-        self.gemini_translation_model_var = tk.StringVar(value=self.config['Settings'].get('gemini_translation_model', 'Gemini 2.5 Flash-Lite'))
-        self.gemini_ocr_model_var = tk.StringVar(value=self.config['Settings'].get('gemini_ocr_model', 'Gemini 2.5 Flash-Lite'))
-
-        # OpenAI model selection for OCR and Translation
-        self.openai_translation_model_var = tk.StringVar(value=self.config['Settings'].get('openai_translation_model', 'GPT-4o Mini'))
-        self.openai_ocr_model_var = tk.StringVar(value=self.config['Settings'].get('openai_ocr_model', 'GPT-4o'))
-
-        # Gemini statistics variables (initialized by GUI builder)
-        self.gemini_total_words_var = None
-        self.gemini_total_cost_var = None
-
-        # OpenAI statistics variables (initialized by GUI builder)
-        self.openai_total_words_var = None
-        self.openai_total_cost_var = None
-
         self.scan_interval_var = tk.IntVar(value=int(self.config['Settings'].get('scan_interval', '100')))
 
         # Initialize adaptive scan interval values from user configuration
@@ -448,14 +395,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         elif initial_ocr_model_code == 'custom_ai':
             active_ocr_profile = self.custom_ai_profiles.get_active_profile("ocr")
             initial_ocr_display_name = active_ocr_profile["name"] if active_ocr_profile else self.ui_lang.get_label("custom_ai_no_profiles", "Add an AI model profile")
-        elif self.is_gemini_model(initial_ocr_model_code):
-            saved_gemini_ocr_model = self.config['Settings'].get('gemini_ocr_model', '')
-            if saved_gemini_ocr_model and self.GEMINI_API_AVAILABLE and saved_gemini_ocr_model in self.gemini_models_manager.get_ocr_model_names():
-                initial_ocr_display_name = saved_gemini_ocr_model
-        elif self.is_openai_model(initial_ocr_model_code):
-            saved_openai_ocr_model = self.config['Settings'].get('openai_ocr_model', '')
-            if saved_openai_ocr_model and self.OPENAI_API_AVAILABLE and saved_openai_ocr_model in self.openai_models_manager.get_ocr_model_names():
-                initial_ocr_display_name = saved_openai_ocr_model
+
 
         # Fallback if no specific display name was found
         if not initial_ocr_display_name:
@@ -471,17 +411,18 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self.base_dir,
             "custom_ai_translation_cache.sqlite3",
         )
+        self.custom_prompt_file = os.path.join(self.base_dir, "custom_prompt.txt")
+        self.custom_prompt_text = ""
+        self.load_custom_prompt()
+        self.ocr_frame_cache = OCRFrameCache(self.ocr_frame_cache_size_var.get())
+        set_debug_logging_enabled(self.debug_logging_enabled_var.get())
 
         # Initialize Handlers
-        # self.cache_manager = CacheManager(self)
         self.configuration_handler = ConfigurationHandler(self)
         self.display_manager = DisplayManager(self)
         self.hotkey_handler = HotkeyHandler(self)
         self.translation_handler = TranslationHandler(self)
         self.ui_interaction_handler = UIInteractionHandler(self) # Needs self.translation_model_names
-
-        # Pre-initialize Gemini model for optimal performance (especially for compiled version)
-        self._pre_initialize_gemini_model()
 
         # Initialize trace suppression mechanism and UI update detection
         self._suppress_traces = False
@@ -544,13 +485,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.ocr_frame_cache_size_var.trace_add("write", self.settings_changed_callback)
         self.ocr_frame_cache_size_var.trace_add("write", self.on_ocr_frame_cache_size_change)
         self.enable_instant_cache_display_var.trace_add("write", self.settings_changed_callback)
-        self.google_api_key_var.trace_add("write", self.settings_changed_callback)
-        self.deepl_api_key_var.trace_add("write", self.settings_changed_callback)
-        self.deepl_model_type_var.trace_add("write", self.settings_changed_callback)
-        self.models_file_var.trace_add("write", self.settings_changed_callback)
-        self.google_file_cache_var.trace_add("write", self.settings_changed_callback)
-        self.deepl_file_cache_var.trace_add("write", self.settings_changed_callback)
-        self.deepl_context_window_var.trace_add("write", self.settings_changed_callback)
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
         self.ai_optimization_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
@@ -577,8 +511,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.target_font_bold_var.trace_add("write", self.settings_changed_callback)
         self.target_opacity_var.trace_add("write", self.settings_changed_callback)
         self.target_text_opacity_var.trace_add("write", self.settings_changed_callback)
-        self.num_beams_var.trace_add("write", self.settings_changed_callback)
-        self.marian_model_var.trace_add("write", self.settings_changed_callback)
         self.gui_language_var.trace_add("write", self.settings_changed_callback)
         self.ocr_model_var.trace_add("write", self.settings_changed_callback)
         self.ocr_model_var.trace_add("write", self.on_ocr_model_change)
@@ -590,89 +522,23 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.last_successful_translation_time = 0.0
         self.min_translation_interval = 0.3
         self.last_translation_time = time.monotonic()
-        self.google_api_client = None
-        self.deepl_api_client = None
-        self.google_api_key_visible = False
-        self.deepl_api_key_visible = False
-        self.gemini_api_key_visible = False
-        self.openai_api_key_visible = False
-        self.marian_translator = None
-        self.marian_source_lang = None
-        self.marian_target_lang = None
 
-        self.google_source_lang = self.config['Settings'].get('google_source_lang', 'auto')
-        self.google_target_lang = self.config['Settings'].get('google_target_lang', 'en')
-        self.deepl_source_lang = self.config['Settings'].get('deepl_source_lang', 'auto')
-        self.deepl_target_lang = self.config['Settings'].get('deepl_target_lang', 'EN-GB')
-        self.gemini_source_lang = self.config['Settings'].get('gemini_source_lang', 'en')
-        self.gemini_target_lang = self.config['Settings'].get('gemini_target_lang', 'pl')
-
-        # OpenAI language settings
-        self.openai_source_lang = self.config['Settings'].get('openai_source_lang', 'en')
-        self.openai_target_lang = self.config['Settings'].get('openai_target_lang', 'pl')
+        # Live language state (Custom AI only)
         self.custom_source_lang = self.config['Settings'].get('custom_source_lang', 'auto')
         self.custom_target_lang = self.config['Settings'].get('custom_target_lang', 'en')
+        if not self.custom_source_lang:
+            self.custom_source_lang = 'auto'
+        if not self.custom_target_lang:
+            self.custom_target_lang = 'en'
 
-        base_dir = self.base_dir
-
-        self.google_cache_file = os.path.join(base_dir, "googletrans_cache.txt")
-        self.deepl_cache_file = os.path.join(base_dir, "deepl_cache.txt")
-        self.gemini_cache_file = os.path.join(base_dir, "gemini_cache.txt")
-        self.openai_cache_file = os.path.join(base_dir, "openai_cache.txt")
-        self.custom_prompt_file = os.path.join(base_dir, "custom_prompt.txt")
-        log_debug(f"Cache file paths: Google: {self.google_cache_file}, DeepL: {self.deepl_cache_file}, Gemini: {self.gemini_cache_file}, OpenAI: {self.openai_cache_file}")
-
-        self.custom_prompt_text = ""
-        self.load_custom_prompt()
-
-        self.google_file_cache = {}
-        self.deepl_file_cache = {}
-        self.gemini_file_cache = {}
-        self.openai_file_cache = {}
-        self.translation_cache = {}
-        self.ocr_frame_cache = OCRFrameCache(self.ocr_frame_cache_size_var.get())
-
-        self.cache_manager = CacheManager(self)
-
-        log_debug(f"OCR model initialized: {self.ocr_model_var.get()}")
-
-        self.stable_threshold = self.stability_var.get()
-        self.clear_translation_timeout = self.clear_translation_timeout_var.get()
-
-        if not self.google_source_lang: self.google_source_lang = 'auto'
-        if not self.google_target_lang: self.google_target_lang = 'en'
-        if not self.deepl_source_lang: self.deepl_source_lang = 'auto'
-        if not self.deepl_target_lang: self.deepl_target_lang = 'EN-GB'
-
-        self.cache_manager.load_file_caches()
-
-        # Initialize debug logging state
-        set_debug_logging_enabled(self.debug_logging_enabled_var.get())
-
-        self.marian_models_dict, self.marian_models_list = self.configuration_handler.load_marian_models(localize_names=True)
-        self.configuration_handler.load_window_geometry()
-
-        # Initialize UI display StringVars here so they exist before create_settings_tab
-        self.source_display_var = tk.StringVar()
-        self.target_display_var = tk.StringVar()
-
-        configured_marian_path = self.marian_model_var.get()
-        initial_marian_display_name = ""
-        if configured_marian_path:
-            for display_name_iter, path_iter in self.marian_models_dict.items():
-                if path_iter == configured_marian_path:
-                    initial_marian_display_name = display_name_iter
-                    break
-        if not initial_marian_display_name and self.marian_models_list:
-            initial_marian_display_name = self.marian_models_list[0]
-            fallback_path = self.marian_models_dict.get(initial_marian_display_name, "")
-            if self.marian_model_var.get() != fallback_path :
-                 self.marian_model_var.set(fallback_path)
-        self.marian_model_display_var = tk.StringVar(value=initial_marian_display_name)
-
-        # This uses self.translation_model_names, so it must be after its definition
         initial_model_code_for_display = self.translation_model_var.get()
-        initial_display_name_for_model_combo = self.translation_model_names.get(initial_model_code_for_display, list(self.translation_model_names.values())[0])
+        if initial_model_code_for_display != 'custom_ai':
+            initial_model_code_for_display = 'custom_ai'
+            self.translation_model_var.set('custom_ai')
+        initial_display_name_for_model_combo = self.translation_model_names.get(
+            initial_model_code_for_display,
+            list(self.translation_model_names.values())[0],
+        )
         self.translation_model_display_var = tk.StringVar(value=initial_display_name_for_model_combo)
         active_translation_profile = self.custom_ai_profiles.get_active_profile("translation")
         if active_translation_profile:
@@ -681,7 +547,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         active_ocr_profile = self.custom_ai_profiles.get_active_profile("ocr")
         if active_ocr_profile:
             self.custom_ocr_profile_display_var.set(active_ocr_profile["name"])
-
 
         self.tab_control = ttk.Notebook(root)
         self.tab_control.pack(expand=True, fill="both", padx=5, pady=5)
@@ -694,39 +559,15 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.tab_debug = None
 
         active_model_for_init = self.translation_model_var.get()
-        initial_source_val, initial_target_val = 'auto', 'en'
+        initial_source_val = self.custom_source_lang or 'auto'
+        initial_target_val = self.custom_target_lang or 'en'
 
-        if active_model_for_init == 'custom_ai':
-            initial_source_val = self.custom_source_lang
-            initial_target_val = self.custom_target_lang
-        elif active_model_for_init == 'google_api':
-            initial_source_val = self.google_source_lang
-            initial_target_val = self.google_target_lang
-        elif active_model_for_init == 'deepl_api':
-            initial_source_val = self.deepl_source_lang
-            initial_target_val = self.deepl_target_lang
-        elif active_model_for_init == 'gemini_api':
-            initial_source_val = self.gemini_source_lang
-            initial_target_val = self.gemini_target_lang
-        elif self.is_openai_model(active_model_for_init):
-            initial_source_val = self.openai_source_lang
-            initial_target_val = self.openai_target_lang
-        elif active_model_for_init == 'marianmt':
-            if self.marian_model_display_var.get():
-                # ui_interaction_handler is now defined
-                parsed_marian_langs_init = self.ui_interaction_handler.parse_marian_model_for_langs(self.marian_model_display_var.get()) or \
-                                           self.ui_interaction_handler.parse_marian_model_for_langs(self.marian_model_var.get())
-                if parsed_marian_langs_init:
-                    initial_source_val = parsed_marian_langs_init[0]
-                    initial_target_val = parsed_marian_langs_init[1]
-                    self.marian_source_lang = initial_source_val
-                    self.marian_target_lang = initial_target_val
-                else:
-                    initial_source_val, initial_target_val = '', ''
-            else:
-                 initial_source_val, initial_target_val = '', ''
+        self.stable_threshold = self.stability_var.get()
+        self.clear_translation_timeout = self.clear_translation_timeout_var.get()
 
-
+        # UI display vars must exist before create_settings_tab builds language comboboxes.
+        self.source_display_var = tk.StringVar()
+        self.target_display_var = tk.StringVar()
         self.source_lang_var = tk.StringVar(value=initial_source_val)
         self.target_lang_var = tk.StringVar(value=initial_target_val)
 
@@ -737,6 +578,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         create_settings_tab(self)
         create_custom_prompt_tab(self)
         create_debug_tab(self)
+
+        # Restore saved main window geometry after widgets exist.
+        self.configuration_handler.load_window_geometry()
 
         # Handle tab change events to set focus appropriately
         def on_tab_changed(event):
@@ -1085,3 +929,10 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         except Exception as e:
             log_debug(f"Error checking widget existence: {e}")
             return False
+
+
+    def is_gemini_model(self, model_code=None):
+        return False
+
+    def is_openai_model(self, model_code=None):
+        return False

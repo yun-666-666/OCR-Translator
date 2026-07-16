@@ -142,7 +142,6 @@ class RuntimeContentFreeLogSourceTests(unittest.TestCase):
             "translated",
         }
         production_files = {
-            Path("handlers/cache_manager.py"): sensitive_names,
             Path("handlers/llm_provider_base.py"): sensitive_names,
             Path("handlers/translation_handler.py"): sensitive_names,
             Path("worker_threads.py"): sensitive_names,

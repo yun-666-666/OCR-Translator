@@ -22,8 +22,13 @@
 
 **Files:**
 - Modify: `app_logic.py`
+- Modify: `app_lifecycle.py`
 - Modify: `gui_settings_builder.py`
 - Modify: `handlers/ui_interaction_handler.py`
+- Delete: `handlers/cache_manager.py`
+- Modify: `handlers/__init__.py`
+- Modify: `handlers/translation_results.py`
+- Modify: `language_manager.py`
 - Modify: `app_configuration.py`
 - Modify: `handlers/configuration_handler.py`
 - Modify: `config_manager.py`
@@ -46,4 +51,3 @@
 - [ ] Perform a startup smoke that constructs and destroys `GameChangingTranslator`.
 - [ ] Record backup, commands, results, decisions, and remaining physical-provider cleanup.
 - [ ] Stage only intended files and create a local commit on `codex/remove-hidden-legacy-controls-20260716`.
-

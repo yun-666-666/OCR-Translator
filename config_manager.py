@@ -56,26 +56,13 @@ DEFAULT_CONFIG_SETTINGS = {
     'target_font_size': '18',
     'target_font_type': 'Arial',
     'target_font_bold': 'False',
-    'num_beams': '2',
-    'google_translate_api_key': '',
-    'deepl_api_key': '',
     'main_window_geometry': '619x728+6+23', # This seems to be a complete geometry string
     'main_window_width': '619',   # Keep these for individual component loading
     'main_window_height': '728',
     'main_window_x': '6',
     'main_window_y': '23',
     'translation_model': 'custom_ai', # Default model
-    'marian_models_file': '', # Will be set dynamically in load_app_config
-    'marian_model': 'Helsinki-NLP/opus-mt-fr-en', # Default MarianMT model
-    'google_file_cache': 'True',
-    'deepl_file_cache': 'True',
     'debug_logging_enabled': 'False',
-    # Model-specific language defaults
-    'google_source_lang': 'pl',
-    'google_target_lang': 'en',
-    'deepl_source_lang': 'DE',
-    'deepl_target_lang': 'EN-GB', # DeepL's code for English (British)
-    'deepl_model_type': 'latency_optimized', # Default to classic model for compatibility
     'gui_language':'English',
     # OCR Model Selection
     'ocr_model': 'paddleocr',
@@ -100,12 +87,6 @@ DEFAULT_CONFIG_SETTINGS = {
     'ocr_preview_height': '800',
     'ocr_preview_x': '100',
     'ocr_preview_y': '100',
-    # Gemini API settings
-    'gemini_model_name': 'gemini-2.5-flash-lite',
-    'gemini_model_temp': '0.0',
-    # Separate Gemini model selection for OCR and Translation
-    'gemini_translation_model': 'Gemini 2.5 Flash-Lite',
-    'gemini_ocr_model': 'Gemini 2.5 Flash-Lite',
     'keep_linebreaks': 'False',
     'translation_line_layout': TRANSLATION_LINE_LAYOUT_COMPACT,
     'translation_horizontal_centered': 'False',
@@ -184,11 +165,7 @@ def load_app_config():
     config_path = 'ocr_translator_config.ini'
     config = configparser.ConfigParser()
 
-    default_marian_models_path_val = get_resource_path("resources/MarianMT_select_models.csv")
-    log_debug(f"Default MarianMT models path set to: {default_marian_models_path_val}")
-
     dynamic_defaults = DEFAULT_CONFIG_SETTINGS.copy()
-    dynamic_defaults['marian_models_file'] = default_marian_models_path_val
 
     if os.path.exists(config_path):
         try:
@@ -242,7 +219,16 @@ def load_app_config():
     obsolete_keys = ['api_key', 'gpu_enabled', 'spell_check_enabled', 'word_segmentation_enabled',
                     'spell_check_language', 'subtitle_mode', 'parallel_processing', 'target_text_bg_color',
                     'nllb_beam_size', 'source_lang', 'target_lang', 'ocr_lang', 'gemini_fuzzy_detection',
-                    'input_token_cost', 'output_token_cost']  # Removed obsolete cost settings
+                    'input_token_cost', 'output_token_cost', 'num_beams',
+                    'marian_models_file', 'marian_model', 'marian_source_lang', 'marian_target_lang',
+                    'google_file_cache', 'deepl_file_cache', 'gemini_file_cache', 'openai_file_cache',
+                    'google_source_lang', 'google_target_lang', 'deepl_source_lang', 'deepl_target_lang',
+                    'deepl_model_type', 'deepl_context_window',
+                    'gemini_source_lang', 'gemini_target_lang', 'openai_source_lang', 'openai_target_lang',
+                    'gemini_model_name', 'gemini_model_temp', 'gemini_translation_model', 'gemini_ocr_model',
+                    'openai_translation_model', 'openai_ocr_model',
+                    'gemini_context_window', 'openai_context_window',
+                    'gemini_api_log_enabled', 'openai_api_log_enabled']  # legacy provider settings stripped
     obsolete_keys.extend([
         'tes' + 'seract_path',
         'image' + '_preprocessing_mode',
@@ -256,6 +242,19 @@ def load_app_config():
             del config_settings[key]
             settings_changed = True
             log_debug(f"Config: Removed obsolete '{key}' setting.")
+
+
+    # Force live product path: Custom AI translation + PaddleOCR/Custom AI OCR.
+    current_translation_model = str(config_settings.get('translation_model', 'custom_ai') or 'custom_ai')
+    if current_translation_model != 'custom_ai':
+        config_settings['translation_model'] = 'custom_ai'
+        settings_changed = True
+        log_debug(f"Config: Migrated translation_model '{current_translation_model}' to custom_ai")
+    current_ocr_model = str(config_settings.get('ocr_model', 'paddleocr') or 'paddleocr')
+    if current_ocr_model not in {'paddleocr', 'custom_ai'}:
+        config_settings['ocr_model'] = 'paddleocr'
+        settings_changed = True
+        log_debug(f"Config: Migrated ocr_model '{current_ocr_model}' to paddleocr")
 
     for key, value in dynamic_defaults.items():
         if key not in config_settings:
