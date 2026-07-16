@@ -2,18 +2,15 @@
 import configparser
 import os
 import sys
+from ai_optimization import (
+    AI_OPTIMIZATION_AUTO,
+    LEGACY_AI_SETTING_KEYS,
+    migrate_legacy_ai_optimization_settings,
+    migrate_legacy_ocr_defaults,
+    normalize_ai_optimization_mode,
+)
 from credential_store import create_default_credential_store
 from logger import log_debug
-from ocr_utils import (
-    API_OCR_IMAGE_DETAIL_DEFAULT,
-    API_OCR_IMAGE_FORMAT_DEFAULT,
-    API_OCR_IMAGE_MODE_DEFAULT,
-    API_OCR_IMAGE_QUALITY_DEFAULT,
-    normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_format,
-    normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
-)
 from resource_handler import get_resource_path
 
 PROVIDER_CREDENTIAL_SERVICE = "OCR-Translator-Providers"
@@ -36,7 +33,6 @@ def normalize_translation_line_layout(value):
 
 DEFAULT_CONFIG_SETTINGS = {
     'scan_interval': '300',
-    'capture_backend': 'auto',
     'ocr_frame_cache_size': '64',
     'enable_instant_cache_display': 'True',
     'stability_threshold': '0',
@@ -86,7 +82,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'paddleocr_ocr_version': 'PP-OCRv6',
     'paddleocr_model_size': 'tiny',
     'paddleocr_device': 'cpu',
-    'paddleocr_min_score': '0.35',
+    'paddleocr_min_score': '0.45',
     'paddleocr_upscale': '1.0',
     'paddleocr_text_det_limit_side_len': '960',
     'paddleocr_text_det_limit_type': 'max',
@@ -94,12 +90,8 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_ai_profiles_file': 'custom_ai_profiles.json',
     'custom_source_lang': 'auto',
     'custom_target_lang': 'en',
-    'custom_ai_latency_mode': 'safe',
+    'ai_optimization_mode': AI_OPTIMIZATION_AUTO,
     'custom_ai_submit_interval_ms': '300',
-    'custom_ai_ocr_image_format': API_OCR_IMAGE_FORMAT_DEFAULT,
-    'custom_ai_ocr_image_mode': API_OCR_IMAGE_MODE_DEFAULT,
-    'custom_ai_ocr_image_quality': str(API_OCR_IMAGE_QUALITY_DEFAULT),
-    'custom_ai_ocr_image_detail': API_OCR_IMAGE_DETAIL_DEFAULT,
     # OCR Preview window geometry
     'ocr_preview_geometry': '600x800+100+100',
     'ocr_preview_width': '600',
@@ -212,6 +204,26 @@ def load_app_config():
     settings_changed = False
     config_settings = config['Settings']
 
+    legacy_ai_keys_present = (
+        "ai_optimization_mode" not in config_settings
+        or "capture_backend" in config_settings
+        or any(key in config_settings for key in LEGACY_AI_SETTING_KEYS)
+    )
+    migrated_ai_mode = migrate_legacy_ai_optimization_settings(config_settings)
+    if legacy_ai_keys_present:
+        settings_changed = True
+        log_debug(
+            "Config: Migrated legacy AI response/image settings to "
+            f"ai_optimization_mode='{migrated_ai_mode}'"
+        )
+
+    if migrate_legacy_ocr_defaults(config_settings):
+        settings_changed = True
+        log_debug(
+            "Config: Migrated former OCR defaults to "
+            "stability_threshold='0' and paddleocr_min_score='0.45'"
+        )
+
     if 'translation_line_layout' not in config_settings:
         legacy_keep_linebreaks = config_settings.getboolean(
             'keep_linebreaks', fallback=False
@@ -275,39 +287,20 @@ def load_app_config():
         settings_changed = True
         log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'paddleocr'")
 
-    current_latency_mode = config_settings.get('custom_ai_latency_mode', 'safe')
-    if current_latency_mode not in ['none', 'safe', 'stream', 'race', 'adaptive']:
-        config_settings['custom_ai_latency_mode'] = 'safe'
+    current_ai_optimization_mode = config_settings.get(
+        'ai_optimization_mode', AI_OPTIMIZATION_AUTO
+    )
+    normalized_ai_optimization_mode = normalize_ai_optimization_mode(
+        current_ai_optimization_mode
+    )
+    if normalized_ai_optimization_mode != current_ai_optimization_mode:
+        config_settings['ai_optimization_mode'] = normalized_ai_optimization_mode
         settings_changed = True
-        log_debug(f"Config: Invalid Custom AI latency mode '{current_latency_mode}' changed to 'safe'")
-
-    current_image_format = config_settings.get('custom_ai_ocr_image_format', API_OCR_IMAGE_FORMAT_DEFAULT)
-    normalized_image_format = normalize_api_ocr_image_format(current_image_format)
-    if normalized_image_format != current_image_format:
-        config_settings['custom_ai_ocr_image_format'] = normalized_image_format
-        settings_changed = True
-        log_debug(f"Config: Invalid Custom AI OCR image format '{current_image_format}' changed to '{normalized_image_format}'")
-
-    current_image_mode = config_settings.get('custom_ai_ocr_image_mode', API_OCR_IMAGE_MODE_DEFAULT)
-    normalized_image_mode = normalize_api_ocr_image_mode(current_image_mode)
-    if normalized_image_mode != current_image_mode:
-        config_settings['custom_ai_ocr_image_mode'] = normalized_image_mode
-        settings_changed = True
-        log_debug(f"Config: Invalid Custom AI OCR image mode '{current_image_mode}' changed to '{normalized_image_mode}'")
-
-    current_image_quality = config_settings.get('custom_ai_ocr_image_quality', str(API_OCR_IMAGE_QUALITY_DEFAULT))
-    normalized_image_quality = str(normalize_api_ocr_image_quality(current_image_quality))
-    if normalized_image_quality != str(current_image_quality):
-        config_settings['custom_ai_ocr_image_quality'] = normalized_image_quality
-        settings_changed = True
-        log_debug(f"Config: Invalid Custom AI OCR image quality '{current_image_quality}' changed to '{normalized_image_quality}'")
-
-    current_image_detail = config_settings.get('custom_ai_ocr_image_detail', API_OCR_IMAGE_DETAIL_DEFAULT)
-    normalized_image_detail = normalize_api_ocr_image_detail(current_image_detail)
-    if normalized_image_detail != current_image_detail:
-        config_settings['custom_ai_ocr_image_detail'] = normalized_image_detail
-        settings_changed = True
-        log_debug(f"Config: Invalid Custom AI OCR image detail '{current_image_detail}' changed to '{normalized_image_detail}'")
+        log_debug(
+            "Config: Invalid AI optimization mode "
+            f"'{current_ai_optimization_mode}' changed to "
+            f"'{normalized_ai_optimization_mode}'"
+        )
 
     if migrate_provider_api_keys_to_credentials(config_settings):
         settings_changed = True
