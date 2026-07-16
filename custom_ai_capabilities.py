@@ -943,7 +943,14 @@ class CustomAICapabilitiesMixin:
             latency_mode=latency_mode,
             stream=stream,
         )
-        linebreak_instruction = "Preserve line breaks using <br>." if keep_linebreaks else "Return one concise translated text."
+        linebreak_instruction = (
+            "Preserve line breaks using <br>."
+            if keep_linebreaks
+            else (
+                "Return one concise single-line translated text. "
+                "Do not use <br> or newline characters."
+            )
+        )
         system_parts = [
             "You are a translation engine for on-screen game subtitles.",
             f"Translate from {source_lang or 'auto'} to {target_lang}.",

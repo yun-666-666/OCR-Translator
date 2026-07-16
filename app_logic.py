@@ -21,6 +21,8 @@ from config_manager import (
     save_app_config,
     load_ocr_preview_geometry,
     save_ocr_preview_geometry,
+    normalize_translation_line_layout,
+    TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES,
 )
 from gui_builder import create_main_tab, create_settings_tab, create_custom_prompt_tab, create_debug_tab
 from overlay_manager import (
@@ -267,7 +269,22 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.target_text_colour_var = tk.StringVar(value=self.config['Settings'].get('target_text_colour', '#FFFFFF'))
         self.debug_logging_enabled_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'debug_logging_enabled', fallback=True))
         self.gui_language_var = tk.StringVar(value=saved_language_display)
-        self.keep_linebreaks_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'keep_linebreaks', fallback=False))
+        self.translation_line_layout_var = tk.StringVar(
+            value=normalize_translation_line_layout(
+                self.config['Settings'].get('translation_line_layout')
+            )
+        )
+        self.translation_horizontal_centered_var = tk.BooleanVar(
+            value=self.config.getboolean(
+                'Settings', 'translation_horizontal_centered', fallback=False
+            )
+        )
+        self.keep_linebreaks_var = tk.BooleanVar(
+            value=(
+                self.translation_line_layout_var.get()
+                == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
+            )
+        )
         self.capture_backend_var = tk.StringVar(value=self.config['Settings'].get('capture_backend', 'auto'))
         self.ocr_frame_cache_size_var = tk.IntVar(value=int(self.config['Settings'].get('ocr_frame_cache_size', '64')))
         self.enable_instant_cache_display_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'enable_instant_cache_display', fallback=True))
@@ -517,6 +534,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.target_colour_var.trace_add("write", self.settings_changed_callback)
         self.target_text_colour_var.trace_add("write", self.settings_changed_callback)
         self.debug_logging_enabled_var.trace_add("write", self.settings_changed_callback)
+        self.translation_line_layout_var.trace_add("write", self.settings_changed_callback)
+        self.translation_horizontal_centered_var.trace_add("write", self.settings_changed_callback)
         self.keep_linebreaks_var.trace_add("write", self.settings_changed_callback)
         self.capture_backend_var.trace_add("write", self.settings_changed_callback)
         self.ocr_frame_cache_size_var.trace_add("write", self.settings_changed_callback)

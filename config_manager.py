@@ -24,6 +24,16 @@ PROVIDER_API_KEY_SETTINGS = (
     'openai_api_key',
 )
 
+TRANSLATION_LINE_LAYOUT_COMPACT = 'compact'
+TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES = 'preserve_source_lines'
+
+
+def normalize_translation_line_layout(value):
+    normalized = str(value or '').strip().lower()
+    if normalized == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES:
+        return TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
+    return TRANSLATION_LINE_LAYOUT_COMPACT
+
 DEFAULT_CONFIG_SETTINGS = {
     'scan_interval': '300',
     'capture_backend': 'auto',
@@ -102,6 +112,8 @@ DEFAULT_CONFIG_SETTINGS = {
     'gemini_translation_model': 'Gemini 2.5 Flash-Lite',
     'gemini_ocr_model': 'Gemini 2.5 Flash-Lite',
     'keep_linebreaks': 'False',
+    'translation_line_layout': TRANSLATION_LINE_LAYOUT_COMPACT,
+    'translation_horizontal_centered': 'False',
     'custom_context_window': '5'
 }
 
@@ -199,6 +211,18 @@ def load_app_config():
     settings_changed = False
     config_settings = config['Settings']
 
+    if 'translation_line_layout' not in config_settings:
+        legacy_keep_linebreaks = config_settings.getboolean(
+            'keep_linebreaks', fallback=False
+        )
+        config_settings['translation_line_layout'] = (
+            TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
+            if legacy_keep_linebreaks
+            else TRANSLATION_LINE_LAYOUT_COMPACT
+        )
+        settings_changed = True
+        log_debug("Config: Migrated legacy keep_linebreaks to translation_line_layout")
+
     # Obsolete keys check (add 'source_lang', 'target_lang', 'ocr_lang' if you are sure to remove them)
     obsolete_keys = ['api_key', 'gpu_enabled', 'spell_check_enabled', 'word_segmentation_enabled',
                     'spell_check_language', 'subtitle_mode', 'parallel_processing', 'target_text_bg_color',
@@ -223,6 +247,26 @@ def load_app_config():
             config_settings[key] = value
             settings_changed = True
             log_debug(f"Config: Added missing key '{key}' with default value '{value}'.")
+
+    current_line_layout = config_settings.get(
+        'translation_line_layout', TRANSLATION_LINE_LAYOUT_COMPACT
+    )
+    normalized_line_layout = normalize_translation_line_layout(current_line_layout)
+    if normalized_line_layout != current_line_layout:
+        config_settings['translation_line_layout'] = normalized_line_layout
+        settings_changed = True
+        log_debug(
+            "Config: Invalid translation line layout "
+            f"'{current_line_layout}' changed to '{normalized_line_layout}'"
+        )
+
+    legacy_linebreak_value = str(
+        normalized_line_layout == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
+    )
+    if config_settings.get('keep_linebreaks') != legacy_linebreak_value:
+        config_settings['keep_linebreaks'] = legacy_linebreak_value
+        settings_changed = True
+        log_debug("Config: Synchronized legacy keep_linebreaks with translation layout")
 
     current_ocr_model = config_settings.get('ocr_model', 'paddleocr')
     if current_ocr_model not in ['paddleocr', 'custom_ai']:

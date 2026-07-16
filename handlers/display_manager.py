@@ -249,6 +249,26 @@ class DisplayManager:
             # Convert <br> tags to newlines for display
             new_text_to_display = new_text_to_display.replace('<br>', '\n')
 
+            translation_layout_var = getattr(
+                self.app, 'translation_line_layout_var', None
+            )
+            translation_line_layout = (
+                translation_layout_var.get()
+                if translation_layout_var is not None
+                else 'preserve_source_lines'
+            )
+            preserve_linebreaks = (
+                translation_line_layout == 'preserve_source_lines'
+            )
+            horizontal_centered_var = getattr(
+                self.app, 'translation_horizontal_centered_var', None
+            )
+            horizontal_centered = bool(
+                horizontal_centered_var.get()
+                if horizontal_centered_var is not None
+                else False
+            )
+
             # --- FIX: Directly use the target language code from the correct variable ---
             target_lang_code = self.app.target_lang_var.get()
             log_debug_coalesced(
@@ -281,6 +301,8 @@ class DisplayManager:
                     text_color,
                     font_size,
                     font_family=font_type,
+                    preserve_linebreaks=preserve_linebreaks,
+                    horizontal_centered=horizontal_centered,
                 )
             else:
                 # Fallback to tkinter handling

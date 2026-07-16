@@ -102,6 +102,10 @@ preview_btn,Podgląd
 source_color_label,Kolor obszaru źródłowego:
 target_color_label,Kolor obszaru tłumaczenia:
 target_text_color_label,Kolor tekstu tłumaczenia:
+translation_line_layout_label,Układ napisów tłumaczenia:
+translation_line_layout_compact,Preferuj jedną linię
+translation_line_layout_preserve,Dopasuj liczbę linii do napisów źródłowych
+translation_horizontal_centered,Wyśrodkuj tłumaczone napisy w poziomie
 font_size_label,Rozmiar czcionki okna tłumaczenia:
 font_type_label,Typ czcionki okna tłumaczenia:
 opacity_label,Nieprzezroczystość:

@@ -106,6 +106,8 @@ if PYSIDE6_AVAILABLE:
             self._fg_color = "#ecf0f1"
             self._current_text = ""
             self._current_language = None
+            self._preserve_linebreaks = True
+            self._horizontal_centered = False
             self.setup_widget()
 
         def setup_widget(self):
@@ -177,6 +179,8 @@ if PYSIDE6_AVAILABLE:
             text_color: str = "#ecf0f1",
             font_size: int = 14,
             font_family=None,
+            preserve_linebreaks=True,
+            horizontal_centered=False,
         ):
             """Set text content while respecting RTL/LTR and applying inline HTML."""
             self._apply_font_if_changed(font_family, font_size)
@@ -185,18 +189,18 @@ if PYSIDE6_AVAILABLE:
             self._current_text = text
             self._current_language = language_code
             self._bg_color = bg_color
+            self._preserve_linebreaks = bool(preserve_linebreaks)
+            self._horizontal_centered = bool(horizontal_centered)
             # self._fg_color = text_color
             
-            # Normalize whitespace WHILE PRESERVING intentional line breaks (SURGICAL FIX)
-            processed = text.replace('\r\n', '\n').replace('\r', '\n')
-            # Split by lines, clean whitespace within each line, then rejoin with newlines
-            lines = processed.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                # Clean excessive whitespace within each line, but preserve the line structure
-                cleaned_line = ' '.join(line.split())  # This only affects whitespace within the line
-                cleaned_lines.append(cleaned_line)
-            processed = '\n'.join(cleaned_lines)
+            processed = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+            processed = re.sub(r'<br\s*/?>', '\n', processed, flags=re.IGNORECASE)
+            if self._preserve_linebreaks:
+                processed = '\n'.join(
+                    ' '.join(line.split()) for line in processed.split('\n')
+                )
+            else:
+                processed = ' '.join(processed.split())
 
             # Determine direction heuristically if language_code not provided
             is_rtl = False
@@ -216,16 +220,27 @@ if PYSIDE6_AVAILABLE:
             # HTML ignores \n characters, so we need to convert them to <br> tags
             html_processed = processed.replace('\n', '<br>')
 
+            alignment_css = (
+                'center'
+                if self._horizontal_centered
+                else ('right' if is_rtl else 'left')
+            )
             if is_rtl:
                 self.setLayoutDirection(Qt.RightToLeft)
-                html_text = f"""<div style="text-align: right; direction: rtl; font-family: '{self.font().family()}'; font-size: {self.font().pointSize()}pt; color: {self._fg_color};">
-                {html_processed}
-                </div>"""
+                html_text = (
+                    f"<div style=\"text-align: {alignment_css}; direction: rtl; "
+                    f"font-family: '{self.font().family()}'; font-size: "
+                    f"{self.font().pointSize()}pt; color: {self._fg_color};\""
+                    f">{html_processed}</div>"
+                )
             else:
                 self.setLayoutDirection(Qt.LeftToRight)
-                html_text = f"""<div style="text-align: left; direction: ltr; font-family: '{self.font().family()}'; font-size: {self.font().pointSize()}pt; color: {self._fg_color};">
-                {html_processed}
-                </div>"""
+                html_text = (
+                    f"<div style=\"text-align: {alignment_css}; direction: ltr; "
+                    f"font-family: '{self.font().family()}'; font-size: "
+                    f"{self.font().pointSize()}pt; color: {self._fg_color};\""
+                    f">{html_processed}</div>"
+                )
 
             # Use HTML insertion for richer control
             self.setHtml(html_text)
@@ -234,7 +249,9 @@ if PYSIDE6_AVAILABLE:
             cursor = self.textCursor()
             cursor.select(QTextCursor.Document)
             block_fmt = QTextBlockFormat()
-            if is_rtl:
+            if self._horizontal_centered:
+                block_fmt.setAlignment(Qt.AlignHCenter)
+            elif is_rtl:
                 block_fmt.setAlignment(Qt.AlignRight | Qt.AlignAbsolute)
             else:
                 block_fmt.setAlignment(Qt.AlignLeft | Qt.AlignAbsolute)
@@ -309,7 +326,9 @@ if PYSIDE6_AVAILABLE:
                             self._current_language, 
                             getattr(self, '_bg_color', '#2c3e50'), 
                             fg_color, 
-                            self.font().pointSize()
+                            self.font().pointSize(),
+                            preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
+                            horizontal_centered=getattr(self, '_horizontal_centered', False),
                         )
                     log_debug(f"PySide RTLTextDisplay: Updated text color to {fg_color}")
                 except Exception as e:
@@ -337,6 +356,8 @@ if PYSIDE6_AVAILABLE:
                                 getattr(self, '_fg_color', '#ecf0f1'), 
                                 font_size,
                                 font_family=font_family,
+                                preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
+                                horizontal_centered=getattr(self, '_horizontal_centered', False),
                             )
                     else:
                         log_debug(f"Unsupported font specification format: {font_spec}")

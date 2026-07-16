@@ -4,7 +4,11 @@ import time
 import re
 import tkinter as tk
 from tkinter import messagebox, colorchooser
-from config_manager import save_app_config
+from config_manager import (
+    TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES,
+    normalize_translation_line_layout,
+    save_app_config,
+)
 from logger import (
     clear_debug_log as clear_runtime_debug_log,
     log_debug,
@@ -1259,7 +1263,17 @@ class UIInteractionHandler:
             cfg['target_text_opacity'] = str(self.app.target_text_opacity_var.get())
             cfg['gui_language'] = self.app.ui_lang.normalize_display_name(self.app.gui_language_var.get())
             cfg['ocr_model'] = self.app.ocr_model_var.get()  # OCR Model Selection (Phase 2)
-            cfg['keep_linebreaks'] = str(self.app.keep_linebreaks_var.get()) # Add this line
+            translation_line_layout = normalize_translation_line_layout(
+                self.app.translation_line_layout_var.get()
+            )
+            cfg['translation_line_layout'] = translation_line_layout
+            cfg['translation_horizontal_centered'] = str(
+                self.app.translation_horizontal_centered_var.get()
+            )
+            cfg['keep_linebreaks'] = str(
+                translation_line_layout
+                == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
+            )
 
             cfg['google_translate_api_key'] = self.app.google_api_key_var.get()
             cfg['deepl_api_key'] = self.app.deepl_api_key_var.get()

@@ -53,6 +53,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             "#ffffff",
             20,
             font_family="Microsoft YaHei",
+            preserve_linebreaks=True,
+            horizontal_centered=False,
         )
         translation_text.configure.assert_not_called()
 
@@ -97,6 +99,8 @@ class DisplayManagerPySideRenderTests(unittest.TestCase):
             "#ffffff",
             20,
             font_family="Microsoft YaHei",
+            preserve_linebreaks=True,
+            horizontal_centered=False,
         )
 
 

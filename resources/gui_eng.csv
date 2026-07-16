@@ -100,6 +100,10 @@ preview_btn,Preview
 source_color_label,Source Area Colour:
 target_color_label,Target Area Colour:
 target_text_color_label,Target Text Colour:
+translation_line_layout_label,Translation subtitle layout:
+translation_line_layout_compact,Prefer one line
+translation_line_layout_preserve,Match source subtitle lines
+translation_horizontal_centered,Center translated subtitle horizontally
 font_size_label,Target Window Font Size:
 font_type_label,Target Window Font Type:
 opacity_label,Opacity:

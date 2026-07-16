@@ -1337,16 +1337,60 @@ def create_settings_tab(app):
         app.marian_explanation_labels.append(lbl)
     current_row = row_offset + len(texts)
 
-    app.keep_linebreaks_label = ttk.Label(frame, text=app.ui_lang.get_label("keep_linebreaks_label", "Keep Linebreaks"))
-    app.keep_linebreaks_label.grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
+    ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "translation_line_layout_label", "Translation subtitle layout:"
+        ),
+    ).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
+    translation_layout_options = [
+        (
+            "compact",
+            app.ui_lang.get_label(
+                "translation_line_layout_compact", "Prefer one line"
+            ),
+        ),
+        (
+            "preserve_source_lines",
+            app.ui_lang.get_label(
+                "translation_line_layout_preserve", "Match source subtitle lines"
+            ),
+        ),
+    ]
+    translation_layout_display_by_value = dict(translation_layout_options)
+    translation_layout_value_by_display = {
+        display: value for value, display in translation_layout_options
+    }
+    app.translation_line_layout_display_var = tk.StringVar(
+        value=translation_layout_display_by_value.get(
+            app.translation_line_layout_var.get(), translation_layout_options[0][1]
+        )
+    )
+    app.translation_line_layout_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.translation_line_layout_display_var,
+        values=[display for _, display in translation_layout_options],
+        width=25,
+        state="readonly",
+    )
+    app.translation_line_layout_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
 
-    def on_keep_linebreaks_clicked():
-        # Schedule focus shift to the parent tab frame (app.tab_settings) to remove dotted focus frame
-        if app.keep_linebreaks_checkbox.winfo_exists() and app.tab_settings.winfo_exists():
-            app.keep_linebreaks_checkbox.after_idle(app.tab_settings.focus_set)
+    def on_translation_line_layout_changed(_event):
+        selected_display = app.translation_line_layout_display_var.get()
+        selected_value = translation_layout_value_by_display.get(
+            selected_display, "compact"
+        )
+        app.translation_line_layout_var.set(selected_value)
+        app.keep_linebreaks_var.set(selected_value == "preserve_source_lines")
+        if app.tab_settings.winfo_exists():
+            app.translation_line_layout_combobox.after_idle(app.tab_settings.focus_set)
 
-    app.keep_linebreaks_checkbox = ttk.Checkbutton(frame, variable=app.keep_linebreaks_var, command=on_keep_linebreaks_clicked)
-    app.keep_linebreaks_checkbox.grid(row=current_row, column=1, padx=5, pady=5, sticky="w")
+    app.translation_line_layout_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_translation_line_layout_changed),
+    )
     current_row += 1
 
     ttk.Label(frame, text=app.ui_lang.get_label("capture_backend_label", "Capture Backend")).grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
@@ -1510,6 +1554,19 @@ def create_settings_tab(app):
     font_type_combobox.bind('<<ComboboxSelected>>', create_combobox_handler_wrapper(on_font_type_change))
     current_row += 1
 
+    app.translation_horizontal_centered_checkbox = ttk.Checkbutton(
+        frame,
+        text=app.ui_lang.get_label(
+            "translation_horizontal_centered",
+            "Center translated subtitle horizontally",
+        ),
+        variable=app.translation_horizontal_centered_var,
+    )
+    app.translation_horizontal_centered_checkbox.grid(
+        row=current_row, column=0, columnspan=3, padx=5, pady=5, sticky="w"
+    )
+    current_row += 1
+
     # Opacity controls
     opacity_frame = ttk.Frame(frame)
     opacity_frame.grid(row=current_row, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
@@ -1572,4 +1629,3 @@ def create_settings_tab(app):
     app.settings_tab_save_button = save_settings_button
 
     frame.columnconfigure(1, weight=1)
-
