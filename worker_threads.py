@@ -14,6 +14,7 @@ import traceback
 from datetime import datetime
 
 from logger import log_debug, log_debug_coalesced, summarize_text_for_log
+from ai_optimization import ai_ocr_route_metric_name
 from ocr_utils import (
     capture_screen_region,
     build_capture_signature, build_ocr_frame_cache_key,
@@ -477,6 +478,22 @@ def run_api_ocr(app, screenshot_pil):
                 source_lang = app.source_lang_var.get()
 
         ocr_cache_key = None
+        image_decision = None
+        image_decision_getter = getattr(
+            app,
+            "get_ai_ocr_image_decision",
+            None,
+        )
+        if callable(image_decision_getter):
+            try:
+                image_decision = image_decision_getter(
+                    image_size=screenshot_pil.size
+                )
+            except Exception as e:
+                log_debug(
+                    "Could not resolve API OCR image contract: "
+                    f"{type(e).__name__} - {e}"
+                )
         if hasattr(app, 'ocr_frame_cache'):
             frame_hash = _get_screenshot_frame_hash(screenshot_pil)
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
@@ -489,6 +506,7 @@ def run_api_ocr(app, screenshot_pil):
                     app,
                     provider_name,
                     image_size=screenshot_pil.size,
+                    image_decision=image_decision,
                 ),
                 screenshot_pil.size,
                 region_origin=region_origin,
@@ -515,7 +533,13 @@ def run_api_ocr(app, screenshot_pil):
         encoded_image = None
         metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
         if callable(metadata_encoder):
-            encoded_image = metadata_encoder(screenshot_pil)
+            if image_decision is not None:
+                encoded_image = metadata_encoder(
+                    screenshot_pil,
+                    decision=image_decision,
+                )
+            else:
+                encoded_image = metadata_encoder(screenshot_pil)
         else:
             legacy_bytes = app.convert_to_webp_for_api(screenshot_pil)
             if legacy_bytes:
@@ -536,6 +560,18 @@ def run_api_ocr(app, screenshot_pil):
         image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
         image_format = getattr(encoded_image, 'image_format', 'webp')
         image_detail = getattr(encoded_image, 'image_detail', 'auto')
+        route_metric_name = None
+        if provider_name == "custom_ai":
+            try:
+                active_profile = app.custom_ai_profiles.get_active_profile(
+                    "ocr"
+                )
+                if active_profile:
+                    route_metric_name = ai_ocr_route_metric_name(
+                        active_profile
+                    )
+            except Exception:
+                pass
 
         app.batch_sequence_counter += 1
         sequence_number = app.batch_sequence_counter
@@ -554,6 +590,7 @@ def run_api_ocr(app, screenshot_pil):
                 image_mime_type,
                 image_detail,
                 image_format,
+                route_metric_name,
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
@@ -573,6 +610,7 @@ def process_api_ocr_async(
     image_mime_type="image/webp",
     image_detail="auto",
     image_format="webp",
+    route_metric_name=None,
 ):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
@@ -594,7 +632,11 @@ def process_api_ocr_async(
             image_detail=image_detail,
             image_format=image_format,
         )
-        _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
+        ocr_duration = time.monotonic() - ocr_start_time
+        _record_metric_timing(app, "ocr_duration", ocr_duration)
+        _record_metric_timing(app, "api_ocr_duration", ocr_duration)
+        if route_metric_name:
+            _record_metric_timing(app, route_metric_name, ocr_duration)
 
         log_debug(
             f"{provider_name} OCR batch {sequence_number} completed, "

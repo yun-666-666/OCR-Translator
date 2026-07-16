@@ -8,6 +8,7 @@ from tkinter import messagebox
 
 from ai_optimization import (
     AI_OPTIMIZATION_AUTO,
+    ai_ocr_route_metric_name,
     normalize_ai_optimization_mode,
     resolve_ai_ocr_image_policy,
     resolve_ai_response_mode,
@@ -478,11 +479,13 @@ class AppConfigurationMixin:
         metrics = getattr(self, "runtime_metrics", None)
         if metrics is not None:
             try:
-                timing = (
-                    metrics.snapshot()
-                    .get("timings", {})
-                    .get("ocr_duration", {})
+                timings = metrics.snapshot().get("timings", {})
+                metric_name = (
+                    ai_ocr_route_metric_name(profile)
+                    if profile
+                    else "api_ocr_duration"
                 )
+                timing = timings.get(metric_name, {})
                 route_p90_seconds = timing.get("p90", 0.0)
                 route_sample_count = timing.get("count", 0)
             except Exception:

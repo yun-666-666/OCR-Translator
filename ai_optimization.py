@@ -1,6 +1,7 @@
 """Unified Custom AI response and OCR image optimization policy."""
 
 from dataclasses import dataclass
+import hashlib
 import threading
 from urllib.parse import urlsplit
 
@@ -112,6 +113,13 @@ def _profile_route_key(profile):
     )
 
 
+def ai_ocr_route_metric_name(profile):
+    """Return a secret-free metric key scoped to one OCR route."""
+    route_key = "\x1f".join(_profile_route_key(profile))
+    digest = hashlib.sha256(route_key.encode("utf-8")).hexdigest()[:12]
+    return f"api_ocr_duration:{digest}"
+
+
 def _is_direct_xai_profile(profile):
     if not isinstance(profile, dict):
         return False
@@ -204,18 +212,24 @@ def resolve_ai_ocr_image_policy(
         image_quality = 85
         image_detail = "auto"
         reason = "auto_balanced"
-        if route_samples >= 5 and route_p90 >= 3.5:
+        geometry_needs_detail = (
+            (height and height <= 160)
+            or (width * height >= 1_500_000)
+            or (
+                height
+                and width >= 960
+                and width / max(1, height) >= 7.0
+            )
+        )
+        if geometry_needs_detail:
+            image_quality = 90
+            image_detail = "high"
+            reason = "auto_text_detail"
+        elif route_samples >= 5 and route_p90 >= 3.5:
             image_mode = "small_grayscale_webp"
             image_quality = 75
             image_detail = "low"
             reason = "auto_slow_route"
-        elif height and (
-            height <= 160
-            or (width >= 960 and width / max(1, height) >= 7.0)
-        ):
-            image_quality = 90
-            image_detail = "high"
-            reason = "auto_thin_text"
 
     if _is_direct_xai_profile(profile):
         image_format = "jpeg"
@@ -249,6 +263,16 @@ def resolve_ai_ocr_image_policy(
 def looks_like_unsupported_image_format_error(error_text, image_format):
     text = str(error_text or "").strip().lower()
     normalized_format = normalize_api_ocr_image_format(image_format)
+    if "only " in text and "support" in text:
+        accepted_formats = set()
+        if "jpeg" in text or "jpg" in text:
+            accepted_formats.add("jpeg")
+        if "png" in text:
+            accepted_formats.add("png")
+        if "webp" in text:
+            accepted_formats.add("webp")
+        if accepted_formats:
+            return normalized_format not in accepted_formats
     if normalized_format not in text:
         return False
     return any(

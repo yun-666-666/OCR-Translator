@@ -5,9 +5,11 @@ from ai_optimization import (
     AI_OPTIMIZATION_QUALITY,
     AI_OPTIMIZATION_SPEED,
     AiOcrImageCapabilityMemory,
+    ai_ocr_route_metric_name,
     migrate_legacy_ai_optimization_settings,
     migrate_legacy_ocr_defaults,
     normalize_ai_optimization_mode,
+    looks_like_unsupported_image_format_error,
     resolve_ai_ocr_image_policy,
     resolve_ai_response_mode,
 )
@@ -127,8 +129,32 @@ class AiResponsePolicyTests(unittest.TestCase):
 
         self.assertEqual(decision.mode, "race")
 
+    def test_adaptive_primary_cooldown_with_one_alternative_stays_safe(self):
+        advisor = CustomAILatencyModeAdvisor(min_samples=3)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=1,
+            primary_cooldown_seconds=10.0,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+
 
 class AiOcrImagePolicyTests(unittest.TestCase):
+    def test_route_metric_name_is_profile_scoped_and_sanitized(self):
+        first = ai_ocr_route_metric_name(
+            {"base_url": "https://a.example/v1", "model": "vision-a"}
+        )
+        second = ai_ocr_route_metric_name(
+            {"base_url": "https://b.example/v1", "model": "vision-b"}
+        )
+
+        self.assertTrue(first.startswith("api_ocr_duration:"))
+        self.assertNotEqual(first, second)
+        self.assertNotIn("example", first)
+
     def test_speed_policy_uses_small_low_detail_webp(self):
         decision = resolve_ai_ocr_image_policy(
             "speed",
@@ -154,7 +180,7 @@ class AiOcrImagePolicyTests(unittest.TestCase):
         decision = resolve_ai_ocr_image_policy(
             "auto",
             profile={"base_url": "https://relay.example/v1"},
-            image_size=(1280, 180),
+            image_size=(640, 240),
             route_p90_seconds=4.5,
             route_sample_count=8,
         )
@@ -172,6 +198,33 @@ class AiOcrImagePolicyTests(unittest.TestCase):
 
         self.assertEqual(decision.image_detail, "high")
         self.assertEqual(decision.image_quality, 90)
+
+    def test_auto_thin_or_large_image_stays_high_detail_on_slow_route(self):
+        thin = resolve_ai_ocr_image_policy(
+            "auto",
+            profile={"base_url": "https://relay.example/v1"},
+            image_size=(1280, 100),
+            route_p90_seconds=4.5,
+            route_sample_count=8,
+        )
+        large = resolve_ai_ocr_image_policy(
+            "auto",
+            profile={"base_url": "https://relay.example/v1"},
+            image_size=(1920, 1080),
+            route_p90_seconds=4.5,
+            route_sample_count=8,
+        )
+        wide = resolve_ai_ocr_image_policy(
+            "auto",
+            profile={"base_url": "https://relay.example/v1"},
+            image_size=(1920, 200),
+            route_p90_seconds=4.5,
+            route_sample_count=8,
+        )
+
+        self.assertEqual(thin.image_detail, "high")
+        self.assertEqual(large.image_detail, "high")
+        self.assertEqual(wide.image_detail, "high")
 
     def test_quality_policy_uses_lossless_png_high_detail(self):
         decision = resolve_ai_ocr_image_policy(
@@ -211,6 +264,20 @@ class AiOcrImagePolicyTests(unittest.TestCase):
 
         self.assertTrue(memory.is_format_unsupported(rejected, "webp"))
         self.assertFalse(memory.is_format_unsupported(healthy, "webp"))
+
+    def test_only_supported_format_error_rejects_current_format(self):
+        self.assertTrue(
+            looks_like_unsupported_image_format_error(
+                "Only JPEG and PNG images are supported.",
+                "webp",
+            )
+        )
+        self.assertFalse(
+            looks_like_unsupported_image_format_error(
+                "Only JPEG images are supported.",
+                "jpeg",
+            )
+        )
 
 
 if __name__ == "__main__":

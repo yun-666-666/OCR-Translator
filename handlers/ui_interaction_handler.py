@@ -135,11 +135,22 @@ class UIInteractionHandler:
         is_openai = False
         is_marian = (selected_model_ui_code == 'marianmt')
         is_api_model = is_custom
+        is_custom_ai_ocr = (
+            getattr(self.app, "ocr_model_var", None) is not None
+            and self.app.ocr_model_var.get() == "custom_ai"
+        )
+        show_ai_optimization = is_custom or is_custom_ai_ocr
 
         if hasattr(self.app, 'ai_optimization_mode_label'):
-            manage_grid(self.app.ai_optimization_mode_label, show=is_custom)
+            manage_grid(
+                self.app.ai_optimization_mode_label,
+                show=show_ai_optimization,
+            )
         if hasattr(self.app, 'ai_optimization_mode_combobox'):
-            manage_grid(self.app.ai_optimization_mode_combobox, show=is_custom)
+            manage_grid(
+                self.app.ai_optimization_mode_combobox,
+                show=show_ai_optimization,
+            )
         if hasattr(self.app, 'custom_ai_submit_interval_label'):
             manage_grid(self.app.custom_ai_submit_interval_label, show=is_custom)
         if hasattr(self.app, 'custom_ai_submit_interval_spinbox'):
@@ -253,6 +264,23 @@ class UIInteractionHandler:
 
         is_paddleocr = (selected_ocr_model == PADDLEOCR_MODEL_CODE)
         is_local_ocr = is_paddleocr
+        is_custom_ai_ocr = selected_ocr_model == "custom_ai"
+        is_custom_translation = (
+            getattr(self.app, "translation_model_var", None) is not None
+            and self.app.translation_model_var.get() == "custom_ai"
+        )
+        show_ai_optimization = is_custom_translation or is_custom_ai_ocr
+
+        if hasattr(self.app, 'ai_optimization_mode_label'):
+            manage_grid(
+                self.app.ai_optimization_mode_label,
+                show=show_ai_optimization,
+            )
+        if hasattr(self.app, 'ai_optimization_mode_combobox'):
+            manage_grid(
+                self.app.ai_optimization_mode_combobox,
+                show=show_ai_optimization,
+            )
 
         if hasattr(self.app, 'paddleocr_min_score_label'):
             manage_grid(self.app.paddleocr_min_score_label, show=is_paddleocr)

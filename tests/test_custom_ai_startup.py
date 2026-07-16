@@ -100,6 +100,14 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertIn("ai_optimization_mode_var", gui_builder_source)
         self.assertIn("ai_optimization_mode_combobox", gui_builder_source)
         self.assertIn("ai_optimization_mode", save_source)
+        self.assertIn(
+            "show_ai_optimization = is_custom or is_custom_ai_ocr",
+            save_source,
+        )
+        self.assertIn(
+            "show_ai_optimization = is_custom_translation or is_custom_ai_ocr",
+            save_source,
+        )
         for legacy_key in (
             "custom_ai_latency_mode_combobox",
             "custom_ai_ocr_image_format_var",

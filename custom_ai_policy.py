@@ -365,9 +365,7 @@ class CustomAILatencyModeAdvisor:
             primary_cooldown_seconds > 0.0
             and healthy_race_profile_count > 0
         ):
-            if self._race_available_locked(now):
-                return CUSTOM_AI_LATENCY_MODE_RACE, "cooldown_alternative"
-            return CUSTOM_AI_LATENCY_MODE_SAFE, "race_cooldown"
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "cooldown_alternative_safe"
 
         if sample_count < self.min_samples:
             return CUSTOM_AI_LATENCY_MODE_SAFE, "insufficient_samples"
@@ -404,5 +402,4 @@ class CustomAILatencyModeAdvisor:
         ordered = sorted(self._durations)
         rank = int(math.ceil(0.90 * len(ordered)))
         return ordered[max(0, min(len(ordered) - 1, rank - 1))]
-
 

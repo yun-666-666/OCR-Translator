@@ -872,7 +872,12 @@ def _route_local_ocr_candidate_for_translation(
     return "pending"
 
 
-def _get_api_ocr_cache_mode_key(app, provider_name=None, image_size=None):
+def _get_api_ocr_cache_mode_key(
+    app,
+    provider_name=None,
+    image_size=None,
+    image_decision=None,
+):
     keep_linebreaks_var = getattr(app, 'keep_linebreaks_var', None)
     parts = ['api']
     if keep_linebreaks_var is None:
@@ -884,14 +889,21 @@ def _get_api_ocr_cache_mode_key(app, provider_name=None, image_size=None):
             keep_linebreaks = False
         parts.append(f"keep_linebreaks={keep_linebreaks}")
 
-    image_decision_getter = getattr(app, "get_ai_ocr_image_decision", None)
-    if callable(image_decision_getter):
+    if image_decision is None:
+        image_decision_getter = getattr(
+            app,
+            "get_ai_ocr_image_decision",
+            None,
+        )
+    else:
+        image_decision_getter = None
+    if image_decision is None and callable(image_decision_getter):
         try:
             image_decision = image_decision_getter(image_size=image_size)
         except Exception:
             image_decision = None
-        if image_decision is not None:
-            parts.append(f"image_contract={image_decision.contract_key}")
+    if image_decision is not None:
+        parts.append(f"image_contract={image_decision.contract_key}")
 
     provider_key = str(provider_name or '').strip().lower()
     if provider_key == 'custom_ai' or (provider_name is None and hasattr(app, 'custom_ai_profiles')):
@@ -900,5 +912,4 @@ def _get_api_ocr_cache_mode_key(app, provider_name=None, image_size=None):
             parts.append(f"reasoning_effort={reasoning_contract}")
 
     return "|".join(parts)
-
 

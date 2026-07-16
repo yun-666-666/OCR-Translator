@@ -46,15 +46,21 @@ def _log_debug(message):
 
 
 class AppCaptureOcrMixin:
-    def convert_to_api_ocr_image(self, pil_image):
+    def convert_to_api_ocr_image(self, pil_image, decision=None):
         """Convert a PIL image using the current automatic API OCR contract."""
-        decision_getter = getattr(self, "get_ai_ocr_image_decision", None)
-        if callable(decision_getter):
-            decision = decision_getter(image_size=getattr(pil_image, "size", None))
-        else:
-            from ai_optimization import resolve_ai_ocr_image_policy
+        if decision is None:
+            decision_getter = getattr(self, "get_ai_ocr_image_decision", None)
+            if callable(decision_getter):
+                decision = decision_getter(
+                    image_size=getattr(pil_image, "size", None)
+                )
+            else:
+                from ai_optimization import resolve_ai_ocr_image_policy
 
-            decision = resolve_ai_ocr_image_policy("auto", image_size=pil_image.size)
+                decision = resolve_ai_ocr_image_policy(
+                    "auto",
+                    image_size=pil_image.size,
+                )
         image_format = decision.image_format
         mode = decision.image_mode
         quality = decision.image_quality

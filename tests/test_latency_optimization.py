@@ -134,16 +134,26 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
                     ocr_utils.capture_screen_region(
                         (5, 6, 7, 8),
                         mss_factory=lambda: (_ for _ in ()).throw(
-                            RuntimeError("mss unavailable")
+                            RuntimeError(
+                                "mss unavailable for 'subtitle-secret' "
+                                "at C:\\secret\\capture.bin"
+                            )
                         ),
                     )
 
+        messages = "\n".join(
+            str(call.args[0]) for call in immediate_log.call_args_list
+        )
         self.assertTrue(
             any(
                 "mss backend failed" in call.args[0]
                 for call in immediate_log.call_args_list
             )
         )
+        self.assertNotIn("subtitle-secret", messages)
+        self.assertNotIn("C:\\secret", messages)
+        self.assertIn("<redacted>", messages)
+        self.assertIn("<path>", messages)
         log_coalesced.assert_not_called()
 
     def test_ocr_frame_cache_hit_uses_coalesced_log_without_changing_value(self):
@@ -1553,6 +1563,56 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             cache_mode_key,
         )
 
+    def test_api_ocr_reuses_one_image_decision_for_cache_and_encoding(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        decision = types.SimpleNamespace(
+            contract_key="webp|balanced_webp|85|auto"
+        )
+        decision_calls = []
+        encoded_decisions = []
+        encoded_image = types.SimpleNamespace(
+            data=b"webp-bytes",
+            mime_type="image/webp",
+            image_format="webp",
+            image_detail="auto",
+        )
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            get_ai_ocr_image_decision=lambda image_size=None: (
+                decision_calls.append(image_size) or decision
+            ),
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_api_ocr_image=lambda _image, decision=None: (
+                encoded_decisions.append(decision) or encoded_image
+            ),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            ocr_thread_pool=Pool(),
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+        )
+        screenshot = Image.new("RGB", (320, 120), (1, 2, 3))
+
+        worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(decision_calls, [(320, 120)])
+        self.assertEqual(encoded_decisions, [decision])
+        self.assertEqual(len(app.ocr_thread_pool.submissions), 1)
+
     def test_api_ocr_cache_mode_key_includes_effective_reasoning_contract(self):
         worker_threads = import_worker_threads_for_tests()
         profile = {
@@ -1618,7 +1678,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
     def test_ai_ocr_image_decision_uses_recent_route_latency_and_active_profile(self):
         import app_logic
-        from ai_optimization import AiOcrImageCapabilityMemory
+        from ai_optimization import (
+            AiOcrImageCapabilityMemory,
+            ai_ocr_route_metric_name,
+        )
 
         profile = {
             "base_url": "https://relay.example/v1",
@@ -1632,7 +1695,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             runtime_metrics=types.SimpleNamespace(
                 snapshot=lambda: {
                     "timings": {
-                        "ocr_duration": {
+                        ai_ocr_route_metric_name(profile): {
                             "count": 8,
                             "p90": 4.2,
                         }
@@ -4177,7 +4240,14 @@ class RuntimeContentFreeTranslationLogTests(unittest.TestCase):
 
     def test_api_ocr_to_translation_logs_exclude_recognized_content(self):
         worker_threads = import_worker_threads_for_tests()
+        from ai_optimization import ai_ocr_route_metric_name
+
         scheduled = []
+        profile = {
+            "base_url": "https://relay.example/v1",
+            "model": "vision",
+        }
+        route_metric_name = ai_ocr_route_metric_name(profile)
 
         class Handler:
             def perform_ocr(self, _image, _source_lang, **_kwargs):
@@ -4187,6 +4257,7 @@ class RuntimeContentFreeTranslationLogTests(unittest.TestCase):
             batch_sequence_counter=3,
             active_ocr_calls={3},
             translation_handler=Handler(),
+            runtime_metrics=RuntimeMetrics(),
             root=types.SimpleNamespace(
                 after=lambda delay, callback, *args: scheduled.append(
                     (delay, callback, args)
@@ -4205,6 +4276,7 @@ class RuntimeContentFreeTranslationLogTests(unittest.TestCase):
                     "en",
                     3,
                     "custom_ai",
+                    route_metric_name=route_metric_name,
                 )
                 _delay, callback, args = scheduled.pop(0)
                 callback(*args)
@@ -4214,6 +4286,10 @@ class RuntimeContentFreeTranslationLogTests(unittest.TestCase):
         )
         self.assertNotIn("recognized-secret", messages)
         self.assertIn("chars=17 lines=1", messages)
+        self.assertIn(
+            route_metric_name,
+            app.runtime_metrics.snapshot()["timings"],
+        )
         start.assert_called_once_with(app, "recognized-secret", 3)
 
 

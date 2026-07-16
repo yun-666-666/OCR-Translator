@@ -62,8 +62,8 @@ deepl_context_window_3,3 (trzy napisy)
 custom_context_window_label,Napisy kontekstu Custom AI:
 ai_optimization_mode_label,Optymalizacja AI:
 ai_optimization_mode_auto,Automatyczna (zalecana)
-ai_optimization_mode_speed,Szybkość
-ai_optimization_mode_quality,Jakość
+ai_optimization_mode_speed,Szybkość i mniej tokenów
+ai_optimization_mode_quality,Najwyższa jakość
 custom_ai_submit_interval_label,Minimalny interwał tłumaczenia AI (ms):
 ai_profile_structured_output_label,Wyjście strukturalne
 ai_profile_reasoning_effort_label,Intensywność rozumowania

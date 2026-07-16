@@ -75,6 +75,20 @@ def _set_capture_metadata(image, backend, fallback_reason=None):
     return image
 
 
+def _sanitize_capture_error(error, max_chars=160):
+    try:
+        reason = str(error)
+    except Exception:
+        reason = ""
+    reason = re.sub(r"(['\"]).*?\1", "<redacted>", reason)
+    reason = re.sub(r"https?://\S+", "<url>", reason, flags=re.IGNORECASE)
+    reason = re.sub(r"\b[A-Za-z]:[\\/]\S+", "<path>", reason)
+    reason = re.sub(r"\s+", " ", reason).strip()
+    if not reason:
+        return "no detail"
+    return reason[: max(1, int(max_chars))].rstrip()
+
+
 def _capture_with_mss(region, mss_factory=None):
     x, y, width, height = _normalize_capture_region(region)
     factory = mss_factory
@@ -105,9 +119,10 @@ def capture_screen_region(region, mss_factory=None):
         )
         return image
     except Exception as e:
+        safe_reason = _sanitize_capture_error(e)
         log_debug(
             "CAPTURE: mss backend failed "
-            f"({type(e).__name__}: {e})"
+            f"({type(e).__name__}: {safe_reason})"
         )
         raise RuntimeError(
             f"MSS capture failed for region {width}x{height}"
