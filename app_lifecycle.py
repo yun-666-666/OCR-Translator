@@ -573,7 +573,7 @@ class AppLifecycleMixin:
                 # Save OCR Preview geometry if window is open
                 if self.ocr_preview_window is not None:
                     self.save_preview_geometry()
-                self.save_settings()
+                self.save_settings(force=True)
             else:
                 # Save OCR Preview geometry even if not fully initialized
                 if self.ocr_preview_window is not None:
@@ -622,4 +622,3 @@ class AppLifecycleMixin:
         except Exception as e_drw:
              _log_debug(f"Error destroying root window: {e_drw}")
         _log_debug("Application shutdown sequence complete.")
-

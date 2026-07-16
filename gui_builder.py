@@ -10,6 +10,7 @@ from custom_ai import (
     CUSTOM_AI_REASONING_EFFORT_HIGH,
     CUSTOM_AI_REASONING_EFFORT_LOW,
     CUSTOM_AI_REASONING_EFFORT_MEDIUM,
+    CUSTOM_AI_REASONING_EFFORT_NONE,
     CUSTOM_AI_REASONING_EFFORT_ULTRA,
     normalize_custom_ai_reasoning_effort,
 )
@@ -17,6 +18,7 @@ from paddle_ocr_backend import PADDLEOCR_DISPLAY_NAME, PADDLEOCR_MODEL_CODE
 
 
 CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
+    (CUSTOM_AI_REASONING_EFFORT_NONE, "custom_ai_reasoning_effort_none", "None"),
     (CUSTOM_AI_REASONING_EFFORT_LOW, "custom_ai_reasoning_effort_low", "Low"),
     (CUSTOM_AI_REASONING_EFFORT_MEDIUM, "custom_ai_reasoning_effort_medium", "Medium"),
     (CUSTOM_AI_REASONING_EFFORT_HIGH, "custom_ai_reasoning_effort_high", "High"),

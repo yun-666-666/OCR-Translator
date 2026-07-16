@@ -634,6 +634,53 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
 
 class LatencyShutdownTests(unittest.TestCase):
+    def test_worker_ui_callback_is_dropped_after_shutdown(self):
+        worker_threads = import_worker_threads_for_tests()
+        root = types.SimpleNamespace(after=Mock())
+        app = types.SimpleNamespace(
+            root=root,
+            is_running=False,
+            _app_is_closing=True,
+        )
+
+        scheduled = worker_threads._schedule_ui_callback(
+            app,
+            Mock(),
+            "value",
+        )
+
+        self.assertFalse(scheduled)
+        root.after.assert_not_called()
+
+    def test_worker_ui_callback_swallows_destroyed_tk_runtime_error(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                winfo_exists=lambda: True,
+                after=Mock(side_effect=RuntimeError("main thread is not in main loop")),
+            ),
+            is_running=True,
+            _app_is_closing=False,
+        )
+
+        self.assertFalse(
+            worker_threads._schedule_ui_callback(app, Mock())
+        )
+
+    def test_worker_ui_callback_does_not_hide_programming_errors(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                winfo_exists=lambda: True,
+                after=Mock(side_effect=ValueError("bad callback")),
+            ),
+            is_running=True,
+            _app_is_closing=False,
+        )
+
+        with self.assertRaises(ValueError):
+            worker_threads._schedule_ui_callback(app, Mock())
+
     def test_on_closing_stops_running_app_without_user_stop_poll(self):
         import app_logic
 
@@ -692,6 +739,7 @@ class LatencyShutdownTests(unittest.TestCase):
             wait=False,
             cancel_futures=True,
         )
+        app.save_settings.assert_called_once_with(force=True)
         self.assertTrue(app.root.destroyed)
 
     def test_finalize_shutdown_is_idempotent_and_skips_dead_widgets(self):
@@ -2586,7 +2634,16 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             else resolver(app)
         )
 
-        self.assertEqual(threshold, 1.5)
+        self.assertEqual(threshold, 3.0)
+
+    def test_translation_supersede_threshold_without_route_snapshot_uses_default(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace()
+
+        self.assertEqual(
+            worker_threads._get_translation_supersede_after_seconds(app),
+            1.5,
+        )
 
     def test_route_p90_keeps_young_active_translation_queued(self):
         worker_threads = import_worker_threads_for_tests()

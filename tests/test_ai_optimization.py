@@ -4,6 +4,7 @@ from ai_optimization import (
     AI_OPTIMIZATION_AUTO,
     AI_OPTIMIZATION_QUALITY,
     AI_OPTIMIZATION_SPEED,
+    AI_OPTIMIZATION_STREAM,
     AiOcrImageCapabilityMemory,
     ai_ocr_route_metric_name,
     migrate_legacy_ai_optimization_settings,
@@ -19,6 +20,10 @@ from custom_ai_policy import CustomAILatencyModeAdvisor
 class AiOptimizationConfigTests(unittest.TestCase):
     def test_invalid_mode_normalizes_to_auto(self):
         self.assertEqual(normalize_ai_optimization_mode("unknown"), AI_OPTIMIZATION_AUTO)
+        self.assertEqual(
+            normalize_ai_optimization_mode("stream"),
+            AI_OPTIMIZATION_STREAM,
+        )
 
     def test_legacy_quality_settings_migrate_to_quality(self):
         settings = {
@@ -93,10 +98,11 @@ class AiOptimizationConfigTests(unittest.TestCase):
 class AiResponsePolicyTests(unittest.TestCase):
     def test_response_mode_mapping(self):
         self.assertEqual(resolve_ai_response_mode("auto"), "adaptive")
-        self.assertEqual(resolve_ai_response_mode("speed"), "safe")
+        self.assertEqual(resolve_ai_response_mode("stream"), "stream")
+        self.assertEqual(resolve_ai_response_mode("speed"), "stream")
         self.assertEqual(resolve_ai_response_mode("quality"), "safe")
 
-    def test_adaptive_high_p90_without_second_profile_stays_safe(self):
+    def test_adaptive_high_p90_without_second_profile_uses_streaming(self):
         advisor = CustomAILatencyModeAdvisor(
             min_samples=3,
             stream_latency_threshold_seconds=1.0,
@@ -104,6 +110,41 @@ class AiResponsePolicyTests(unittest.TestCase):
         )
         for duration in (3.0, 3.5, 4.0):
             advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=True,
+            healthy_race_profile_count=1,
+        )
+
+        self.assertEqual(decision.mode, "stream")
+
+    def test_adaptive_high_p90_without_stream_support_stays_safe(self):
+        advisor = CustomAILatencyModeAdvisor(
+            min_samples=3,
+            stream_latency_threshold_seconds=1.0,
+            race_latency_threshold_seconds=3.0,
+        )
+        for duration in (1.5, 1.8, 2.0):
+            advisor.observe_request(duration, success=True)
+
+        decision = advisor.resolve(
+            "adaptive",
+            stream_supported=False,
+            healthy_race_profile_count=1,
+        )
+
+        self.assertEqual(decision.mode, "safe")
+
+    def test_adaptive_high_p90_after_recent_error_stays_safe(self):
+        advisor = CustomAILatencyModeAdvisor(
+            min_samples=3,
+            stream_latency_threshold_seconds=1.0,
+            race_latency_threshold_seconds=3.0,
+        )
+        for duration in (1.5, 1.8, 2.0):
+            advisor.observe_request(duration, success=True)
+        advisor.observe_request(2.0, success=False)
 
         decision = advisor.resolve(
             "adaptive",

@@ -436,6 +436,7 @@ class TranslationRequestsMixin:
         current_source=None,
         latency_mode=None,
         profile=_CUSTOM_AI_PROFILE_UNSET,
+        force_no_reasoning=None,
     ):
         if profile is _CUSTOM_AI_PROFILE_UNSET:
             profile = self.app.custom_ai_profiles.get_active_profile(
@@ -443,7 +444,10 @@ class TranslationRequestsMixin:
             )
         if not profile:
             return None, None, None, None
-        profile = dict(profile)
+        profile = self._translation_request_profile(
+            profile,
+            force_no_reasoning=force_no_reasoning,
+        )
 
         source_lang = getattr(self.app, 'custom_source_lang', None) or self.app.source_lang_var.get()
         target_lang = getattr(self.app, 'custom_target_lang', None) or self.app.target_lang_var.get()
@@ -453,6 +457,34 @@ class TranslationRequestsMixin:
             latency_mode=latency_mode,
         )
         return profile, source_lang, target_lang, cache_params
+
+    def _speed_translation_policy_enabled(self):
+        optimization_getter = getattr(
+            self.app,
+            "get_ai_optimization_mode",
+            None,
+        )
+        try:
+            optimization_mode = (
+                optimization_getter()
+                if callable(optimization_getter)
+                else ""
+            )
+        except Exception:
+            optimization_mode = ""
+        return str(optimization_mode or "").strip().lower() == "speed"
+
+    def _translation_request_profile(
+        self,
+        profile,
+        force_no_reasoning=None,
+    ):
+        request_profile = dict(profile) if isinstance(profile, dict) else {}
+        if force_no_reasoning is None:
+            force_no_reasoning = self._speed_translation_policy_enabled()
+        if force_no_reasoning:
+            request_profile["reasoning_effort"] = "none"
+        return request_profile
 
     def _get_custom_ai_cached_translation(
         self,
@@ -510,6 +542,7 @@ class TranslationRequestsMixin:
             return None
 
         configured_latency_mode = self._get_custom_ai_latency_mode()
+        force_no_reasoning = self._speed_translation_policy_enabled()
         try:
             active_profile = self.app.custom_ai_profiles.get_active_profile(
                 "translation"
@@ -535,6 +568,7 @@ class TranslationRequestsMixin:
             current_source=cleaned_text,
             latency_mode=latency_mode,
             profile=active_profile,
+            force_no_reasoning=force_no_reasoning,
         )
         if not profile:
             inflight_key = ("custom_ai", cleaned_text, "missing_profile")
@@ -553,6 +587,7 @@ class TranslationRequestsMixin:
             "inflight_key": inflight_key,
             "latency_mode": latency_mode,
             "configured_latency_mode": configured_latency_mode,
+            "force_no_reasoning": force_no_reasoning,
             "reason": decision.reason,
             "p90_seconds": decision.p90_seconds,
             "sample_count": decision.sample_count,
@@ -889,11 +924,15 @@ class TranslationRequestsMixin:
                 request_snapshot.get("latency_mode") or latency_mode
             )
             context_generation = request_snapshot.get("context_generation")
+            force_no_reasoning = bool(
+                request_snapshot.get("force_no_reasoning", False)
+            )
             if context_generation is None:
                 with self._custom_context_lock:
                     context_generation = self._custom_context_generation
             decision = None
         else:
+            force_no_reasoning = self._speed_translation_policy_enabled()
             with self._custom_context_lock:
                 context_generation = self._custom_context_generation
             configured_latency_mode = normalize_custom_ai_latency_mode(
@@ -919,6 +958,7 @@ class TranslationRequestsMixin:
                 current_source=cleaned_text_main,
                 latency_mode=latency_mode,
                 profile=profile,
+                force_no_reasoning=force_no_reasoning,
             )
         if not profile:
             return "AI model profile for translation is missing."
@@ -942,6 +982,7 @@ class TranslationRequestsMixin:
                 translation_sequence=translation_sequence,
                 context_generation=context_generation,
                 primary_cache_params=cache_params,
+                force_no_reasoning=force_no_reasoning,
             )
 
         cached_result = self._get_custom_ai_cached_translation(
@@ -983,6 +1024,7 @@ class TranslationRequestsMixin:
                     keep_linebreaks,
                     custom_prompt=custom_prompt,
                     timeout_seconds=timeout_seconds,
+                    force_no_reasoning=force_no_reasoning,
                 )
             else:
                 translated_api_text, usage, duration = self.custom_ai_provider.translate(
@@ -1067,7 +1109,11 @@ class TranslationRequestsMixin:
         )
         return self._format_dialog_text(translated_api_text)
 
-    def _get_custom_ai_failover_profiles(self, active_profile):
+    def _get_custom_ai_failover_profiles(
+        self,
+        active_profile,
+        force_no_reasoning=None,
+    ):
         profiles = [active_profile]
         try:
             profiles.extend(
@@ -1084,7 +1130,10 @@ class TranslationRequestsMixin:
         for candidate in profiles:
             if not isinstance(candidate, dict) or not candidate.get("enabled", True):
                 continue
-            candidate = dict(candidate)
+            candidate = self._translation_request_profile(
+                candidate,
+                force_no_reasoning=force_no_reasoning,
+            )
             candidate_id = str(candidate.get("id") or "").strip()
             identity = (
                 "id",
@@ -1165,11 +1214,15 @@ class TranslationRequestsMixin:
         translation_sequence=None,
         context_generation=None,
         primary_cache_params=None,
+        force_no_reasoning=False,
     ):
         failures = []
         primary_id = str(primary_profile.get("id") or "").strip()
         candidate_states = []
-        for candidate in self._get_custom_ai_failover_profiles(primary_profile):
+        for candidate in self._get_custom_ai_failover_profiles(
+            primary_profile,
+            force_no_reasoning=force_no_reasoning,
+        ):
             candidate_id = str(candidate.get("id") or "").strip()
             if candidate_id and candidate_id == primary_id and primary_cache_params:
                 cache_params = dict(primary_cache_params)
@@ -1337,10 +1390,14 @@ class TranslationRequestsMixin:
         keep_linebreaks,
         custom_prompt=None,
         timeout_seconds=None,
+        force_no_reasoning=False,
     ):
         if custom_prompt is None:
             custom_prompt = getattr(self.app, 'custom_prompt_text', '')
-        candidates = self._get_custom_ai_race_profiles(active_profile)
+        candidates = self._get_custom_ai_race_profiles(
+            active_profile,
+            force_no_reasoning=force_no_reasoning,
+        )
         if len(candidates) <= 1:
             candidate = candidates[0] if candidates else active_profile
             try:
@@ -1460,7 +1517,15 @@ class TranslationRequestsMixin:
 
         raise ValueError("All Custom AI race endpoints failed. Tried: " + "; ".join(errors))
 
-    def _get_custom_ai_race_profiles(self, active_profile):
+    def _get_custom_ai_race_profiles(
+        self,
+        active_profile,
+        force_no_reasoning=None,
+    ):
+        active_profile = self._translation_request_profile(
+            active_profile,
+            force_no_reasoning=force_no_reasoning,
+        )
         active_signature = self._custom_ai_race_signature(active_profile)
         candidates = []
         seen = set()
@@ -1468,6 +1533,10 @@ class TranslationRequestsMixin:
         def add_candidate(profile):
             if not isinstance(profile, dict):
                 return
+            profile = self._translation_request_profile(
+                profile,
+                force_no_reasoning=force_no_reasoning,
+            )
             if self._custom_ai_race_signature(profile) != active_signature:
                 return
             identity = self._custom_ai_race_profile_identity(profile)

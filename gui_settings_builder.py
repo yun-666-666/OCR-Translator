@@ -1123,6 +1123,13 @@ def create_settings_tab(app):
             ),
         ),
         (
+            "stream",
+            app.ui_lang.get_label(
+                "ai_optimization_mode_stream",
+                "Streaming",
+            ),
+        ),
+        (
             "speed",
             app.ui_lang.get_label(
                 "ai_optimization_mode_speed",

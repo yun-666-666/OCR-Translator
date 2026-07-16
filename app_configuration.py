@@ -35,9 +35,48 @@ def _log_debug(message):
 
 
 class AppConfigurationMixin:
-    def save_settings(self):
+    def _cancel_scheduled_settings_save(self):
+        timer_id = getattr(self, "_save_settings_timer", None)
+        if timer_id is None:
+            return False
+        self._save_settings_timer = None
+        try:
+            self.root.after_cancel(timer_id)
+        except Exception:
+            pass
+        return True
+
+    def _flush_scheduled_settings_save(self):
+        self._save_settings_timer = None
+        if getattr(self, "_app_is_closing", False):
+            return False
+        return self.save_settings()
+
+    def schedule_settings_save(self, delay_ms=400):
+        if (
+            not getattr(self, "_fully_initialized", False)
+            or getattr(self, "_app_is_closing", False)
+        ):
+            return False
+        self._cancel_scheduled_settings_save()
+        try:
+            self._save_settings_timer = self.root.after(
+                max(0, int(delay_ms)),
+                self._flush_scheduled_settings_save,
+            )
+            return True
+        except Exception as error:
+            self._save_settings_timer = None
+            _log_debug(
+                "Settings save scheduling failed: "
+                f"{type(error).__name__} - {error}"
+            )
+            return self.save_settings()
+
+    def save_settings(self, force=False):
+        self._cancel_scheduled_settings_save()
         if self._fully_initialized:
-            saved = self.ui_interaction_handler.save_settings()
+            saved = self.ui_interaction_handler.save_settings(force=True)
             if saved and not getattr(self, "_app_is_closing", False):
                 try:
                     if self.get_ocr_model_setting() == PADDLEOCR_MODEL_CODE:

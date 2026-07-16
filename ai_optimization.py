@@ -14,10 +14,12 @@ from ocr_utils import (
 
 
 AI_OPTIMIZATION_AUTO = "auto"
+AI_OPTIMIZATION_STREAM = "stream"
 AI_OPTIMIZATION_SPEED = "speed"
 AI_OPTIMIZATION_QUALITY = "quality"
 AI_OPTIMIZATION_MODES = {
     AI_OPTIMIZATION_AUTO,
+    AI_OPTIMIZATION_STREAM,
     AI_OPTIMIZATION_SPEED,
     AI_OPTIMIZATION_QUALITY,
 }
@@ -99,8 +101,11 @@ def migrate_legacy_ocr_defaults(settings):
 
 
 def resolve_ai_response_mode(optimization_mode):
-    if normalize_ai_optimization_mode(optimization_mode) == AI_OPTIMIZATION_AUTO:
+    policy = normalize_ai_optimization_mode(optimization_mode)
+    if policy == AI_OPTIMIZATION_AUTO:
         return "adaptive"
+    if policy in {AI_OPTIMIZATION_STREAM, AI_OPTIMIZATION_SPEED}:
+        return "stream"
     return "safe"
 
 

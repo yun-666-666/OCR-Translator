@@ -66,6 +66,12 @@ def assert_secret_not_in_text(testcase, text, label):
 
 
 class CustomAIProfileManagerTests(unittest.TestCase):
+    def test_reasoning_effort_none_is_a_public_profile_value(self):
+        self.assertEqual(
+            custom_ai_module.normalize_custom_ai_reasoning_effort("none"),
+            "none",
+        )
+
     def test_legacy_plaintext_profile_key_migrates_to_credential_ref(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
@@ -690,6 +696,19 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                 "medium",
             )
 
+            reloaded.update_profile(
+                profile["id"],
+                reasoning_effort="none",
+            )
+            no_reasoning = CustomAIProfileManager(
+                path,
+                credential_store=store,
+            )
+            self.assertEqual(
+                no_reasoning.get_profile(profile["id"])["reasoning_effort"],
+                "none",
+            )
+
     def test_profile_manager_normalizes_invalid_reasoning_effort_to_low(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
@@ -788,6 +807,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "prompt_tokens": 1200,
                 "completion_tokens": 20,
                 "prompt_tokens_details": {"cached_tokens": 1024},
+                "completion_tokens_details": {"reasoning_tokens": 7},
             }
         })
         responses_usage = provider._extract_usage({
@@ -795,6 +815,7 @@ class CustomAIProviderTests(unittest.TestCase):
                 "input_tokens": 1300,
                 "output_tokens": 25,
                 "input_tokens_details": {"cached_tokens": 1152},
+                "output_tokens_details": {"reasoning_tokens": 9},
             }
         })
 
@@ -803,6 +824,7 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(chat_usage.get("input_tokens"), 1200)
         self.assertEqual(chat_usage.get("output_tokens"), 20)
         self.assertEqual(chat_usage.get("cached_input_tokens"), 1024)
+        self.assertEqual(chat_usage.get("reasoning_tokens"), 7)
         self.assertAlmostEqual(
             chat_usage.get("cached_input_ratio"),
             1024 / 1200,
@@ -811,6 +833,7 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(responses_usage.get("input_tokens"), 1300)
         self.assertEqual(responses_usage.get("output_tokens"), 25)
         self.assertEqual(responses_usage.get("cached_input_tokens"), 1152)
+        self.assertEqual(responses_usage.get("reasoning_tokens"), 9)
         self.assertAlmostEqual(
             responses_usage.get("cached_input_ratio"),
             1152 / 1300,
@@ -6342,7 +6365,7 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
         self.assertEqual(decision.mode, "safe")
         self.assertEqual(decision.reason, "low_latency")
 
-    def test_adaptive_high_p90_stays_safe_instead_of_streaming(self):
+    def test_adaptive_high_p90_uses_streaming(self):
         advisor = self._make_advisor()
         for duration in (0.30, 1.70, 1.90):
             advisor.observe_request(duration, success=True)
@@ -6354,8 +6377,8 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
             primary_cooldown_seconds=0.0,
         )
 
-        self.assertEqual(decision.mode, "safe")
-        self.assertEqual(decision.reason, "high_latency_safe")
+        self.assertEqual(decision.mode, "stream")
+        self.assertEqual(decision.reason, "p90_high_stream")
 
     def test_adaptive_very_slow_with_multiple_healthy_profiles_resolves_to_race(self):
         advisor = self._make_advisor()
@@ -6760,6 +6783,36 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "cached_input_ratio=0.85",
             append_text.call_args.args[1],
         )
+        self.assertNotIn(
+            "Reasoning Tokens:",
+            append_text.call_args.args[1],
+        )
+
+    def test_custom_ai_short_log_records_reasoning_tokens(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            handler._log_custom_short_call(
+                "translation",
+                profile,
+                "translated",
+                {
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 20,
+                    "reasoning_tokens": 11,
+                },
+                0.25,
+            )
+            handler.close()
+
+        self.assertIn(
+            "Reasoning Tokens: 11",
+            append_text.call_args.args[1],
+        )
 
     def test_custom_ai_short_log_records_reported_usage_cost(self):
         handler = TranslationHandler(object())
@@ -6990,7 +7043,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
         key = handler.get_inflight_translation_key("Hello")
 
-        self.assertEqual(key[-1], "safe")
+        self.assertEqual(key[-1], "stream")
         self.assertNotIn("adaptive", key)
         handler.close()
 
@@ -7040,7 +7093,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             handler.custom_ai_provider.translate.call_args.kwargs[
                 "latency_mode"
             ],
-            "safe",
+            "stream",
         )
         handler.close()
 
@@ -7095,7 +7148,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             profile=healthy_profile,
         )
 
-        self.assertEqual(slow_decision.mode, "safe")
+        self.assertEqual(slow_decision.mode, "stream")
         self.assertEqual(slow_decision.sample_count, 3)
         self.assertEqual(healthy_decision.mode, "safe")
         self.assertEqual(healthy_decision.reason, "insufficient_samples")
@@ -7987,6 +8040,171 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
 
                 passed_context = handler.custom_ai_provider.translate.call_args.kwargs["context"]
                 self.assertEqual(passed_context, expected_context)
+
+    def test_speed_optimization_limits_custom_ai_context_to_one_entry(self):
+        class App:
+            custom_context_window_var = DummyVar(5)
+
+            def get_ai_optimization_mode(self):
+                return "speed"
+
+        handler = TranslationHandler(App())
+
+        self.assertEqual(handler._get_custom_context_window_size(), 1)
+        handler.close()
+
+    def test_speed_optimization_disables_translation_reasoning(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Translator",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "translation-model",
+            "reasoning_effort": "high",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, enabled_only=True):
+                return [profile]
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+            def get_ai_optimization_mode(self):
+                return "speed"
+
+        handler = TranslationHandler(App())
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("translated", {}, 0.01)
+        )
+
+        handler._custom_ai_translate("current", 0.0)
+
+        request_profile = handler.custom_ai_provider.translate.call_args.args[0]
+        self.assertEqual(request_profile["reasoning_effort"], "none")
+        handler.close()
+
+    def test_speed_reasoning_policy_is_frozen_for_failover_and_race_candidates(self):
+        profiles = [
+            {
+                "id": "primary",
+                "name": "Primary",
+                "base_url": "https://primary.example/v1",
+                "api_key": "primary-secret",
+                "model": "shared-model",
+                "reasoning_effort": "high",
+            },
+            {
+                "id": "backup",
+                "name": "Backup",
+                "base_url": "https://backup.example/v1",
+                "api_key": "backup-secret",
+                "model": "shared-model",
+                "reasoning_effort": "medium",
+            },
+        ]
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=True):
+                return profiles
+
+        class App:
+            custom_ai_profiles = Profiles()
+
+            def get_ai_optimization_mode(self):
+                return "quality"
+
+        handler = TranslationHandler(App())
+
+        failover = handler._get_custom_ai_failover_profiles(
+            profiles[0],
+            force_no_reasoning=True,
+        )
+        race = handler._get_custom_ai_race_profiles(
+            profiles[0],
+            force_no_reasoning=True,
+        )
+
+        self.assertTrue(failover)
+        self.assertTrue(race)
+        self.assertTrue(
+            all(profile["reasoning_effort"] == "none" for profile in failover)
+        )
+        self.assertTrue(
+            all(profile["reasoning_effort"] == "none" for profile in race)
+        )
+        handler.close()
+
+    def test_speed_request_keeps_no_reasoning_after_ui_mode_changes_during_failover(self):
+        mode = DummyVar("speed")
+        profiles = [
+            {
+                "id": "primary",
+                "name": "Primary",
+                "base_url": "https://primary.example/v1",
+                "api_key": "primary-secret",
+                "model": "shared-model",
+                "reasoning_effort": "high",
+            },
+            {
+                "id": "backup",
+                "name": "Backup",
+                "base_url": "https://backup.example/v1",
+                "api_key": "backup-secret",
+                "model": "shared-model",
+                "reasoning_effort": "medium",
+            },
+        ]
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profiles[0]
+
+            def list_profiles(self, kind=None, enabled_only=True):
+                return profiles
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+            def get_ai_optimization_mode(self):
+                return mode.get()
+
+        handler = TranslationHandler(App())
+        request_profiles = []
+
+        def translate(profile, *args, **kwargs):
+            request_profiles.append(dict(profile))
+            if len(request_profiles) == 1:
+                mode.value = "quality"
+                raise ValueError("primary unavailable")
+            return "translated", {}, 0.01
+
+        handler.custom_ai_provider.translate = Mock(side_effect=translate)
+
+        result = handler._custom_ai_translate("current", 0.0)
+
+        self.assertEqual(result, "translated")
+        self.assertEqual(len(request_profiles), 2)
+        self.assertTrue(
+            all(
+                profile["reasoning_effort"] == "none"
+                for profile in request_profiles
+            )
+        )
+        handler.close()
 
     def test_custom_ai_request_reuses_single_semantic_snapshot(self):
         profile = {

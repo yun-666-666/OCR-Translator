@@ -104,6 +104,7 @@ from worker_ocr import (
 )
 
 from worker_translation import (
+    _schedule_ui_callback,
     _get_translation_submit_interval_seconds,
     _get_translation_provider_cooldown_seconds,
     _get_local_ocr_translation_gate_seconds,
@@ -261,7 +262,7 @@ def run_ocr_thread(app):
                     _increment_metric(app, "ocr_frame_cache_hit")
                     _record_metric_timing(app, "ocr_duration", ocr_duration)
                     if app.ocr_debugging_var.get() and app.last_processed_image is not None:
-                        app.root.after(0, app.update_debug_display, screenshot_pil, app.last_processed_image, ocr_cleaned_text)
+                        _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, app.last_processed_image, ocr_cleaned_text)
                     # Jump to shared post-OCR routing below.
                     goto_post_ocr = True
                 else:
@@ -286,7 +287,7 @@ def run_ocr_thread(app):
             if not goto_post_ocr:
                 # ==================== LOCAL OCR PROCESSING ====================
                 if app.ocr_debugging_var.get():
-                    app.root.after(0, app.update_debug_display, screenshot_pil, _pil_to_debug_bgr(screenshot_pil), "Processing...")
+                    _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, _pil_to_debug_bgr(screenshot_pil), "Processing...")
 
                 ocr_cleaned_text, processed_cv_img, engine_label = process_local_ocr_frame(
                     app,
@@ -313,7 +314,7 @@ def run_ocr_thread(app):
 
 
             if app.ocr_debugging_var.get() and processed_cv_img is not None:
-                app.root.after(0, app.update_debug_display, screenshot_pil, processed_cv_img, ocr_cleaned_text)
+                _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, processed_cv_img, ocr_cleaned_text)
 
             if not ocr_cleaned_text or app.is_placeholder_text(ocr_cleaned_text):
                 app.text_stability_counter = 0
@@ -642,12 +643,12 @@ def process_api_ocr_async(
             f"{provider_name} OCR batch {sequence_number} completed, "
             f"scheduling response {summarize_text_for_log(ocr_result)}"
         )
-        app.root.after(0, process_api_ocr_response, app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key)
+        _schedule_ui_callback(app, process_api_ocr_response, app, ocr_result, sequence_number, source_lang, provider_name, ocr_cache_key)
 
     except Exception as e:
         log_debug(f"Error in async {provider_name} OCR batch {sequence_number}: {type(e).__name__} - {e}")
         error_msg = f"<e>: OCR batch {sequence_number} error: {str(e)}"
-        app.root.after(0, process_api_ocr_response, app, error_msg, sequence_number, source_lang, provider_name, ocr_cache_key)
+        _schedule_ui_callback(app, process_api_ocr_response, app, error_msg, sequence_number, source_lang, provider_name, ocr_cache_key)
 
     finally:
         app.active_ocr_calls.discard(sequence_number)
@@ -1023,7 +1024,7 @@ def process_translation_async(
             f"{summarize_text_for_log(translation_result)}"
         )
 
-        app.root.after(0, process_translation_response, app, translation_result, translation_sequence, text_to_translate, ocr_sequence_number)
+        _schedule_ui_callback(app, process_translation_response, app, translation_result, translation_sequence, text_to_translate, ocr_sequence_number)
 
     except Exception as e:
         completed_at = time.monotonic()
@@ -1041,7 +1042,7 @@ def process_translation_async(
         log_debug(f"Error in async translation {translation_sequence} after {elapsed_time:.2f}s: {type(e).__name__} - {e}")
 
         error_msg = f"Translation error: {str(e)}"
-        app.root.after(0, process_translation_response, app, error_msg, translation_sequence, text_to_translate, ocr_sequence_number)
+        _schedule_ui_callback(app, process_translation_response, app, error_msg, translation_sequence, text_to_translate, ocr_sequence_number)
 
     finally:
         try:

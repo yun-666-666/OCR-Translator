@@ -1,4 +1,5 @@
 import queue
+import threading
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -661,6 +662,199 @@ class PaddleOCRPrewarmTests(unittest.TestCase):
         self.assertEqual(text_engine.call_args.args[0].ocr_version, "PP-OCRv6")
         full_engine.assert_called_once_with(text_engine.call_args.args[0])
 
+    def test_worker_waits_for_matching_paddleocr_prewarm(self):
+        import app_logic
+        import worker_threads
+
+        app = self._paddle_app()
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+        app._paddleocr_prewarm_lock = threading.RLock()
+        app._paddleocr_prewarm_thread = types.SimpleNamespace(
+            is_alive=lambda: True
+        )
+        app._paddleocr_prewarm_settings = settings
+        app._paddleocr_prewarmed_settings = None
+        app._paddleocr_prewarm_generation = 1
+        app._paddleocr_prewarm_event = threading.Event()
+        result = []
+        finished = threading.Event()
+
+        def wait_for_ready():
+            result.append(
+                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
+                    app,
+                    settings,
+                    timeout=1.0,
+                )
+            )
+            finished.set()
+
+        waiter = threading.Thread(target=wait_for_ready)
+        waiter.start()
+        self.assertFalse(finished.wait(0.05))
+
+        with app._paddleocr_prewarm_lock:
+            app._paddleocr_prewarmed_settings = settings
+            app._paddleocr_prewarm_event.set()
+
+        waiter.join(timeout=1.0)
+        self.assertEqual(result, [True])
+
+    def test_paddleocr_prewarm_starts_thread_while_state_lock_is_owned(self):
+        import app_logic
+        import worker_threads
+
+        app = self._paddle_app()
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+        lock_owned_at_start = []
+
+        class RecordingThread:
+            def __init__(self, *args, **kwargs):
+                self.started = False
+
+            def start(self):
+                lock_owned_at_start.append(
+                    app._paddleocr_prewarm_lock._is_owned()
+                )
+                self.started = True
+
+            def is_alive(self):
+                return self.started
+
+        with patch.object(
+            app_logic.threading,
+            "Thread",
+            side_effect=RecordingThread,
+        ):
+            self.assertTrue(
+                app_logic.GameChangingTranslator.start_paddleocr_prewarm(
+                    app,
+                    settings,
+                    "test",
+                )
+            )
+
+        self.assertEqual(lock_owned_at_start, [True])
+
+    def test_different_paddleocr_prewarm_settings_do_not_start_concurrently(self):
+        import app_logic
+        import worker_threads
+        from dataclasses import replace
+
+        app = self._paddle_app()
+        first_settings = worker_threads.get_paddleocr_settings_from_app(app)
+        second_settings = replace(first_settings, model_size="small")
+        app._paddleocr_prewarm_lock = threading.RLock()
+        app._paddleocr_prewarm_thread = types.SimpleNamespace(
+            is_alive=lambda: True
+        )
+        app._paddleocr_prewarm_settings = first_settings
+        app._paddleocr_prewarmed_settings = None
+        app._paddleocr_prewarm_generation = 1
+        app._paddleocr_prewarm_event = threading.Event()
+
+        with patch.object(app_logic.threading, "Thread") as thread_factory:
+            started = (
+                app_logic.GameChangingTranslator.start_paddleocr_prewarm(
+                    app,
+                    second_settings,
+                    "settings changed",
+                )
+            )
+
+        self.assertFalse(started)
+        thread_factory.assert_not_called()
+
+    def test_invalidated_paddleocr_wait_tracks_the_still_active_operation(self):
+        import app_logic
+        import worker_threads
+        from dataclasses import replace
+
+        app = self._paddle_app()
+        first_settings = worker_threads.get_paddleocr_settings_from_app(app)
+        second_settings = replace(first_settings, model_size="small")
+        app._paddleocr_prewarm_lock = threading.RLock()
+        app._paddleocr_prewarm_thread = types.SimpleNamespace(
+            is_alive=lambda: True
+        )
+        app._paddleocr_prewarm_settings = first_settings
+        app._paddleocr_prewarmed_settings = None
+        app._paddleocr_prewarm_generation = 1
+        active_event = threading.Event()
+        app._paddleocr_prewarm_event = active_event
+        result = []
+        finished = threading.Event()
+
+        app_logic.GameChangingTranslator._invalidate_paddleocr_prewarm_state(
+            app
+        )
+
+        waiter = threading.Thread(
+            target=lambda: (
+                result.append(
+                    app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
+                        app,
+                        second_settings,
+                        timeout=1.0,
+                    )
+                ),
+                finished.set(),
+            )
+        )
+        waiter.start()
+        self.assertFalse(finished.wait(0.05))
+
+        active_event.set()
+        self.assertTrue(finished.wait(0.2))
+        waiter.join(timeout=1.0)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result, [False])
+
+    def test_paddleocr_worker_wait_default_is_twenty_seconds(self):
+        import app_logic
+        import inspect
+
+        self.assertEqual(
+            inspect.signature(
+                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm
+            ).parameters["timeout"].default,
+            20.0,
+        )
+
+    def test_worker_stops_waiting_for_paddleocr_when_app_stops(self):
+        import app_logic
+        import worker_threads
+
+        app = self._paddle_app()
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+        app.is_running = True
+        app._paddleocr_prewarm_lock = threading.RLock()
+        app._paddleocr_prewarm_thread = types.SimpleNamespace(
+            is_alive=lambda: True
+        )
+        app._paddleocr_prewarm_settings = settings
+        app._paddleocr_prewarmed_settings = None
+        app._paddleocr_prewarm_generation = 1
+        app._paddleocr_prewarm_event = threading.Event()
+        result = []
+
+        waiter = threading.Thread(
+            target=lambda: result.append(
+                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
+                    app,
+                    settings,
+                    timeout=1.0,
+                )
+            )
+        )
+        waiter.start()
+        app.is_running = False
+        waiter.join(timeout=0.5)
+
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result, [False])
+
 
 class PaddleOCRWorkerRoutingTests(unittest.TestCase):
     def _var(self, value):
@@ -760,6 +954,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             paddleocr_text_det_limit_side_len_var=types.SimpleNamespace(get=lambda: "960"),
             paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
             paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
+            wait_for_paddleocr_prewarm=Mock(return_value=True),
         )
 
         with patch.object(
@@ -777,6 +972,10 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         self.assertEqual(engine_label, "PaddleOCR")
         self.assertEqual(processed_cv_img.shape[0:2], (10, 16))
         recognize.assert_called_once()
+        app.wait_for_paddleocr_prewarm.assert_called_once_with(
+            recognize.call_args.args[1],
+            timeout=20.0,
+        )
 
     def test_process_local_ocr_frame_uses_paddleocr_subtitle_fast_path(self):
         import worker_threads

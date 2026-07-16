@@ -398,7 +398,19 @@ class TranslationContextMixin:
             value = int(var.get()) if var is not None else 5
         except (TypeError, ValueError):
             value = 5
-        return max(0, min(10, value))
+        context_size = max(0, min(10, value))
+        optimization_getter = getattr(
+            self.app,
+            "get_ai_optimization_mode",
+            None,
+        )
+        if callable(optimization_getter):
+            try:
+                if str(optimization_getter() or "").strip().lower() == "speed":
+                    return min(context_size, 1)
+            except Exception:
+                pass
+        return context_size
 
     def _custom_usage_number(self, usage, *keys):
         if not isinstance(usage, dict):
@@ -495,5 +507,4 @@ class TranslationContextMixin:
                 "Custom AI adaptive latency observation failed: "
                 f"{type(observe_error).__name__} - {observe_error}"
             )
-
 

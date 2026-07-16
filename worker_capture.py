@@ -366,6 +366,13 @@ def process_local_ocr_frame(
 ):
     if ocr_model == PADDLEOCR_MODEL_CODE:
         settings = get_paddleocr_settings_from_app(app)
+        wait_for_prewarm = getattr(
+            app,
+            "wait_for_paddleocr_prewarm",
+            None,
+        )
+        if callable(wait_for_prewarm):
+            wait_for_prewarm(settings, timeout=20.0)
         try:
             keep_linebreaks = bool(app.keep_linebreaks_var.get())
         except Exception:

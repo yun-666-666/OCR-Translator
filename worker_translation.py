@@ -4,6 +4,7 @@ import math
 import sys
 import threading
 import time
+import tkinter as tk
 
 from logger import summarize_text_for_log
 from translation_utils import post_process_translation_text
@@ -11,6 +12,7 @@ from worker_capture import _increment_metric, _refresh_translation_metric_gauges
 
 DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
 ROUTE_SUPERSEDE_MIN_SAMPLES = 8
+ROUTE_SUPERSEDE_LEARNING_SECONDS = 3.0
 ROUTE_SUPERSEDE_P90_FRACTION = 0.5
 ROUTE_SUPERSEDE_MAX_SECONDS = 4.0
 
@@ -37,6 +39,29 @@ def _start_async_translation(*args, **kwargs):
 
 def _process_translation_async(*args, **kwargs):
     return _facade().process_translation_async(*args, **kwargs)
+
+
+def _schedule_ui_callback(app, callback, *args):
+    """Schedule a worker result only while the Tk root is still usable."""
+    if getattr(app, "_app_is_closing", False):
+        return False
+    if hasattr(app, "is_running") and not bool(app.is_running):
+        return False
+    root = getattr(app, "root", None)
+    if root is None:
+        return False
+    exists = getattr(root, "winfo_exists", None)
+    try:
+        if callable(exists) and not bool(exists()):
+            return False
+        root.after(0, callback, *args)
+        return True
+    except (RuntimeError, tk.TclError) as schedule_error:
+        _log_debug(
+            "LATENCY: worker UI callback dropped: "
+            f"{type(schedule_error).__name__} - {schedule_error}"
+        )
+        return False
 
 
 def _get_translation_submit_interval_seconds(app, text_to_translate):
@@ -144,7 +169,7 @@ def _get_translation_supersede_after_seconds(app, request_snapshot=None):
         or not math.isfinite(p90_seconds)
         or p90_seconds <= 0.0
     ):
-        return configured
+        return max(configured, ROUTE_SUPERSEDE_LEARNING_SECONDS)
     route_threshold = min(
         ROUTE_SUPERSEDE_MAX_SECONDS,
         p90_seconds * ROUTE_SUPERSEDE_P90_FRACTION,
@@ -592,11 +617,8 @@ def _build_streaming_display_callback(app, translation_sequence):
                 return
             state["scheduled"] = True
 
-        try:
-            app.root.after(0, display_latest_partial)
-        except Exception:
+        if not _schedule_ui_callback(app, display_latest_partial):
             with state_lock:
                 state["scheduled"] = False
-            raise
 
     return stream_callback

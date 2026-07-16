@@ -562,6 +562,11 @@ class CustomAIRequestsMixin:
             or usage.get("input_tokens_details")
             or {}
         )
+        completion_details = (
+            usage.get("completion_tokens_details")
+            or usage.get("output_tokens_details")
+            or {}
+        )
         cached_prompt_tokens = (
             int(prompt_details.get("cached_tokens") or 0)
             if isinstance(prompt_details, dict)
@@ -572,6 +577,17 @@ class CustomAIRequestsMixin:
             if prompt_tokens > 0
             else 0.0
         )
+        reasoning_tokens = None
+        if (
+            isinstance(completion_details, dict)
+            and "reasoning_tokens" in completion_details
+        ):
+            try:
+                reasoning_tokens = int(
+                    completion_details.get("reasoning_tokens") or 0
+                )
+            except (TypeError, ValueError):
+                reasoning_tokens = 0
         cost_usd = None
         try:
             cost_ticks = usage.get("cost_in_usd_ticks")
@@ -589,6 +605,8 @@ class CustomAIRequestsMixin:
             "cached_input_tokens": cached_prompt_tokens,
             "cached_input_ratio": cached_input_ratio,
         }
+        if reasoning_tokens is not None:
+            normalized_usage["reasoning_tokens"] = reasoning_tokens
         if cost_usd is not None:
             normalized_usage["cost_usd"] = cost_usd
         return normalized_usage

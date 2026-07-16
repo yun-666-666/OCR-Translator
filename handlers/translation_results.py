@@ -141,6 +141,15 @@ Call Duration: {call_duration:.3f} seconds
                     "output_tokens",
                     "completion_tokens",
                 ))
+                reasoning_tokens_line = ""
+                if isinstance(usage, dict) and "reasoning_tokens" in usage:
+                    reasoning_tokens = int(self._custom_usage_number(
+                        usage,
+                        "reasoning_tokens",
+                    ))
+                    reasoning_tokens_line = (
+                        f"Reasoning Tokens: {reasoning_tokens}\n"
+                    )
                 cached_prompt_tokens = int(self._custom_usage_number(
                     usage,
                     "cached_input_tokens",
@@ -167,6 +176,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"Cached Input Tokens: {cached_prompt_tokens}\n"
                     f"cached_input_ratio={cached_input_ratio:.2f}\n"
                     f"Output Tokens: {completion_tokens}\n"
+                    f"{reasoning_tokens_line}"
                     f"Cost: ${cost:.8f}\n"
                     f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
                 )

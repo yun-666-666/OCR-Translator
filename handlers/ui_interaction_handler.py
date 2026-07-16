@@ -1185,7 +1185,7 @@ class UIInteractionHandler:
             log_debug(f"Error saving debug images: {e}")
             messagebox.showerror("Error", f"Failed to save debug images: {e}", parent=self.app.root)
 
-    def save_settings(self):
+    def save_settings(self, force=False):
         import time
         current_time = time.time()
 
@@ -1194,7 +1194,10 @@ class UIInteractionHandler:
             return True
 
         # Debounce rapid successive save attempts
-        if current_time - self._last_save_time < self._save_debounce_interval:
+        if (
+            not force
+            and current_time - self._last_save_time < self._save_debounce_interval
+        ):
             log_debug(f"Save settings debounced (last save {current_time - self._last_save_time:.3f}s ago)")
             return True
 

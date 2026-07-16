@@ -223,6 +223,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self._paddleocr_prewarm_settings = None
         self._paddleocr_prewarmed_settings = None
         self._paddleocr_prewarm_generation = 0
+        self._paddleocr_prewarm_event = threading.Event()
 
         # Adaptive Scan Interval Infrastructure
         self.base_scan_interval = 500  # User's preferred setting (will be updated from config)
@@ -488,7 +489,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
 
         def _settings_changed_callback_internal(*args, **kwargs):
             if self._fully_initialized and not self._suppress_traces and not self._ui_update_in_progress:
-                self.save_settings()
+                self.schedule_settings_save()
             elif self._suppress_traces:
                 log_debug("StringVar trace suppressed during UI update")
             elif self._ui_update_in_progress:
@@ -510,7 +511,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                         self.current_scan_interval = int(new_scan_interval * 1.5)  # Maintain 150% overload ratio
                         log_debug(f"Adaptive scan interval updated during overload: base={self.base_scan_interval}ms, current={self.current_scan_interval}ms")
 
-                self.save_settings()
+                self.schedule_settings_save()
             elif self._suppress_traces:
                 log_debug("Scan interval trace suppressed during UI update")
             elif self._ui_update_in_progress:
@@ -522,7 +523,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             if self._fully_initialized and not self._suppress_traces and not self._ui_update_in_progress:
                 if hasattr(self, 'translation_handler') and hasattr(self.translation_handler, '_clear_active_context'):
                     self.translation_handler._clear_active_context()
-                self.save_settings()
+                self.schedule_settings_save()
             elif self._suppress_traces:
                 log_debug("Custom context window trace suppressed during UI update")
             elif self._ui_update_in_progress:
@@ -800,14 +801,25 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarmed_settings = None
         if not hasattr(self, '_paddleocr_prewarm_generation'):
             self._paddleocr_prewarm_generation = 0
+        if not hasattr(self, '_paddleocr_prewarm_event'):
+            self._paddleocr_prewarm_event = threading.Event()
         return self._paddleocr_prewarm_lock
 
     def _invalidate_paddleocr_prewarm_state(self):
         lock = self._ensure_paddleocr_prewarm_state()
         with lock:
+            active_thread = self._paddleocr_prewarm_thread
+            active = (
+                active_thread is not None
+                and active_thread.is_alive()
+            )
             self._paddleocr_prewarm_generation += 1
-            self._paddleocr_prewarm_settings = None
             self._paddleocr_prewarmed_settings = None
+            if not active:
+                self._paddleocr_prewarm_event.set()
+                self._paddleocr_prewarm_thread = None
+                self._paddleocr_prewarm_settings = None
+                self._paddleocr_prewarm_event = threading.Event()
 
     def schedule_initial_ui_readiness(self):
         """Prepare overlays before starting background OCR initialization."""
@@ -866,23 +878,43 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             if (
                 active_thread is not None
                 and active_thread.is_alive()
-                and self._paddleocr_prewarm_settings == settings
             ):
-                log_debug(f"PaddleOCR prewarm already running ({reason})")
+                active_settings = self._paddleocr_prewarm_settings
+                if active_settings == settings:
+                    detail = "matching engine"
+                else:
+                    detail = "different engine settings"
+                log_debug(
+                    "PaddleOCR prewarm already running "
+                    f"({reason}; {detail})"
+                )
                 return False
 
             self._paddleocr_prewarm_generation += 1
             generation = self._paddleocr_prewarm_generation
             self._paddleocr_prewarm_settings = settings
+            self._paddleocr_prewarm_event.set()
+            ready_event = threading.Event()
+            self._paddleocr_prewarm_event = ready_event
             prewarm_thread = threading.Thread(
                 target=self._run_paddleocr_prewarm,
-                args=(settings, generation, reason),
+                args=(settings, generation, reason, ready_event),
                 name="PaddleOCRPrewarm",
                 daemon=True,
             )
             self._paddleocr_prewarm_thread = prewarm_thread
-
-        prewarm_thread.start()
+            try:
+                prewarm_thread.start()
+            except Exception as start_error:
+                if generation == self._paddleocr_prewarm_generation:
+                    self._paddleocr_prewarm_thread = None
+                    self._paddleocr_prewarm_settings = None
+                ready_event.set()
+                log_debug(
+                    "PaddleOCR prewarm thread failed to start "
+                    f"({reason}): {start_error}"
+                )
+                return False
         log_debug(
             "PaddleOCR prewarm started "
             f"reason={reason} version={settings.ocr_version} "
@@ -890,7 +922,44 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         )
         return True
 
-    def _run_paddleocr_prewarm(self, settings, generation, reason):
+    def wait_for_paddleocr_prewarm(self, settings, timeout=20.0):
+        """Wait for an active matching prewarm instead of initializing twice."""
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            if self._paddleocr_prewarmed_settings == settings:
+                return True
+            active_thread = self._paddleocr_prewarm_thread
+            if (
+                active_thread is None
+                or not active_thread.is_alive()
+            ):
+                return False
+            ready_event = self._paddleocr_prewarm_event
+
+        started_at = time.monotonic()
+        timeout_seconds = max(0.0, float(timeout))
+        deadline = started_at + timeout_seconds
+        completed = False
+        while True:
+            if hasattr(self, "is_running") and not bool(self.is_running):
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            if ready_event.wait(timeout=min(0.05, remaining)):
+                completed = True
+                break
+        waited = time.monotonic() - started_at
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            ready = self._paddleocr_prewarmed_settings == settings
+        log_debug(
+            "PaddleOCR worker prewarm wait "
+            f"completed={completed} ready={ready} duration={waited:.2f}s"
+        )
+        return ready
+
+    def _run_paddleocr_prewarm(self, settings, generation, reason, ready_event):
         start_time = time.monotonic()
         try:
             get_paddleocr_text_recognition_engine(settings)
@@ -898,17 +967,26 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         except Exception as e:
             lock = self._ensure_paddleocr_prewarm_state()
             with lock:
-                if generation == self._paddleocr_prewarm_generation:
+                if ready_event is self._paddleocr_prewarm_event:
                     self._paddleocr_prewarmed_settings = None
                     self._paddleocr_prewarm_settings = None
+                    self._paddleocr_prewarm_thread = None
+            ready_event.set()
             log_debug(f"PaddleOCR prewarm failed ({reason}): {e}")
             return
 
         duration = time.monotonic() - start_time
         lock = self._ensure_paddleocr_prewarm_state()
         with lock:
-            if generation == self._paddleocr_prewarm_generation:
-                self._paddleocr_prewarmed_settings = settings
+            if ready_event is self._paddleocr_prewarm_event:
+                self._paddleocr_prewarmed_settings = (
+                    settings
+                    if generation == self._paddleocr_prewarm_generation
+                    else None
+                )
+                self._paddleocr_prewarm_settings = None
+                self._paddleocr_prewarm_thread = None
+        ready_event.set()
         log_debug(f"PaddleOCR prewarm completed ({reason}) in {duration:.2f}s")
 
     def clear_ocr_stability_gate(self, reason="OCR state changed"):

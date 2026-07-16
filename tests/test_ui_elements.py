@@ -3,6 +3,7 @@ from tkinter import ttk
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 import modern_ui
 import gui_settings_builder
@@ -90,6 +91,88 @@ class SettingsLayoutSourceTests(unittest.TestCase):
             'self.target_text_outline_width_var.trace_add("write", '
             "self.settings_changed_callback)",
             app_logic_source,
+        )
+
+
+class SettingsSaveDebounceTests(unittest.TestCase):
+    def test_repeated_trace_saves_coalesce_to_one_write(self):
+        import app_logic
+
+        callbacks = {}
+        cancelled = []
+        next_id = [0]
+
+        def after(delay, callback):
+            next_id[0] += 1
+            timer_id = f"timer-{next_id[0]}"
+            callbacks[timer_id] = (delay, callback)
+            return timer_id
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = types.SimpleNamespace(
+            after=after,
+            after_cancel=lambda timer_id: cancelled.append(timer_id),
+        )
+        app._fully_initialized = True
+        app._app_is_closing = False
+        app._save_settings_timer = None
+        app.ui_interaction_handler = types.SimpleNamespace(
+            save_settings=Mock(return_value=True)
+        )
+        app.get_ocr_model_setting = lambda: "custom_ai"
+
+        app.schedule_settings_save()
+        first_timer = app._save_settings_timer
+        app.schedule_settings_save()
+        second_timer = app._save_settings_timer
+
+        self.assertEqual(cancelled, [first_timer])
+        self.assertNotEqual(first_timer, second_timer)
+        self.assertEqual(callbacks[second_timer][0], 400)
+
+        callbacks[second_timer][1]()
+
+        app.ui_interaction_handler.save_settings.assert_called_once_with(
+            force=True
+        )
+        self.assertIsNone(app._save_settings_timer)
+
+    def test_regular_explicit_save_bypasses_handler_debounce(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = types.SimpleNamespace(after_cancel=Mock())
+        app._fully_initialized = True
+        app._app_is_closing = False
+        app._save_settings_timer = None
+        app.ui_interaction_handler = types.SimpleNamespace(
+            save_settings=Mock(return_value=True)
+        )
+        app.get_ocr_model_setting = lambda: "custom_ai"
+
+        self.assertTrue(app.save_settings())
+
+        app.ui_interaction_handler.save_settings.assert_called_once_with(
+            force=True
+        )
+
+    def test_forced_save_bypasses_handler_debounce_contract(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.root = types.SimpleNamespace(after_cancel=Mock())
+        app._fully_initialized = True
+        app._app_is_closing = True
+        app._save_settings_timer = "pending"
+        app.ui_interaction_handler = types.SimpleNamespace(
+            save_settings=Mock(return_value=True)
+        )
+
+        self.assertTrue(app.save_settings(force=True))
+
+        app.root.after_cancel.assert_called_once_with("pending")
+        app.ui_interaction_handler.save_settings.assert_called_once_with(
+            force=True
         )
 
     def test_colors_use_two_by_two_clickable_swatches_without_buttons(self):

@@ -60,12 +60,14 @@ deepl_context_window_3,3 (Three subtitles)
 custom_context_window_label,Custom AI context subtitles:
 ai_optimization_mode_label,AI optimization:
 ai_optimization_mode_auto,Automatic (recommended)
+ai_optimization_mode_stream,Streaming
 ai_optimization_mode_speed,Speed and fewer tokens
 ai_optimization_mode_quality,Quality first
 custom_ai_submit_interval_label,AI translation minimum interval (ms):
 ai_profile_structured_output_label,Structured output
 ai_profile_reasoning_effort_label,Reasoning effort
 custom_ai_reasoning_effort_low,Low
+custom_ai_reasoning_effort_none,None
 custom_ai_reasoning_effort_medium,Medium
 custom_ai_reasoning_effort_high,High
 custom_ai_reasoning_effort_ultra,Ultra

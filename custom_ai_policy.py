@@ -48,6 +48,7 @@ CUSTOM_AI_REASONING_EFFORT_HIGH = "high"
 CUSTOM_AI_REASONING_EFFORT_ULTRA = "ultra"
 CUSTOM_AI_REASONING_EFFORT_NONE = "none"
 CUSTOM_AI_REASONING_EFFORTS = {
+    CUSTOM_AI_REASONING_EFFORT_NONE,
     CUSTOM_AI_REASONING_EFFORT_LOW,
     CUSTOM_AI_REASONING_EFFORT_MEDIUM,
     CUSTOM_AI_REASONING_EFFORT_HIGH,
@@ -358,8 +359,8 @@ class CustomAILatencyModeAdvisor:
         ):
             return CUSTOM_AI_LATENCY_MODE_SAFE, "cooldown"
 
-        if self._consecutive_errors >= self.consecutive_error_threshold:
-            return CUSTOM_AI_LATENCY_MODE_SAFE, "error_rate"
+        if self._consecutive_errors > 0:
+            return CUSTOM_AI_LATENCY_MODE_SAFE, "recent_error"
 
         if (
             primary_cooldown_seconds > 0.0
@@ -379,6 +380,8 @@ class CustomAILatencyModeAdvisor:
             return CUSTOM_AI_LATENCY_MODE_SAFE, "race_cooldown"
 
         if p90_seconds >= self.stream_latency_threshold_seconds:
+            if stream_supported:
+                return CUSTOM_AI_LATENCY_MODE_STREAM, "p90_high_stream"
             return CUSTOM_AI_LATENCY_MODE_SAFE, "high_latency_safe"
 
         return CUSTOM_AI_LATENCY_MODE_SAFE, "low_latency"
@@ -402,4 +405,3 @@ class CustomAILatencyModeAdvisor:
         ordered = sorted(self._durations)
         rank = int(math.ceil(0.90 * len(ordered)))
         return ordered[max(0, min(len(ordered) - 1, rank - 1))]
-
