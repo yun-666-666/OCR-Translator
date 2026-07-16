@@ -30,6 +30,8 @@ class DisplayManager:
         self.last_widget_width = 0
         self.current_logical_text = ""
         self.current_language_code = None
+        self.current_preserve_linebreaks = True
+        self.current_horizontal_centered = False
 
     def update_translation_text(self, text_to_display):
         """Updates the translation text overlay with new content
@@ -46,13 +48,39 @@ class DisplayManager:
         # Schedule the actual update via the main thread's event loop
         self.app.root.after(0, self._update_translation_text_on_main_thread, text_to_display)
 
-    def manually_wrap_and_process_rtl(self, widget, logical_text, language_code, retry_count=0):
+    def _apply_tkinter_text_alignment(self, widget, justify):
+        widget.tag_configure("translation_alignment", justify=justify)
+        widget.tag_add("translation_alignment", "1.0", "end")
+
+    def manually_wrap_and_process_rtl(
+        self,
+        widget,
+        logical_text,
+        language_code,
+        retry_count=0,
+        preserve_linebreaks=True,
+        horizontal_centered=False,
+    ):
         """
         Enhanced manual text wrapping with better accuracy and edge case handling.
 
         This prevents tkinter's automatic wrapping from interfering with RTL text display.
         """
         try:
+            justify = 'center' if horizontal_centered else 'right'
+            if preserve_linebreaks:
+                processed_lines = [
+                    RTLTextProcessor.process_bidi_text(line, language_code)
+                    for line in logical_text.splitlines()
+                ]
+                widget.config(state=tk.NORMAL)
+                widget.delete("1.0", tk.END)
+                widget.insert("1.0", "\n".join(processed_lines))
+                RTLTextProcessor.configure_tkinter_widget_for_rtl(widget, is_rtl=True)
+                self._apply_tkinter_text_alignment(widget, justify)
+                widget.config(state=tk.DISABLED)
+                return
+
             # 1. Ensure widget is properly rendered and get accurate measurements
             widget.update_idletasks()  # Force widget to complete any pending layout updates
 
@@ -83,12 +111,24 @@ class DisplayManager:
                 if retry_count < 3:
                     log_debug(f"DisplayManager: Widget not ready (w={widget_width}, h={widget_height}), retrying in 50ms (attempt {retry_count + 1})")
                     # Retry after a short delay to allow widget to finish rendering
-                    widget.after(50, lambda: self.manually_wrap_and_process_rtl(widget, logical_text, language_code, retry_count + 1))
+                    widget.after(50, lambda: self.manually_wrap_and_process_rtl(
+                        widget,
+                        logical_text,
+                        language_code,
+                        retry_count + 1,
+                        preserve_linebreaks=False,
+                        horizontal_centered=horizontal_centered,
+                    ))
                     return
                 else:
                     log_debug(f"DisplayManager: Widget still not ready after 3 retries, using fallback processing")
                     # Fall back to standard processing if widget never becomes ready
-                    self._apply_fallback_rtl_processing(widget, logical_text, language_code)
+                    self._apply_fallback_rtl_processing(
+                        widget,
+                        logical_text,
+                        language_code,
+                        horizontal_centered=horizontal_centered,
+                    )
                     return
 
             effective_width = widget_width - horizontal_padding
@@ -170,6 +210,7 @@ class DisplayManager:
 
             # Configure for RTL display
             RTLTextProcessor.configure_tkinter_widget_for_rtl(widget, is_rtl=True)
+            self._apply_tkinter_text_alignment(widget, justify)
             widget.config(state=tk.DISABLED)
 
             log_debug(f"DisplayManager: Successfully applied manual RTL wrapping")
@@ -177,9 +218,20 @@ class DisplayManager:
         except Exception as e:
             log_debug(f"DisplayManager: Error in manual RTL wrapping: {e}")
             # Fall back to basic processing
-            self._apply_fallback_rtl_processing(widget, logical_text, language_code)
+            self._apply_fallback_rtl_processing(
+                widget,
+                logical_text,
+                language_code,
+                horizontal_centered=horizontal_centered,
+            )
 
-    def _apply_fallback_rtl_processing(self, widget, logical_text, language_code):
+    def _apply_fallback_rtl_processing(
+        self,
+        widget,
+        logical_text,
+        language_code,
+        horizontal_centered=False,
+    ):
         """Fallback RTL processing when manual wrapping fails."""
         try:
             processed_text = RTLTextProcessor.process_bidi_text(logical_text, language_code)
@@ -188,6 +240,9 @@ class DisplayManager:
             widget.delete("1.0", tk.END)
             widget.insert("1.0", processed_text)
             RTLTextProcessor.configure_tkinter_widget_for_rtl(widget, is_rtl=True)
+            self._apply_tkinter_text_alignment(
+                widget, 'center' if horizontal_centered else 'right'
+            )
             widget.config(state=tk.DISABLED)
 
             log_debug(f"DisplayManager: Applied fallback RTL processing")
@@ -217,7 +272,9 @@ class DisplayManager:
                     self.app.translation_text,
                     self.current_logical_text,
                     self.current_language_code,
-                    retry_count=0  # Reset retry count for resize events
+                    retry_count=0,
+                    preserve_linebreaks=self.current_preserve_linebreaks,
+                    horizontal_centered=self.current_horizontal_centered,
                 )
 
     def _update_translation_text_on_main_thread(self, text_content_main_thread):
@@ -268,6 +325,8 @@ class DisplayManager:
                 if horizontal_centered_var is not None
                 else False
             )
+            if not preserve_linebreaks:
+                new_text_to_display = ' '.join(new_text_to_display.split())
 
             # --- FIX: Directly use the target language code from the correct variable ---
             target_lang_code = self.app.target_lang_var.get()
@@ -280,6 +339,8 @@ class DisplayManager:
             # Store current text and language for resize handling
             self.current_logical_text = new_text_to_display
             self.current_language_code = target_lang_code
+            self.current_preserve_linebreaks = preserve_linebreaks
+            self.current_horizontal_centered = horizontal_centered
 
             if hasattr(self.app.translation_text, 'set_rtl_text'):
                 # PySide text widget
@@ -320,10 +381,22 @@ class DisplayManager:
                         self.app.translation_text._rtl_processed_once = True
                         log_debug(f"DisplayManager: First-time RTL processing with delay for language: {target_lang_code}")
                         self.app.root.after(100, lambda: self.manually_wrap_and_process_rtl(
-                            self.app.translation_text, new_text_to_display, target_lang_code, retry_count=0))
+                            self.app.translation_text,
+                            new_text_to_display,
+                            target_lang_code,
+                            retry_count=0,
+                            preserve_linebreaks=preserve_linebreaks,
+                            horizontal_centered=horizontal_centered,
+                        ))
                     else:
                         log_debug(f"DisplayManager: Subsequent RTL processing for language: {target_lang_code}")
-                        self.manually_wrap_and_process_rtl(self.app.translation_text, new_text_to_display, target_lang_code)
+                        self.manually_wrap_and_process_rtl(
+                            self.app.translation_text,
+                            new_text_to_display,
+                            target_lang_code,
+                            preserve_linebreaks=preserve_linebreaks,
+                            horizontal_centered=horizontal_centered,
+                        )
                 else:
                     log_debug(f"DisplayManager: Using standard processing for LTR text")
                     self.app.translation_text.config(state=tk.NORMAL)
@@ -335,6 +408,11 @@ class DisplayManager:
                     else:
                         self.app.translation_text.tag_configure("ltr", justify='left')
                         self.app.translation_text.tag_add("ltr", "1.0", "end")
+
+                    self._apply_tkinter_text_alignment(
+                        self.app.translation_text,
+                        'center' if horizontal_centered else 'left',
+                    )
 
                     self.app.translation_text.config(state=tk.DISABLED)
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import config_manager
 from custom_ai import CustomAIProvider
@@ -29,6 +29,30 @@ class _VisibleOverlay:
         return True
 
     def attributes(self, *_args):
+        return None
+
+
+class _TkFallbackText:
+    def __init__(self):
+        self.content = ""
+        self.tag_configurations = []
+
+    def config(self, **_kwargs):
+        return None
+
+    def delete(self, *_args):
+        self.content = ""
+
+    def insert(self, _index, text):
+        self.content += text
+
+    def tag_configure(self, name, **kwargs):
+        self.tag_configurations.append((name, kwargs))
+
+    def tag_add(self, *_args):
+        return None
+
+    def see(self, *_args):
         return None
 
 
@@ -86,7 +110,7 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
         DisplayManager(app)._update_translation_text_on_main_thread("one<br>two")
 
         translation_text.set_rtl_text.assert_called_once_with(
-            "one\ntwo",
+            "one two",
             "zh-CN",
             "#112233",
             "#ffffff",
@@ -94,6 +118,32 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             font_family="Microsoft YaHei",
             preserve_linebreaks=False,
             horizontal_centered=True,
+        )
+
+    def test_tk_fallback_flattens_compact_text_and_centers_horizontally(self):
+        translation_text = _TkFallbackText()
+        app = SimpleNamespace(
+            target_overlay=_VisibleOverlay(),
+            translation_text=translation_text,
+            is_running=True,
+            target_lang_var=_Value("en"),
+            target_text_colour_var=_Value("#ffffff"),
+            target_font_size_var=_Value(20),
+            target_font_type_var=_Value("Arial"),
+            target_colour_var=_Value("#112233"),
+            translation_line_layout_var=_Value("compact"),
+            translation_horizontal_centered_var=_Value(True),
+        )
+
+        with patch("handlers.display_manager.RTL_PROCESSOR_AVAILABLE", False):
+            DisplayManager(app)._update_translation_text_on_main_thread(
+                "one<br>two\nthree"
+            )
+
+        self.assertEqual(translation_text.content, "one two three")
+        self.assertIn(
+            ("translation_alignment", {"justify": "center"}),
+            translation_text.tag_configurations,
         )
 
 
@@ -148,4 +198,3 @@ class TranslationDisplayLayoutPySideTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
