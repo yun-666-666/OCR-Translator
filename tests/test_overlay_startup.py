@@ -499,6 +499,12 @@ class OverlayStartupTests(unittest.TestCase):
 
 @unittest.skipUnless(pyside_overlay.PYSIDE6_AVAILABLE, "PySide6 is not installed")
 class PySideOverlayStartupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+
+        cls.app = QApplication.instance() or QApplication([])
+
     def _fake_pyside_overlay(self):
         class FakeStyleWidget:
             def __init__(self):
@@ -558,6 +564,31 @@ class PySideOverlayStartupTests(unittest.TestCase):
 
         self.assertIn("background-color: rgba(22, 44, 67, 0.0);", style)
         self.assertIn("border: 1px solid rgba(2, 24, 47, 0.0);", style)
+
+    def test_legacy_positional_constructor_keeps_visual_argument_mapping(self):
+        overlay = pyside_overlay.PySideTranslationOverlay(
+            [0, 0, 320, 120],
+            "#162c43",
+            "Translation",
+            10,
+            (5, 5),
+            14,
+            "Arial",
+            False,
+            1,
+            0.4,
+            16,
+            None,
+        )
+        try:
+            self.assertEqual(1, overlay._border_px)
+            self.assertEqual(0.4, overlay._opacity)
+            self.assertEqual(16, overlay._corner_radius)
+            self.assertEqual("#000000", overlay._text_outline_color)
+            self.assertEqual(0.0, overlay._text_outline_width)
+        finally:
+            overlay.close()
+            overlay.deleteLater()
 
     def test_windows_native_border_is_disabled_through_dwm(self):
         calls = []

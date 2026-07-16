@@ -232,6 +232,22 @@ if PYSIDE6_AVAILABLE:
             if not qcolor.isValid():
                 color = "#000000"
                 qcolor = QColor(color)
+            foreground_alpha = 1.0
+            alpha_match = re.fullmatch(
+                r"\s*rgba\(\s*[^,]+\s*,\s*[^,]+\s*,\s*[^,]+\s*,"
+                r"\s*([0-9]*\.?[0-9]+)\s*\)\s*",
+                str(getattr(self, "_fg_color", "")),
+                flags=re.IGNORECASE,
+            )
+            if alpha_match:
+                try:
+                    foreground_alpha = max(
+                        0.0,
+                        min(1.0, float(alpha_match.group(1))),
+                    )
+                except (TypeError, ValueError):
+                    foreground_alpha = 1.0
+            qcolor.setAlphaF(qcolor.alphaF() * foreground_alpha)
             try:
                 width = (
                     self._outline_width
@@ -584,12 +600,12 @@ if PYSIDE6_AVAILABLE:
                      font_size: int = 14,
                      font_family: str = "Arial",
                      font_bold: bool = False,
-                     text_outline_color: str = "#000000",
-                     text_outline_width: float = 0,
                      border_px: int = 0,
                      opacity: float = 0.85,
                      corner_radius: int = 16,
-                     parent=None):
+                     parent=None,
+                     text_outline_color: str = "#000000",
+                     text_outline_width: float = 0):
             super().__init__(parent)
             self.text_widget = None
             self.bg_color = bg_color

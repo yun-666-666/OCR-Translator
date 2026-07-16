@@ -207,6 +207,26 @@ class RTLTextDisplayFontTests(unittest.TestCase):
         self.assertEqual(font_outline.color().name(), "#123456")
         self.assertEqual(font_outline.widthF(), 3.0)
 
+    def test_native_outline_follows_text_opacity(self):
+        self.widget.config(fg="rgba(255, 213, 79, 0.25)")
+        self.widget.set_rtl_text(
+            "hello",
+            "en",
+            outline_color="#000000",
+            outline_width=2,
+        )
+
+        partial_outline = self._document_outline()
+        self.assertAlmostEqual(
+            partial_outline.color().alphaF(),
+            0.25,
+            places=2,
+        )
+
+        self.widget.config(fg="rgba(255, 213, 79, 0.0)")
+        transparent_outline = self._document_outline()
+        self.assertEqual(transparent_outline.color().alphaF(), 0.0)
+
     def test_direct_render_applies_font_before_one_html_update(self):
         family = self._target_family()
 
