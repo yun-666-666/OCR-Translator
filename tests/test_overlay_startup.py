@@ -460,6 +460,18 @@ class PySideOverlayStartupTests(unittest.TestCase):
         self.assertEqual([], overlay.top_bar.styles)
         self.assertEqual([], overlay.text_widget.config_calls)
 
+    def test_background_border_uses_same_opacity_as_background(self):
+        overlay, _central = self._fake_pyside_overlay()
+        overlay._opacity = 0.0
+
+        style = pyside_overlay.PySideTranslationOverlay._background_style_sheet(
+            overlay,
+            "#162c43",
+        )
+
+        self.assertIn("background-color: rgba(22, 44, 67, 0.0);", style)
+        self.assertIn("border: 1px solid rgba(2, 24, 47, 0.0);", style)
+
 
 if __name__ == "__main__":
     unittest.main()

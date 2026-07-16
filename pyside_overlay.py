@@ -650,7 +650,8 @@ if PYSIDE6_AVAILABLE:
 
         def _background_style_sheet(self, bg_color):
             border_css = (
-                f"border: {self._border_px}px solid {self._adjust_color_brightness(bg_color, -20)};"
+                f"border: {self._border_px}px solid "
+                f"{self._hex_to_rgba(self._adjust_color_brightness(bg_color, -20), self._opacity)};"
                 if self._border_px > 0
                 else "border: none;"
             )
