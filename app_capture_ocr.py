@@ -4,6 +4,7 @@ import math
 import sys
 import time
 import tkinter as tk
+from dataclasses import replace
 from tkinter import ttk
 
 from config_manager import (
@@ -13,15 +14,7 @@ from config_manager import (
 )
 from modern_ui import style_tk_canvas, style_tk_text_widget
 from ocr_utils import (
-    API_OCR_IMAGE_DETAIL_DEFAULT,
-    API_OCR_IMAGE_FORMAT_DEFAULT,
-    API_OCR_IMAGE_MODE_DEFAULT,
-    API_OCR_IMAGE_QUALITY_DEFAULT,
     encode_image_for_api_ocr_payload,
-    normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_format,
-    normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
 )
 from overlay_manager import (
     create_source_overlay_om,
@@ -54,31 +47,18 @@ def _log_debug(message):
 
 class AppCaptureOcrMixin:
     def convert_to_api_ocr_image(self, pil_image):
-        """Convert a PIL image to configured API OCR bytes plus MIME metadata."""
-        format_getter = getattr(self, 'get_custom_ai_ocr_image_format', None)
-        mode_getter = getattr(self, 'get_custom_ai_ocr_image_mode', None)
-        quality_getter = getattr(self, 'get_custom_ai_ocr_image_quality', None)
-        detail_getter = getattr(self, 'get_custom_ai_ocr_image_detail', None)
-        if callable(format_getter):
-            image_format = format_getter()
+        """Convert a PIL image using the current automatic API OCR contract."""
+        decision_getter = getattr(self, "get_ai_ocr_image_decision", None)
+        if callable(decision_getter):
+            decision = decision_getter(image_size=getattr(pil_image, "size", None))
         else:
-            format_var = getattr(self, 'custom_ai_ocr_image_format_var', None)
-            image_format = normalize_api_ocr_image_format(format_var.get() if format_var is not None else API_OCR_IMAGE_FORMAT_DEFAULT)
-        if callable(mode_getter):
-            mode = mode_getter()
-        else:
-            mode_var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
-            mode = normalize_api_ocr_image_mode(mode_var.get() if mode_var is not None else API_OCR_IMAGE_MODE_DEFAULT)
-        if callable(quality_getter):
-            quality = quality_getter()
-        else:
-            quality_var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
-            quality = normalize_api_ocr_image_quality(quality_var.get() if quality_var is not None else API_OCR_IMAGE_QUALITY_DEFAULT)
-        if callable(detail_getter):
-            detail = detail_getter()
-        else:
-            detail_var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
-            detail = normalize_api_ocr_image_detail(detail_var.get() if detail_var is not None else API_OCR_IMAGE_DETAIL_DEFAULT)
+            from ai_optimization import resolve_ai_ocr_image_policy
+
+            decision = resolve_ai_ocr_image_policy("auto", image_size=pil_image.size)
+        image_format = decision.image_format
+        mode = decision.image_mode
+        quality = decision.image_quality
+        detail = decision.image_detail
         start = time.monotonic()
 
         try:
@@ -89,14 +69,14 @@ class AppCaptureOcrMixin:
                 image_format=image_format,
             )
         except Exception as e:
+            fallback_format = "png" if image_format == "jpeg" else "jpeg"
             _log_debug(
                 "API OCR image encoding failed "
                 f"format={image_format} mode={mode} quality={quality} detail={detail}: "
-                f"{type(e).__name__} - {e}; retrying format=webp mode=lossless_webp"
+                f"{type(e).__name__} - {e}; retrying format={fallback_format}"
             )
             try:
-                image_format = 'webp'
-                mode = 'lossless_webp'
+                image_format = fallback_format
                 encoded_image = encode_image_for_api_ocr_payload(
                     pil_image,
                     mode=mode,
@@ -106,16 +86,22 @@ class AppCaptureOcrMixin:
             except Exception as fallback_error:
                 _log_debug(
                     "API OCR image encoding failed "
-                    f"format=webp mode=lossless_webp quality={quality} detail={detail}: "
+                    f"format={fallback_format} mode={mode} quality={quality} detail={detail}: "
                     f"{type(fallback_error).__name__} - {fallback_error}"
                 )
                 return None
 
         duration = time.monotonic() - start
+        encoded_image = replace(
+            encoded_image,
+            image_detail=detail,
+            policy_reason=decision.reason,
+        )
         _log_debug(
             "API OCR image encoded "
             f"format={encoded_image.image_format} mime={encoded_image.mime_type} "
-            f"mode={mode} bytes={len(encoded_image.data)} detail={detail} duration={duration:.3f}s"
+            f"mode={mode} bytes={len(encoded_image.data)} detail={detail} "
+            f"policy_reason={decision.reason} duration={duration:.3f}s"
         )
         return encoded_image
 

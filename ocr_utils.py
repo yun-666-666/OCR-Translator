@@ -50,6 +50,8 @@ class EncodedApiOcrImage:
     data: bytes
     mime_type: str
     image_format: str
+    image_detail: str = API_OCR_IMAGE_DETAIL_DEFAULT
+    policy_reason: str = ""
 
 
 def _normalize_capture_backend(backend):

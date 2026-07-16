@@ -7887,6 +7887,8 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             b"png-bytes",
             "en",
             image_mime_type="image/png",
+            image_detail="high",
+            image_format="png",
         )
 
         self.assertEqual(result, "recognized")
@@ -7896,6 +7898,54 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             ],
             "image/png",
         )
+        self.assertEqual(
+            handler.custom_ai_provider.recognize.call_args.kwargs[
+                "image_detail"
+            ],
+            "high",
+        )
+
+    def test_custom_ai_ocr_remembers_rejected_image_format(self):
+        from ai_optimization import AiOcrImageCapabilityMemory
+
+        profile = {
+            "id": "profile-1",
+            "name": "Vision",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        memory = AiOcrImageCapabilityMemory()
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            custom_ai_latency_mode_var=DummyVar("safe"),
+            ai_ocr_image_capability_memory=memory,
+        )
+        handler = TranslationHandler(app)
+        try:
+            handler.custom_ai_provider.recognize = Mock(
+                side_effect=ValueError(
+                    "unsupported image format: webp"
+                )
+            )
+
+            result = handler.perform_ocr(
+                b"webp-bytes",
+                "en",
+                image_mime_type="image/webp",
+                image_format="webp",
+            )
+
+            self.assertTrue(result.startswith("<e>: Custom AI OCR error:"))
+            self.assertTrue(memory.is_format_unsupported(profile, "webp"))
+        finally:
+            handler.close()
 
     def test_custom_ai_translation_uses_configured_context_window_size(self):
         class Profiles:

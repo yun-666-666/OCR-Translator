@@ -16,6 +16,7 @@ from custom_ai import (
     normalize_custom_ai_structured_output_mode,
     normalize_custom_ai_wire_api,
 )
+from ai_optimization import looks_like_unsupported_image_format_error
 from logger import summarize_text_for_log
 
 CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
@@ -276,7 +277,14 @@ class TranslationRequestsMixin:
                 request_sequence=request_sequence,
             )
 
-    def perform_ocr(self, image_data, source_lang, image_mime_type="image/webp"):
+    def perform_ocr(
+        self,
+        image_data,
+        source_lang,
+        image_mime_type="image/webp",
+        image_detail="auto",
+        image_format="webp",
+    ):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
         profile = self.app.custom_ai_profiles.get_active_profile("ocr")
         if not profile:
@@ -296,11 +304,7 @@ class TranslationRequestsMixin:
                 source_lang,
                 keep_linebreaks=self.app.keep_linebreaks_var.get(),
                 latency_mode=latency_mode,
-                image_detail=(
-                    self.app.get_custom_ai_ocr_image_detail()
-                    if hasattr(self.app, 'get_custom_ai_ocr_image_detail')
-                    else "auto"
-                ),
+                image_detail=image_detail,
                 image_mime_type=image_mime_type,
             )
             available = getattr(
@@ -318,6 +322,26 @@ class TranslationRequestsMixin:
             return result
         except Exception as e:
             error_text = self._sanitize_custom_ai_profile_error(e, profile)
+            capability_memory = getattr(
+                self.app,
+                "ai_ocr_image_capability_memory",
+                None,
+            )
+            if (
+                capability_memory is not None
+                and looks_like_unsupported_image_format_error(
+                    error_text,
+                    image_format,
+                )
+            ):
+                capability_memory.mark_format_unsupported(
+                    profile,
+                    image_format,
+                )
+                _log_debug(
+                    "Remembered unsupported Custom AI OCR image format "
+                    f"format={image_format}"
+                )
             self._mark_custom_ai_profile_failure(
                 profile,
                 error_text,

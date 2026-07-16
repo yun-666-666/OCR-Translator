@@ -1726,19 +1726,21 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: True),
-            custom_ai_ocr_image_format_var=types.SimpleNamespace(get=lambda: "png"),
-            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "small_grayscale_webp"),
-            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 80),
-            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "high"),
+            get_ai_ocr_image_decision=lambda image_size=None: types.SimpleNamespace(
+                contract_key="png|lossless_webp|100|high"
+            ),
         )
 
-        cache_mode_key = worker_threads._get_api_ocr_cache_mode_key(app)
+        cache_mode_key = worker_threads._get_api_ocr_cache_mode_key(
+            app,
+            image_size=(320, 120),
+        )
 
         self.assertIn("keep_linebreaks=True", cache_mode_key)
-        self.assertIn("image_format=png", cache_mode_key)
-        self.assertIn("image_mode=small_grayscale_webp", cache_mode_key)
-        self.assertIn("image_quality=80", cache_mode_key)
-        self.assertIn("image_detail=high", cache_mode_key)
+        self.assertIn(
+            "image_contract=png|lossless_webp|100|high",
+            cache_mode_key,
+        )
 
     def test_api_ocr_cache_mode_key_includes_effective_reasoning_contract(self):
         worker_threads = import_worker_threads_for_tests()
@@ -1780,9 +1782,14 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         log_messages = []
         image = Image.new("RGB", (48, 24), (250, 250, 250))
         app = types.SimpleNamespace(
-            custom_ai_ocr_image_mode_var=types.SimpleNamespace(get=lambda: "small_grayscale_webp"),
-            custom_ai_ocr_image_quality_var=types.SimpleNamespace(get=lambda: 80),
-            custom_ai_ocr_image_detail_var=types.SimpleNamespace(get=lambda: "low"),
+            get_ai_ocr_image_decision=lambda image_size=None: types.SimpleNamespace(
+                image_format="webp",
+                image_mode="small_grayscale_webp",
+                image_quality=72,
+                image_detail="low",
+                reason="speed_policy",
+                contract_key="webp|small_grayscale_webp|72|low",
+            ),
         )
 
         with patch.object(app_logic, "log_debug", side_effect=log_messages.append):
@@ -1793,9 +1800,47 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertIn("mode=small_grayscale_webp", log_text)
         self.assertIn("bytes=", log_text)
         self.assertIn("detail=low", log_text)
+        self.assertIn("policy_reason=speed_policy", log_text)
         self.assertIn("duration=", log_text)
         self.assertNotIn(encoded_base64, log_text)
         self.assertNotIn("data:image", log_text)
+
+    def test_ai_ocr_image_decision_uses_recent_route_latency_and_active_profile(self):
+        import app_logic
+        from ai_optimization import AiOcrImageCapabilityMemory
+
+        profile = {
+            "base_url": "https://relay.example/v1",
+            "model": "vision-model",
+        }
+        app = types.SimpleNamespace(
+            ai_optimization_mode_var=types.SimpleNamespace(get=lambda: "auto"),
+            custom_ai_profiles=types.SimpleNamespace(
+                get_active_profile=lambda kind: profile
+            ),
+            runtime_metrics=types.SimpleNamespace(
+                snapshot=lambda: {
+                    "timings": {
+                        "ocr_duration": {
+                            "count": 8,
+                            "p90": 4.2,
+                        }
+                    }
+                }
+            ),
+            ai_ocr_image_capability_memory=AiOcrImageCapabilityMemory(),
+        )
+
+        decision = app_logic.GameChangingTranslator.get_ai_ocr_image_decision(
+            app,
+            image_size=(800, 300),
+        )
+
+        self.assertEqual(decision.image_format, "webp")
+        self.assertEqual(decision.image_mode, "small_grayscale_webp")
+        self.assertEqual(decision.image_quality, 75)
+        self.assertEqual(decision.image_detail, "low")
+        self.assertEqual(decision.reason, "auto_slow_route")
 
     def test_custom_ai_api_ocr_uses_custom_source_language(self):
         worker_threads = import_worker_threads_for_tests()

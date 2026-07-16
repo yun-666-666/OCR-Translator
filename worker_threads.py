@@ -494,7 +494,11 @@ def run_api_ocr(app, screenshot_pil):
                 frame_hash,
                 cache_model_key,
                 source_lang,
-                _get_api_ocr_cache_mode_key(app, provider_name),
+                _get_api_ocr_cache_mode_key(
+                    app,
+                    provider_name,
+                    image_size=screenshot_pil.size,
+                ),
                 screenshot_pil.size,
                 region_origin=region_origin,
             )
@@ -539,6 +543,8 @@ def run_api_ocr(app, screenshot_pil):
             return
         image_data = encoded_image.data
         image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
+        image_format = getattr(encoded_image, 'image_format', 'webp')
+        image_detail = getattr(encoded_image, 'image_detail', 'auto')
 
         app.batch_sequence_counter += 1
         sequence_number = app.batch_sequence_counter
@@ -548,7 +554,15 @@ def run_api_ocr(app, screenshot_pil):
         try:
             app.ocr_thread_pool.submit(
                 process_api_ocr_async,
-                app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key, image_mime_type
+                app,
+                image_data,
+                source_lang,
+                sequence_number,
+                provider_name,
+                ocr_cache_key,
+                image_mime_type,
+                image_detail,
+                image_format,
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
@@ -558,7 +572,17 @@ def run_api_ocr(app, screenshot_pil):
     except Exception as e:
         log_debug(f"Error starting API OCR batch: {type(e).__name__} - {e}")
 
-def process_api_ocr_async(app, image_data, source_lang, sequence_number, provider_name, ocr_cache_key=None, image_mime_type="image/webp"):
+def process_api_ocr_async(
+    app,
+    image_data,
+    source_lang,
+    sequence_number,
+    provider_name,
+    ocr_cache_key=None,
+    image_mime_type="image/webp",
+    image_detail="auto",
+    image_format="webp",
+):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
@@ -576,6 +600,8 @@ def process_api_ocr_async(app, image_data, source_lang, sequence_number, provide
             image_data,
             source_lang,
             image_mime_type=image_mime_type,
+            image_detail=image_detail,
+            image_format=image_format,
         )
         _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
 

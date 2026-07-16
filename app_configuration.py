@@ -9,6 +9,7 @@ from tkinter import messagebox
 from ai_optimization import (
     AI_OPTIMIZATION_AUTO,
     normalize_ai_optimization_mode,
+    resolve_ai_ocr_image_policy,
     resolve_ai_response_mode,
 )
 from gui_builder import (
@@ -18,16 +19,6 @@ from gui_builder import (
     create_settings_tab,
 )
 from logger import set_debug_logging_enabled
-from ocr_utils import (
-    API_OCR_IMAGE_DETAIL_DEFAULT,
-    API_OCR_IMAGE_FORMAT_DEFAULT,
-    API_OCR_IMAGE_MODE_DEFAULT,
-    API_OCR_IMAGE_QUALITY_DEFAULT,
-    normalize_api_ocr_image_detail,
-    normalize_api_ocr_image_format,
-    normalize_api_ocr_image_mode,
-    normalize_api_ocr_image_quality,
-)
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 
 DEFAULT_CUSTOM_PROMPT = (
@@ -469,37 +460,73 @@ class AppConfigurationMixin:
         except Exception:
             return AI_OPTIMIZATION_AUTO
 
+    def get_ai_ocr_image_decision(self, image_size=None):
+        """Resolve the current API OCR image contract from policy and route health."""
+        profile = None
+        profiles = getattr(self, "custom_ai_profiles", None)
+        if profiles is not None:
+            try:
+                profile = profiles.get_active_profile("ocr")
+            except Exception as e:
+                _log_debug(
+                    "Could not resolve active OCR profile for image policy: "
+                    f"{type(e).__name__} - {e}"
+                )
+
+        route_p90_seconds = 0.0
+        route_sample_count = 0
+        metrics = getattr(self, "runtime_metrics", None)
+        if metrics is not None:
+            try:
+                timing = (
+                    metrics.snapshot()
+                    .get("timings", {})
+                    .get("ocr_duration", {})
+                )
+                route_p90_seconds = timing.get("p90", 0.0)
+                route_sample_count = timing.get("count", 0)
+            except Exception:
+                pass
+
+        optimization_getter = getattr(self, "get_ai_optimization_mode", None)
+        if callable(optimization_getter):
+            optimization_mode = optimization_getter()
+        else:
+            optimization_var = getattr(self, "ai_optimization_mode_var", None)
+            optimization_mode = normalize_ai_optimization_mode(
+                optimization_var.get()
+                if optimization_var is not None
+                else AI_OPTIMIZATION_AUTO
+            )
+
+        return resolve_ai_ocr_image_policy(
+            optimization_mode,
+            profile=profile,
+            image_size=image_size,
+            route_p90_seconds=route_p90_seconds,
+            route_sample_count=route_sample_count,
+            capability_memory=getattr(
+                self,
+                "ai_ocr_image_capability_memory",
+                None,
+            ),
+        )
+
     def get_custom_ai_ocr_image_format(self):
-        """Return the selected Custom AI OCR image file format."""
-        var = getattr(self, 'custom_ai_ocr_image_format_var', None)
-        try:
-            return normalize_api_ocr_image_format(var.get() if var is not None else API_OCR_IMAGE_FORMAT_DEFAULT)
-        except Exception:
-            return API_OCR_IMAGE_FORMAT_DEFAULT
+        """Return the automatically resolved Custom AI OCR image format."""
+        return self.get_ai_ocr_image_decision().image_format
 
     def get_custom_ai_ocr_image_mode(self):
-        """Return the selected Custom AI OCR image encoding mode."""
-        var = getattr(self, 'custom_ai_ocr_image_mode_var', None)
-        try:
-            return normalize_api_ocr_image_mode(var.get() if var is not None else API_OCR_IMAGE_MODE_DEFAULT)
-        except Exception:
-            return API_OCR_IMAGE_MODE_DEFAULT
+        """Return the automatically resolved Custom AI OCR image mode."""
+        return self.get_ai_ocr_image_decision().image_mode
 
     def get_custom_ai_ocr_image_quality(self):
-        """Return the selected Custom AI OCR image quality."""
-        var = getattr(self, 'custom_ai_ocr_image_quality_var', None)
-        try:
-            return normalize_api_ocr_image_quality(var.get() if var is not None else API_OCR_IMAGE_QUALITY_DEFAULT)
-        except Exception:
-            return API_OCR_IMAGE_QUALITY_DEFAULT
+        """Return the automatically resolved Custom AI OCR image quality."""
+        return self.get_ai_ocr_image_decision().image_quality
 
     def get_custom_ai_ocr_image_detail(self):
-        """Return the selected Custom AI OCR vision detail mode."""
-        var = getattr(self, 'custom_ai_ocr_image_detail_var', None)
-        try:
-            return normalize_api_ocr_image_detail(var.get() if var is not None else API_OCR_IMAGE_DETAIL_DEFAULT)
-        except Exception:
-            return API_OCR_IMAGE_DETAIL_DEFAULT
+        """Return the automatically resolved Custom AI OCR vision detail."""
+        return self.get_ai_ocr_image_decision().image_detail
 
     def get_current_gemini_model_for_translation(self):
         """Get the API name of currently selected Gemini translation model."""
