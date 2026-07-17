@@ -43,6 +43,7 @@ OCR_STABILITY_GATE_NOISE_RATIO = 0.35
 CAPTURE_SLOW_SECONDS_MSS = 0.050
 OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
+API_OCR_REPEAT_BACKOFF_SECONDS = 0.75
 from worker_capture import (
     run_capture_thread,
     _api_ocr_capture_is_saturated,
@@ -522,6 +523,28 @@ def run_api_ocr(app, screenshot_pil):
                 process_api_ocr_response(app, cached_ocr_text, sequence_number, source_lang, provider_name, ocr_cache_key=ocr_cache_key)
                 return
 
+        repeat_scope = tuple(ocr_cache_key[1:]) if ocr_cache_key else None
+        try:
+            repeat_until = float(
+                getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0)
+                or 0.0
+            )
+        except (TypeError, ValueError):
+            repeat_until = 0.0
+        if (
+            repeat_scope
+            and repeat_scope == getattr(app, "api_ocr_repeat_backoff_scope", None)
+            and time.monotonic() < repeat_until
+        ):
+            _increment_metric(app, "api_ocr_repeat_backoff_skip")
+            log_debug_coalesced(
+                ("api-ocr-repeat-backoff", provider_name),
+                "LATENCY: API OCR repeat backoff skipped a remote request "
+                f"provider={provider_name}",
+                interval_seconds=5.0,
+            )
+            return
+
         concurrency_limit = _api_ocr_concurrency_limit(app, provider_name)
         if len(app.active_ocr_calls) >= concurrency_limit:
             _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
@@ -710,6 +733,12 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
             return
 
         if hasattr(app, 'last_processed_subtitle') and ocr_result == app.last_processed_subtitle:
+            if ocr_cache_key is not None:
+                app.api_ocr_repeat_backoff_scope = tuple(ocr_cache_key[1:])
+                app.api_ocr_repeat_backoff_until_monotonic = (
+                    time.monotonic() + API_OCR_REPEAT_BACKOFF_SECONDS
+                )
+                _increment_metric(app, "api_ocr_repeat_backoff_armed")
             app.reset_clear_timeout()
             log_debug(
                 "Keeping existing translation for successive identical "
@@ -718,6 +747,8 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
             app.last_displayed_batch_sequence = sequence_number
             return
 
+        app.api_ocr_repeat_backoff_scope = None
+        app.api_ocr_repeat_backoff_until_monotonic = 0.0
         app.last_processed_subtitle = ocr_result
         app.reset_clear_timeout()
         start_async_translation(app, ocr_result, sequence_number)

@@ -1356,6 +1356,131 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(app.batch_sequence_counter, 1)
         self.assertEqual(app.active_ocr_calls, set())
 
+    def test_api_ocr_repeat_backoff_skips_same_scope_before_encoding(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def submit(self, *args):
+                raise AssertionError("Repeat-backoff frames must not be submitted")
+
+        screenshot = Image.new("RGB", (320, 120), (1, 2, 3))
+        screenshot._gct_frame_hash = "changed-frame"
+        screenshot._gct_region_origin = (10, 20)
+
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: (_ for _ in ()).throw(
+                AssertionError("Repeat-backoff frames must not be encoded")
+            ),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=Pool(),
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+        )
+        cache_key = ocr_utils.build_ocr_frame_cache_key(
+            "changed-frame",
+            worker_threads._get_api_ocr_cache_model_key(app, "custom_ai"),
+            "en",
+            worker_threads._get_api_ocr_cache_mode_key(
+                app,
+                "custom_ai",
+                image_size=screenshot.size,
+            ),
+            screenshot.size,
+            region_origin=screenshot._gct_region_origin,
+        )
+        app.api_ocr_repeat_backoff_scope = cache_key[1:]
+        app.api_ocr_repeat_backoff_until_monotonic = time.monotonic() + 10.0
+
+        with patch.object(worker_threads, "_increment_metric") as increment:
+            worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(app.batch_sequence_counter, 0)
+        self.assertEqual(app.active_ocr_calls, set())
+        increment.assert_called_once_with(app, "api_ocr_repeat_backoff_skip")
+
+    def test_api_ocr_repeat_backoff_arms_after_identical_response(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = (
+            "frame-hash",
+            "custom_ai",
+            "en",
+            "api",
+            10,
+            20,
+            320,
+            120,
+        )
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="Unchanged subtitle",
+            reset_clear_timeout=Mock(),
+        )
+
+        before = time.monotonic()
+        with patch.object(worker_threads, "_increment_metric") as increment:
+            worker_threads.process_api_ocr_response(
+                app,
+                "Unchanged subtitle",
+                1,
+                "en",
+                "custom_ai",
+                ocr_cache_key=cache_key,
+            )
+
+        self.assertEqual(
+            getattr(app, "api_ocr_repeat_backoff_scope", None),
+            cache_key[1:],
+        )
+        self.assertGreater(
+            getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0),
+            before,
+        )
+        increment.assert_called_once_with(app, "api_ocr_repeat_backoff_armed")
+
+    def test_api_ocr_repeat_backoff_does_not_block_changed_scope(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        pool = Pool()
+        screenshot = Image.new("RGB", (320, 120), (4, 5, 6))
+        screenshot._gct_frame_hash = "changed-frame"
+        screenshot._gct_region_origin = (10, 20)
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: b"fresh-webp",
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+            api_ocr_repeat_backoff_scope=("different-profile",),
+            api_ocr_repeat_backoff_until_monotonic=time.monotonic() + 10.0,
+        )
+
+        worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(app.active_ocr_calls, {1})
+
     def test_api_ocr_cache_hit_is_used_even_when_concurrency_is_full(self):
         worker_threads = import_worker_threads_for_tests()
         ocr_utils = import_ocr_utils_for_tests()

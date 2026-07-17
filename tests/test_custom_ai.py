@@ -877,6 +877,20 @@ class CustomAIProviderTests(unittest.TestCase):
             ["https://host.example/v1/chat/completions", "https://host.example/chat/completions"],
         )
 
+    def test_xai_host_only_url_uses_only_v1_chat_completions(self):
+        provider = CustomAIProvider()
+
+        self.assertEqual(
+            provider.normalize_chat_completions_url_candidates("https://api.x.ai"),
+            ["https://api.x.ai/v1/chat/completions"],
+        )
+        self.assertEqual(
+            provider.normalize_chat_completions_url_candidates(
+                "https://api.x.ai/chat/completions"
+            ),
+            ["https://api.x.ai/v1/chat/completions"],
+        )
+
     def test_model_list_url_candidates_support_v1_and_chat_completions(self):
         provider = CustomAIProvider()
 

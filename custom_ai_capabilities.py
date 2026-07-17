@@ -853,6 +853,18 @@ class CustomAICapabilitiesMixin:
         url = (base_url or "").strip().rstrip("/")
         if not url:
             raise ValueError("API URL is required")
+        try:
+            hostname = (urlparse(url).hostname or "").lower()
+        except (TypeError, ValueError):
+            hostname = ""
+        if hostname == "api.x.ai":
+            if url.endswith("/v1/chat/completions"):
+                return [url]
+            if url.endswith("/chat/completions"):
+                url = url[: -len("/chat/completions")]
+            if url.endswith("/v1"):
+                return [f"{url}/chat/completions"]
+            return [f"{url}/v1/chat/completions"]
         if url.endswith("/chat/completions"):
             return [url]
         if url.endswith("/v1"):
