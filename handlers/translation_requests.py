@@ -1151,9 +1151,23 @@ class TranslationRequestsMixin:
         return candidates
 
     def _custom_ai_translation_is_obsolete(self, translation_sequence):
-        """Return whether a newer translation has already reached the display."""
+        """Return whether a newer translation has started or reached the display."""
         try:
             request_sequence = int(translation_sequence)
+        except (TypeError, ValueError):
+            return False
+        try:
+            latest_started_sequence = int(
+                getattr(
+                    self.app,
+                    "latest_translation_sequence_started",
+                    0,
+                )
+                or 0
+            )
+        except (TypeError, ValueError):
+            latest_started_sequence = 0
+        try:
             displayed_sequence = int(
                 getattr(
                     self.app,
@@ -1163,11 +1177,16 @@ class TranslationRequestsMixin:
                 or 0
             )
         except (TypeError, ValueError):
-            return False
-        return (
-            request_sequence > 0
-            and displayed_sequence > 0
-            and request_sequence <= displayed_sequence
+            displayed_sequence = 0
+        return request_sequence > 0 and (
+            (
+                latest_started_sequence > 0
+                and request_sequence < latest_started_sequence
+            )
+            or (
+                displayed_sequence > 0
+                and request_sequence <= displayed_sequence
+            )
         )
 
     def _abort_obsolete_custom_ai_failover(self, translation_sequence):
@@ -1176,6 +1195,8 @@ class TranslationRequestsMixin:
         _log_debug(
             "LATENCY: custom_ai failover aborted for obsolete translation "
             f"sequence={translation_sequence} "
+            "latest_started="
+            f"{getattr(self.app, 'latest_translation_sequence_started', 0)} "
             "last_displayed="
             f"{getattr(self.app, 'last_displayed_translation_sequence', 0)}"
         )

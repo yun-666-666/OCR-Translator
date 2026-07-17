@@ -98,3 +98,24 @@ Grok 推荐 B、拒绝 C，并指出历史 4.5 数据只支持模型/超时/分�
 ## 预期收益边界
 
 该改动不能缩短已经发出的当前 HTTP 请求，但能阻止旧序列在主请求失败后继续访问第二、第三提供商。对最新序列 878，它预计省去备用提供商的 4.437s 和对应费用；对历史序列 281 类路径，它能砍掉主提供商失败后的后续 failover，但不能追回主请求已经消耗的超时。
+
+## 实现后 Grok 4.5 复审
+
+第二次只读复审使用实际实现 diff、红—绿测试结果和完整验证结果；中转再次返回 `grok-4.5-build`。Grok 最终裁定为 `APPROVE`，没有提出阻塞问题。
+
+复审确认：
+
+- `request_sequence < latest_translation_sequence_started` 必须使用严格小于。若改成 `<=`，当前请求在提交时会把自己判定为过期。
+- `request_sequence <= last_displayed_translation_sequence` 继续使用小于等于是正确的，因为已经显示的同序请求不应继续 failover。
+- `translation_sequence=None`、`0` 或不可转换值继续 fail-open，不影响无序列的后台调用和现有测试工具。
+- app 上的序列字段异常时降级为 0，优先保留 failover 可用性。
+- session reset 把显示序列提高到 sequence floor 的行为没有被新条件放大；新会话的更高序列仍可正常执行。
+- 不应停止缓存旧请求的成功结果，也没有证据要求中断在途 HTTP、重写调度器或拆分巨型模块。
+
+复审所依据的验证结果：
+
+- 新回归测试在改生产代码前按预期失败：返回了 `superseded fallback translation`。
+- 修改后单测通过，failover 测试组 7 项通过。
+- `tests.test_custom_ai` 297 项通过。
+- `tests.test_latency_optimization` 157 项通过。
+- 全仓 633 项通过；`compileall` 与 `git diff --check` 通过。
