@@ -24,6 +24,18 @@ DEFAULT_TRANSLATION_REQUEST_TIMEOUT_SECONDS = 10.0
 CAPTURE_SLOW_SECONDS_MSS = 0.050
 
 
+def _next_local_capture_interval(
+    base_scan_interval,
+    current_scan_interval,
+    queue_fullness,
+):
+    if queue_fullness > 0.7:
+        return base_scan_interval * (1 + queue_fullness)
+    if queue_fullness > 0.4:
+        return base_scan_interval * 1.25
+    return max(base_scan_interval, current_scan_interval * 0.95)
+
+
 def _log_debug(message):
     facade = sys.modules.get("worker_threads")
     if facade is not None:
@@ -452,9 +464,11 @@ def run_capture_thread(app):
             else:
                 # Adaptive logic for local OCR queue pressure.
                 q_fullness = app.ocr_queue.qsize() / (app.ocr_queue.maxsize or 1)
-                if q_fullness > 0.7: current_scan_interval_sec = base_scan_interval * (1 + q_fullness)
-                elif q_fullness > 0.4: current_scan_interval_sec = base_scan_interval * 1.25
-                else: current_scan_interval_sec = max(min_interval, current_scan_interval_sec * 0.95)
+                current_scan_interval_sec = _next_local_capture_interval(
+                    base_scan_interval,
+                    current_scan_interval_sec,
+                    q_fullness,
+                )
 
                 if now - last_cap_time < current_scan_interval_sec:
                     sleep_duration = current_scan_interval_sec - (now - last_cap_time)

@@ -228,6 +228,36 @@ class CaptureOcrHotPathLoggingTests(unittest.TestCase):
 
 
 class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
+    def test_local_capture_interval_never_falls_below_base(self):
+        import_worker_threads_for_tests()
+        worker_capture = importlib.import_module("worker_capture")
+
+        self.assertEqual(
+            worker_capture._next_local_capture_interval(0.2, 0.05, 0.0),
+            0.2,
+        )
+        self.assertEqual(
+            worker_capture._next_local_capture_interval(0.2, 0.2, 0.4),
+            0.2,
+        )
+
+    def test_local_capture_interval_preserves_pressure_and_decay(self):
+        import_worker_threads_for_tests()
+        worker_capture = importlib.import_module("worker_capture")
+
+        self.assertAlmostEqual(
+            worker_capture._next_local_capture_interval(0.2, 0.5, 0.0),
+            0.475,
+        )
+        self.assertAlmostEqual(
+            worker_capture._next_local_capture_interval(0.2, 0.2, 0.5),
+            0.25,
+        )
+        self.assertAlmostEqual(
+            worker_capture._next_local_capture_interval(0.2, 0.2, 0.8),
+            0.36,
+        )
+
     def test_local_capture_signature_allows_one_duplicate_before_skipping(self):
         worker_threads = import_worker_threads_for_tests()
         first_signature = ("frame-a", 10, 20, 300, 80, "mss")
