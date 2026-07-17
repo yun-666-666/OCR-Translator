@@ -126,12 +126,27 @@ class CustomAITransportMixin:
             return http_client.post(url, **kwargs)
 
         response = send(request_payload)
+
+        def replace_response(current_payload):
+            nonlocal response
+            self._close_response_quietly(response)
+            response = None
+            response = send(current_payload)
+
+        def inspect_response(check, *args):
+            try:
+                return check(*args)
+            except Exception:
+                self._close_response_quietly(response)
+                raise
+
         output_limit_field = self._output_limit_field(profile)
         pending_reasoning_memory = None
         for _attempt in range(4):
             if (
                 "prompt_cache_key" in request_payload
-                and self._response_rejects_prompt_cache_key(
+                and inspect_response(
+                    self._response_rejects_prompt_cache_key,
                     response,
                     url,
                     api_key,
@@ -145,13 +160,14 @@ class CustomAITransportMixin:
                     "COMPAT: retrying Custom AI request without unsupported "
                     "prompt_cache_key"
                 )
-                response = send(request_payload)
+                replace_response(request_payload)
                 continue
 
             if (
                 request_kind
                 and self._payload_has_reasoning_effort(request_payload)
-                and self._response_rejects_reasoning_effort(
+                and inspect_response(
+                    self._response_rejects_reasoning_effort,
                     response,
                     profile,
                     url,
@@ -169,12 +185,13 @@ class CustomAITransportMixin:
                     "COMPAT: retrying Custom AI request without unsupported "
                     "reasoning effort"
                 )
-                response = send(request_payload)
+                replace_response(request_payload)
                 continue
 
             if (
                 self._payload_has_structured_output(request_payload)
-                and self._response_rejects_structured_output(
+                and inspect_response(
+                    self._response_rejects_structured_output,
                     response,
                     profile,
                     url,
@@ -196,12 +213,13 @@ class CustomAITransportMixin:
                     "COMPAT: retrying Custom AI request without unsupported "
                     "structured output"
                 )
-                response = send(request_payload)
+                replace_response(request_payload)
                 continue
 
             if (
                 output_limit_field in request_payload
-                and self._response_rejects_output_limit(
+                and inspect_response(
+                    self._response_rejects_output_limit,
                     response,
                     profile,
                     url,
@@ -216,7 +234,7 @@ class CustomAITransportMixin:
                     "COMPAT: retrying Custom AI request without unsupported "
                     f"{output_limit_field}"
                 )
-                response = send(request_payload)
+                replace_response(request_payload)
                 continue
             break
         if (
@@ -1070,6 +1088,7 @@ class CustomAITransportMixin:
         errors = []
 
         for url in urls:
+            response = None
             try:
                 start = time.monotonic()
                 response = self._post_with_output_limit_fallback(
@@ -1125,6 +1144,8 @@ class CustomAITransportMixin:
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
                 errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+            finally:
+                self._close_response_quietly(response)
 
         if len(errors) == 1:
             raise ValueError(errors[0])
@@ -1163,6 +1184,7 @@ class CustomAITransportMixin:
         )
         errors = []
         for url in urls:
+            response = None
             try:
                 start = time.monotonic()
                 response = self._post_with_output_limit_fallback(
@@ -1216,6 +1238,8 @@ class CustomAITransportMixin:
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
                 errors.append(f"{url}: {self._sanitize_error(str(e), api_key)}")
+            finally:
+                self._close_response_quietly(response)
         if len(errors) == 1:
             raise ValueError(errors[0])
         raise ValueError("Unable to call streaming responses. Tried: " + "; ".join(errors))

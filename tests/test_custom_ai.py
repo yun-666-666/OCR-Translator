@@ -1212,6 +1212,109 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertNotIn("text", client.payloads[3])
         self.assertNotIn("max_output_tokens", client.payloads[4])
 
+    def test_output_limit_fallback_closes_abandoned_response_only(self):
+        class Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self.payload = payload
+                self.text = json.dumps(payload)
+                self.close_calls = 0
+
+            def json(self):
+                return self.payload
+
+            def close(self):
+                self.close_calls += 1
+
+        rejected = Response(
+            400,
+            {"error": {"message": "Unknown parameter: prompt_cache_key"}},
+        )
+        accepted = Response(
+            200,
+            {"choices": [{"message": {"content": "OK"}}]},
+        )
+
+        class Client:
+            def __init__(self):
+                self.responses = [rejected, accepted]
+
+            def post(self, _url, **_kwargs):
+                return self.responses.pop(0)
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        response = provider._post_with_output_limit_fallback(
+            provider.http_client,
+            "https://host.example/v1/chat/completions",
+            {},
+            {
+                "model": "demo",
+                "messages": [],
+                "prompt_cache_key": "cache-key",
+            },
+            profile,
+            profile["api_key"],
+            stream=True,
+            request_kind="translation",
+        )
+
+        self.assertIs(response, accepted)
+        self.assertEqual(rejected.close_calls, 1)
+        self.assertEqual(accepted.close_calls, 0)
+
+    def test_output_limit_fallback_closes_response_when_inspection_raises(self):
+        class Response:
+            status_code = 400
+            text = "{}"
+
+            def __init__(self):
+                self.close_calls = 0
+
+            def close(self):
+                self.close_calls += 1
+
+        response = Response()
+
+        class Client:
+            def post(self, _url, **_kwargs):
+                return response
+
+        provider = CustomAIProvider(http_client=Client())
+        profile = {
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+        }
+
+        with patch.object(
+            provider,
+            "_response_rejects_prompt_cache_key",
+            side_effect=RuntimeError("inspection failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "inspection failed"):
+                provider._post_with_output_limit_fallback(
+                    provider.http_client,
+                    "https://host.example/v1/chat/completions",
+                    {},
+                    {
+                        "model": "demo",
+                        "messages": [],
+                        "prompt_cache_key": "cache-key",
+                    },
+                    profile,
+                    profile["api_key"],
+                    stream=True,
+                    request_kind="translation",
+                )
+
+        self.assertEqual(response.close_calls, 1)
+
     def test_post_clears_failed_cached_chat_url_and_falls_back(self):
         class Response:
             def __init__(self, payload=None, status_code=200, text=""):
@@ -2691,6 +2794,92 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertNotIn("stream", payload)
         self.assertTrue(provider.http_client.payloads[0]["stream"])
+
+    def test_stream_post_closes_successful_chat_response(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self):
+                self.close_calls = 0
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter([
+                    'data: {"choices":[{"delta":{"content":"OK"}}]}',
+                    "data: [DONE]",
+                ])
+
+            def close(self):
+                self.close_calls += 1
+
+        response = Response()
+
+        class Client:
+            def post(self, _url, **_kwargs):
+                return response
+
+        provider = CustomAIProvider(http_client=Client())
+
+        result, _duration = provider._stream_post(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+            },
+            {"model": "demo", "messages": []},
+        )
+
+        self.assertEqual(
+            result["choices"][0]["message"]["content"],
+            "OK",
+        )
+        self.assertEqual(response.close_calls, 1)
+
+    def test_stream_post_closes_successful_responses_response(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self):
+                self.close_calls = 0
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter([
+                    (
+                        'data: {"type":"response.output_text.delta",'
+                        '"delta":"OK"}'
+                    ),
+                    (
+                        'data: {"type":"response.completed",'
+                        '"response":{"status":"completed"}}'
+                    ),
+                ])
+
+            def close(self):
+                self.close_calls += 1
+
+        response = Response()
+
+        class Client:
+            def post(self, _url, **_kwargs):
+                return response
+
+        provider = CustomAIProvider(http_client=Client())
+
+        result, _duration = provider._stream_post(
+            {
+                "base_url": "https://host.example/v1",
+                "api_key": "super-secret",
+                "wire_api": "responses",
+            },
+            {"model": "demo", "messages": []},
+        )
+
+        self.assertEqual(result["output_text"], "OK")
+        self.assertEqual(response.close_calls, 1)
 
     def test_post_reports_non_json_response_without_jsondecode_or_key_leak(self):
         class Response:
