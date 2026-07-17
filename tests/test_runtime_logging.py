@@ -134,41 +134,15 @@ class RuntimeContentFreeLogSourceTests(unittest.TestCase):
             "translated_text",
             "translation_result",
         }
-        marian_sensitive_names = {
-            "full_text",
-            "result",
-            "sentence",
-            "text",
-            "translated",
-        }
         production_files = {
-            Path("handlers/llm_provider_base.py"): sensitive_names,
             Path("handlers/translation_handler.py"): sensitive_names,
             Path("worker_threads.py"): sensitive_names,
-            Path("marian_mt_translator.py"): marian_sensitive_names,
-        }
-        marian_translation_methods = {
-            "_sequential_fallback_translate",
-            "_split_into_sentences",
-            "_translate_batch",
-            "_translate_batch_input",
-            "_translate_batch_sentences",
-            "_translate_single_input",
-            "_translate_text_cached",
-            "translate",
         }
         violations = []
 
         for path, file_sensitive_names in production_files.items():
             tree = ast.parse(path.read_text(encoding="utf-8-sig"))
             scan_roots = (tree,)
-            if path.name == "marian_mt_translator.py":
-                scan_roots = tuple(
-                    node
-                    for node in ast.walk(tree)
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.name in marian_translation_methods
-                )
             for call in (
                 node
                 for scan_root in scan_roots

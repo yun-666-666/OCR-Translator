@@ -2,10 +2,8 @@
 
 import html
 import os
-import re
 import sys
 import time
-import traceback
 from datetime import datetime, timedelta
 
 from logger import log_debug_coalesced, summarize_text_for_log
@@ -438,22 +436,6 @@ Call Duration: {call_duration:.3f} seconds
             _log_debug(f"DeepL usage API error: {e}")
             return None
 
-    def _marian_translate(self, text_to_translate_mm, source_lang_mm, target_lang_mm, beam_value_mm):
-        _log_debug(
-            "MarianMT translation call "
-            f"{summarize_text_for_log(text_to_translate_mm)} "
-            f"beam={beam_value_mm}"
-        )
-        if self.app.marian_translator is None: return "MarianMT translator not initialized"
-        text_to_translate_cleaned = re.sub(r'\s+', ' ', text_to_translate_mm).strip()
-        if not text_to_translate_cleaned: return ""
-        try:
-            self.app.marian_translator.num_beams = beam_value_mm
-            result_mm = self.app.marian_translator.translate(text_to_translate_cleaned, source_lang_mm, target_lang_mm)
-            return result_mm
-        except Exception as e_cmm:
-            return f"MarianMT translation error: {type(e_cmm).__name__} - {str(e_cmm)}"
-
     # === UTILITY METHODS (UNCHANGED) ===
     def _is_error_message(self, text):
         return is_translation_error_result(text)
@@ -469,55 +451,6 @@ Call Duration: {call_duration:.3f} seconds
         self.unified_cache.clear_all()
         _log_debug("Cleared unified translation cache")
 
-    def update_marian_active_model(self, model_name_uam, source_lang_uam=None, target_lang_uam=None):
-        if self.app.marian_translator is None:
-            self.initialize_marian_translator()
-            if self.app.marian_translator is None:
-                _log_debug("Cannot update MarianMT model - translator not initialized and init failed.")
-                return False
-        
-        try:
-            final_source_lang = source_lang_uam if source_lang_uam else self.app.marian_source_lang
-            final_target_lang = target_lang_uam if target_lang_uam else self.app.marian_target_lang
-
-            if not final_source_lang or not final_target_lang:
-                _log_debug(f"Cannot update MarianMT model '{model_name_uam}': source/target language not determined.")
-                return False
-            
-            _log_debug(f"Attempting to make MarianMT model active: {model_name_uam} for {final_source_lang}->{final_target_lang}")
-
-            if hasattr(self.app.marian_translator, '_unload_current_model'):
-                self.app.marian_translator._unload_current_model()
-            
-            if hasattr(self.app.marian_translator, 'direct_pairs'):
-                self.app.marian_translator.direct_pairs[(final_source_lang, final_target_lang)] = model_name_uam
-            
-            self.unified_cache.clear_provider('marianmt')
-
-            if hasattr(self.app.marian_translator, '_try_load_direct_model'):
-                load_success = self.app.marian_translator._try_load_direct_model(final_source_lang, final_target_lang)
-                if load_success:
-                    _log_debug(f"Successfully loaded MarianMT model for {final_source_lang}->{final_target_lang}")
-                    return True
-                else:
-                    _log_debug(f"Failed to load MarianMT model for {final_source_lang}->{final_target_lang}")
-                    return False
-            return False
-        except Exception as e_umam:
-            _log_debug(f"Error updating MarianMT active model: {e_umam}")
-            return False
-
-    def update_marian_beam_value(self):
-        if self.app.marian_translator is not None:
-            try:
-                beam_value_clamped = max(1, min(50, self.app.num_beams_var.get()))
-                if beam_value_clamped != self.app.num_beams_var.get():
-                    self.app.num_beams_var.set(beam_value_clamped)
-                self.app.marian_translator.num_beams = beam_value_clamped
-                _log_debug(f"Updated MarianMT beam search value in translator to: {beam_value_clamped}")
-            except Exception as e_umbv:
-                _log_debug(f"Error updating MarianMT beam value: {e_umbv}")
-
     def calculate_text_similarity(self, text1_sim, text2_sim):
         if not text1_sim or not text2_sim: return 0.0
         if len(text1_sim) < 10 or len(text2_sim) < 10: 
@@ -528,21 +461,3 @@ Call Duration: {call_duration:.3f} seconds
         intersection_len = len(words1_set.intersection(words2_set))
         union_len = len(words1_set.union(words2_set))
         return intersection_len / union_len if union_len > 0 else 0.0
-
-    def initialize_marian_translator(self):
-        if self.app.marian_translator is not None: return
-        if not hasattr(self.app, 'MARIANMT_AVAILABLE') or not self.app.MARIANMT_AVAILABLE: return
-        try:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            cache_dir_name = "marian_models_cache"
-            if getattr(sys, 'frozen', False):
-                 executable_dir = os.path.dirname(sys.executable)
-                 cache_dir = os.path.join(executable_dir, "_internal", cache_dir_name)
-            else:
-                 cache_dir = os.path.join(base_dir, cache_dir_name)
-            os.makedirs(cache_dir, exist_ok=True)
-            current_beam_value = self.app.num_beams_var.get()
-            self.app.marian_translator = MarianMTTranslator(cache_dir=cache_dir, num_beams=current_beam_value)
-            _log_debug(f"MarianMT translator initialized (cache: {cache_dir}, beams: {current_beam_value})")
-        except Exception as e:
-            _log_debug(f"Error initializing MarianMT translator: {e}\n{traceback.format_exc()}")

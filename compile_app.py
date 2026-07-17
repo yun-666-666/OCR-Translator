@@ -1,170 +1,141 @@
 #!/usr/bin/env python3
-"""
-Game-Changing Translator Compilation Script
-Automates the compilation process for CPU and GPU versions
-"""
+"""Build the CPU or CUDA-enabled PaddleOCR application with PyInstaller."""
 
+import os
 import subprocess
 import sys
-import os
 from pathlib import Path
 
+
 def run_command(command, description):
-    """Run a command and handle errors"""
+    """Run a command without a shell and report captured output."""
     print(f"\n{description}")
     print("-" * len(description))
-    
     try:
-        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
-        print("✓ Success!")
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        print("Success")
         if result.stdout:
             print(result.stdout)
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"✗ Error: {e}")
-        if e.stdout:
-            print("STDOUT:", e.stdout)
-        if e.stderr:
-            print("STDERR:", e.stderr)
+    except subprocess.CalledProcessError as error:
+        print(f"Error: {error}")
+        if error.stdout:
+            print("STDOUT:", error.stdout)
+        if error.stderr:
+            print("STDERR:", error.stderr)
         return False
 
-def verify_pytorch_installation():
-    """Verify PyTorch installation and show details"""
-    print("\nVerifying PyTorch installation...")
-    verification_code = '''
-import torch
-print(f"PyTorch version: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-if torch.cuda.is_available():
-    print(f"CUDA version: {torch.version.cuda}")
-    print(f"GPU device count: {torch.cuda.device_count()}")
-    for i in range(torch.cuda.device_count()):
-        print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
-else:
-    print("CUDA version: N/A")
-'''
-    
+
+def verify_paddle_installation(*, require_cuda=False):
+    """Verify PaddleOCR imports and optionally require a CUDA-enabled Paddle build."""
+    verification_code = f"""
+import importlib.util as importlib_util
+
+_real_find_spec = importlib_util.find_spec
+def _find_spec_without_optional_torch(name, *args, **kwargs):
+    if name == "torch" or name.startswith("torch."):
+        return None
+    return _real_find_spec(name, *args, **kwargs)
+
+importlib_util.find_spec = _find_spec_without_optional_torch
+
+import paddle
+import paddleocr
+
+cuda_enabled = paddle.device.is_compiled_with_cuda()
+print(f"Paddle version: {{paddle.__version__}}")
+print(f"PaddleOCR version: {{getattr(paddleocr, '__version__', 'unknown')}}")
+print(f"CUDA-enabled Paddle build: {{cuda_enabled}}")
+if {require_cuda!r} and not cuda_enabled:
+    raise SystemExit("GPU build requires a CUDA-enabled paddlepaddle-gpu installation")
+if cuda_enabled:
+    print(f"Visible CUDA devices: {{paddle.device.cuda.device_count()}}")
+"""
     try:
-        result = subprocess.run([sys.executable, "-c", verification_code], 
-                              capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            [sys.executable, "-c", verification_code],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         print(result.stdout)
         return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error verifying PyTorch: {e}")
-        print(e.stderr)
+    except subprocess.CalledProcessError as error:
+        print("Paddle environment verification failed.")
+        if error.stdout:
+            print("STDOUT:", error.stdout)
+        if error.stderr:
+            print("STDERR:", error.stderr)
         return False
+
+
+def _build(spec_file):
+    return run_command(
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--clean",
+            "--noconfirm",
+            spec_file,
+        ],
+        f"Building with {spec_file}",
+    )
+
 
 def compile_cpu_version():
-    """Compile CPU-only version"""
-    print("\n" + "="*50)
-    print("         COMPILING CPU-ONLY VERSION")
-    print("="*50)
-    
-    # Step 1: Uninstall existing PyTorch
-    if not run_command("pip uninstall -y torch torchvision torchaudio", 
-                      "Step 1: Uninstalling existing PyTorch libraries..."):
-        print("Warning: Uninstallation had issues, continuing...")
-    
-    # Step 2: Install CPU PyTorch
-    if not run_command("pip install torch torchvision torchaudio", 
-                      "Step 2: Installing CPU-only PyTorch libraries..."):
-        print("Failed to install CPU PyTorch libraries!")
+    """Build against the currently installed CPU-capable Paddle runtime."""
+    print("\n" + "=" * 50)
+    print("         COMPILING CPU VERSION")
+    print("=" * 50)
+    if not verify_paddle_installation(require_cuda=False):
         return False
-    
-    # Step 3: Verify installation
-    if not verify_pytorch_installation():
-        print("Failed to verify PyTorch installation!")
-        return False
-    
-    # Step 4: Compile with PyInstaller
-    if not run_command("pyinstaller GameChangingTranslator.spec", 
-                      "Step 4: Compiling with PyInstaller..."):
-        print("Compilation failed!")
-        return False
-    
-    print("\n" + "="*50)
-    print("    CPU VERSION COMPILED SUCCESSFULLY!")
-    print("="*50)
-    return True
+    return _build("GameChangingTranslator.spec")
+
 
 def compile_gpu_version():
-    """Compile GPU-enabled version"""
-    print("\n" + "="*50)
-    print("        COMPILING GPU-ENABLED VERSION")
-    print("="*50)
-    
-    # Step 1: Uninstall existing PyTorch
-    if not run_command("pip uninstall -y torch torchvision torchaudio", 
-                      "Step 1: Uninstalling existing PyTorch libraries..."):
-        print("Warning: Uninstallation had issues, continuing...")
-    
-    # Step 2: Install GPU PyTorch
-    if not run_command("pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121", 
-                      "Step 2: Installing GPU-enabled PyTorch libraries..."):
-        print("Failed to install GPU PyTorch libraries!")
+    """Build only when the installed Paddle runtime is CUDA-enabled."""
+    print("\n" + "=" * 50)
+    print("         COMPILING GPU VERSION")
+    print("=" * 50)
+    if not verify_paddle_installation(require_cuda=True):
         return False
-    
-    # Step 3: Verify installation
-    if not verify_pytorch_installation():
-        print("Failed to verify PyTorch installation!")
-        return False
-    
-    # Step 4: Compile with PyInstaller
-    if not run_command("pyinstaller GameChangingTranslator_GPU.spec", 
-                      "Step 4: Compiling with PyInstaller..."):
-        print("Compilation failed!")
-        return False
-    
-    print("\n" + "="*50)
-    print("   GPU VERSION COMPILED SUCCESSFULLY!")
-    print("="*50)
-    return True
+    return _build("GameChangingTranslator_GPU.spec")
+
 
 def main():
-    """Main function"""
-    # Change to script directory
     script_dir = Path(__file__).parent
     os.chdir(script_dir)
     print(f"Working directory: {script_dir}")
-    
+
     while True:
-        print("\n" + "="*50)
-        print("       Game-Changing Translator Compilation Script")
-        print("="*50)
-        print("\nPlease select the version to compile:")
-        print("1. CPU-only version")
-        print("2. GPU-enabled version")
+        print("\n" + "=" * 50)
+        print("       Game-Changing Translator Build Script")
+        print("=" * 50)
+        print("\nPlease select the version to build:")
+        print("1. CPU version")
+        print("2. GPU version (requires paddlepaddle-gpu)")
         print("3. Exit")
-        
+
         try:
             choice = input("\nEnter your choice (1-3): ").strip()
-            
             if choice == "1":
                 success = compile_cpu_version()
             elif choice == "2":
                 success = compile_gpu_version()
             elif choice == "3":
-                print("\nThank you for using the Game-Changing Translator Compilation Script!")
                 break
             else:
                 print("Invalid choice. Please try again.")
                 continue
-            
-            if success:
-                another = input("\nWould you like to compile another version? (y/n): ").strip().lower()
-                if another not in ['y', 'yes']:
-                    break
-            else:
-                retry = input("\nWould you like to try again? (y/n): ").strip().lower()
-                if retry not in ['y', 'yes']:
-                    break
-                    
+
+            prompt = "Build another version? (y/n): " if success else "Try again? (y/n): "
+            if input(f"\n{prompt}").strip().lower() not in {"y", "yes"}:
+                break
         except KeyboardInterrupt:
-            print("\n\nOperation cancelled by user.")
+            print("\n\nBuild cancelled by user.")
             break
-        except Exception as e:
-            print(f"\nUnexpected error: {e}")
-            break
+
 
 if __name__ == "__main__":
     main()
