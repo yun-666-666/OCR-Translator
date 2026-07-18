@@ -1,4 +1,4 @@
-﻿# --- Configuration ---
+# --- Configuration ---
 ENABLE_PROCESS_CPU_AFFINITY = False  # Set to False to disable process-level CPU core limiting
 
 import tkinter as tk
@@ -50,9 +50,11 @@ from paddle_ocr_backend import (
     PADDLEOCR_MODEL_CODE,
     clear_paddleocr_engines,
     get_paddleocr_engine,
+    get_paddleocr_runtime_host_info,
     get_paddleocr_text_recognition_engine,
     prepare_paddleocr_image,
     recognize_with_paddleocr,
+    summarize_paddleocr_settings,
 )
 
 from handlers import (
@@ -211,6 +213,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self._paddleocr_prewarmed_settings = None
         self._paddleocr_prewarm_generation = 0
         self._paddleocr_prewarm_event = threading.Event()
+        self._paddleocr_prewarm_metrics = self._new_paddleocr_prewarm_metrics()
+        self._paddleocr_first_ocr_wait_generation = 0
 
         # Adaptive Scan Interval Infrastructure
         self.base_scan_interval = 500  # User's preferred setting (will be updated from config)
@@ -650,6 +654,38 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         except Exception as e:
             log_debug(f"PaddleOCR runtime cache clear failed ({reason}): {e}")
 
+    @staticmethod
+    def _new_paddleocr_prewarm_metrics():
+        return {
+            "generation": 0,
+            "reason": "",
+            "status": "idle",
+            "outcome": "",
+            "trigger": "",
+            "start_path": "",
+            "settings_summary": {},
+            "host": {},
+            "waited_for_ready": False,
+            "wait_path": "",
+            "wait_timeout_s": None,
+            "wait_completed": False,
+            "wait_ready": False,
+            "wait_s": None,
+            "first_ocr_wait_s": None,
+            "first_ocr_wait_ready": None,
+            "first_ocr_wait_generation": None,
+            "phase_text_recognition_s": None,
+            "phase_full_engine_s": None,
+            "total_s": None,
+            "text_recognition": {},
+            "full_engine": {},
+            "error_type": "",
+            "active": False,
+            "ready": False,
+            "terminal_timing_recorded_generation": None,
+            "updated_monotonic": None,
+        }
+
     def _ensure_paddleocr_prewarm_state(self):
         """Create prewarm bookkeeping for lightweight test doubles and old instances."""
         if not hasattr(self, '_paddleocr_prewarm_lock'):
@@ -664,7 +700,230 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarm_generation = 0
         if not hasattr(self, '_paddleocr_prewarm_event'):
             self._paddleocr_prewarm_event = threading.Event()
+        if not hasattr(self, '_paddleocr_prewarm_metrics'):
+            self._paddleocr_prewarm_metrics = self._new_paddleocr_prewarm_metrics()
+        if not hasattr(self, '_paddleocr_first_ocr_wait_generation'):
+            self._paddleocr_first_ocr_wait_generation = 0
         return self._paddleocr_prewarm_lock
+
+    def _paddleocr_prewarm_trigger_code(self, reason):
+        text = str(reason or "").strip().lower()
+        if "application startup" in text or text == "startup":
+            return "startup"
+        if "settings saved" in text or "settings changed" in text:
+            return "settings_saved"
+        if "selected" in text:
+            return "selected"
+        if text:
+            return re.sub(r"[^a-z0-9_]+", "_", text)[:48]
+        return "unspecified"
+
+    def _update_paddleocr_prewarm_metrics(self, **values):
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            metrics = self._paddleocr_prewarm_metrics
+            if not isinstance(metrics, dict):
+                metrics = self._new_paddleocr_prewarm_metrics()
+                self._paddleocr_prewarm_metrics = metrics
+            for key, value in values.items():
+                metrics[key] = value
+            metrics["updated_monotonic"] = time.monotonic()
+            status = str(metrics.get("status") or "")
+            generation = metrics.get("generation")
+            should_record_terminal_timings = (
+                status in {"completed", "failed"}
+                and metrics.get("terminal_timing_recorded_generation")
+                != generation
+            )
+            if should_record_terminal_timings:
+                metrics["terminal_timing_recorded_generation"] = generation
+            snapshot = dict(metrics)
+            snapshot["settings_summary"] = dict(metrics.get("settings_summary") or {})
+            snapshot["host"] = dict(metrics.get("host") or {})
+            snapshot["text_recognition"] = dict(metrics.get("text_recognition") or {})
+            snapshot["full_engine"] = dict(metrics.get("full_engine") or {})
+            snapshot["_record_terminal_timings"] = should_record_terminal_timings
+        self._publish_paddleocr_prewarm_metrics(snapshot)
+        return snapshot
+
+    def get_paddleocr_prewarm_metrics_snapshot(self):
+        """Return a shallow copy of the latest prewarm observation metrics."""
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            metrics = self._paddleocr_prewarm_metrics
+            if not isinstance(metrics, dict):
+                return self._new_paddleocr_prewarm_metrics()
+            snapshot = dict(metrics)
+            snapshot["settings_summary"] = dict(metrics.get("settings_summary") or {})
+            snapshot["host"] = dict(metrics.get("host") or {})
+            snapshot["text_recognition"] = dict(metrics.get("text_recognition") or {})
+            snapshot["full_engine"] = dict(metrics.get("full_engine") or {})
+            return snapshot
+
+    def _publish_paddleocr_prewarm_metrics(self, snapshot):
+        metrics = getattr(self, "runtime_metrics", None)
+        if metrics is None:
+            return
+
+        def safe_call(method_name, *args):
+            method = getattr(metrics, method_name, None)
+            if not callable(method):
+                return
+            try:
+                method(*args)
+            except Exception:
+                pass
+
+        status = str(snapshot.get("status") or "")
+        outcome = str(snapshot.get("outcome") or "")
+        settings_summary = snapshot.get("settings_summary") or {}
+        host = snapshot.get("host") or {}
+        text_phase = snapshot.get("text_recognition") or {}
+        full_phase = snapshot.get("full_engine") or {}
+
+        safe_call("set_gauge", "paddleocr_prewarm_generation", snapshot.get("generation") or 0)
+        safe_call("set_gauge", "paddleocr_prewarm_active", 1 if snapshot.get("active") else 0)
+        safe_call("set_gauge", "paddleocr_prewarm_ready", 1 if snapshot.get("ready") else 0)
+        if snapshot.get("wait_s") is not None:
+            safe_call("set_gauge", "paddleocr_prewarm_wait_s", snapshot.get("wait_s"))
+        if snapshot.get("first_ocr_wait_s") is not None:
+            safe_call(
+                "set_gauge",
+                "paddleocr_first_ocr_wait_s",
+                snapshot.get("first_ocr_wait_s"),
+            )
+        if snapshot.get("phase_text_recognition_s") is not None:
+            safe_call(
+                "set_gauge",
+                "paddleocr_prewarm_text_recognition_s",
+                snapshot.get("phase_text_recognition_s"),
+            )
+        if snapshot.get("phase_full_engine_s") is not None:
+            safe_call(
+                "set_gauge",
+                "paddleocr_prewarm_full_engine_s",
+                snapshot.get("phase_full_engine_s"),
+            )
+        if snapshot.get("total_s") is not None:
+            safe_call("set_gauge", "paddleocr_prewarm_total_s", snapshot.get("total_s"))
+
+        safe_call("set_label", "paddleocr_prewarm_status", status or "-")
+        safe_call("set_label", "paddleocr_prewarm_outcome", outcome or "-")
+        safe_call("set_label", "paddleocr_prewarm_reason", snapshot.get("reason") or "-")
+        safe_call("set_label", "paddleocr_prewarm_trigger", snapshot.get("trigger") or "-")
+        safe_call(
+            "set_label",
+            "paddleocr_prewarm_start_path",
+            snapshot.get("start_path") or "-",
+        )
+        if settings_summary:
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_settings",
+                (
+                    f"version={settings_summary.get('ocr_version', '-')}"
+                    f"|size={settings_summary.get('model_size', '-')}"
+                    f"|device={settings_summary.get('device', '-')}"
+                    f"|lang={settings_summary.get('lang', '-')}"
+                ),
+            )
+        if host:
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_host",
+                (
+                    f"cpu={host.get('cpu_count', '-')}"
+                    f"|os={host.get('platform', '-')}"
+                    f"|arch={host.get('machine', '-')}"
+                    f"|py={host.get('python_bits', '-')}bit"
+                ),
+            )
+        if text_phase:
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_text_recognition_kind",
+                str(text_phase.get("build_kind") or "-"),
+            )
+        if full_phase:
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_full_engine_kind",
+                str(full_phase.get("build_kind") or "-"),
+            )
+        if snapshot.get("wait_path"):
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_wait_path",
+                snapshot.get("wait_path"),
+            )
+        if snapshot.get("error_type"):
+            safe_call(
+                "set_label",
+                "paddleocr_prewarm_error_type",
+                snapshot.get("error_type"),
+            )
+
+        # Record sliding-window timings only on terminal lifecycle events.
+        if snapshot.get("_record_terminal_timings"):
+            if snapshot.get("phase_text_recognition_s") is not None:
+                safe_call(
+                    "record_timing",
+                    "paddleocr_prewarm_text_recognition_duration",
+                    snapshot.get("phase_text_recognition_s"),
+                )
+            if snapshot.get("phase_full_engine_s") is not None:
+                safe_call(
+                    "record_timing",
+                    "paddleocr_prewarm_full_engine_duration",
+                    snapshot.get("phase_full_engine_s"),
+                )
+            if snapshot.get("total_s") is not None:
+                safe_call(
+                    "record_timing",
+                    "paddleocr_prewarm_total_duration",
+                    snapshot.get("total_s"),
+                )
+        if (
+            snapshot.get("wait_path") == "worker_wait"
+            and snapshot.get("waited_for_ready")
+            and snapshot.get("wait_s") is not None
+        ):
+            safe_call(
+                "record_timing",
+                "paddleocr_prewarm_wait_duration",
+                snapshot.get("wait_s"),
+            )
+        if (
+            snapshot.get("wait_path") == "worker_first_ocr"
+            and snapshot.get("first_ocr_wait_s") is not None
+        ):
+            safe_call(
+                "record_timing",
+                "paddleocr_first_ocr_wait_duration",
+                snapshot.get("first_ocr_wait_s"),
+            )
+
+    def note_paddleocr_first_ocr_wait(self, settings, waited_s, ready, generation=None):
+        """Record the first worker OCR wait after a prewarm generation."""
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            current_generation = int(self._paddleocr_prewarm_generation or 0)
+            observed_generation = (
+                current_generation if generation is None else int(generation)
+            )
+            if self._paddleocr_first_ocr_wait_generation == observed_generation:
+                return self.get_paddleocr_prewarm_metrics_snapshot()
+            self._paddleocr_first_ocr_wait_generation = observed_generation
+        return self._update_paddleocr_prewarm_metrics(
+            first_ocr_wait_s=round(max(0.0, float(waited_s or 0.0)), 4),
+            first_ocr_wait_ready=bool(ready),
+            first_ocr_wait_generation=observed_generation,
+            wait_path="worker_first_ocr",
+            waited_for_ready=True,
+            wait_s=round(max(0.0, float(waited_s or 0.0)), 4),
+            wait_ready=bool(ready),
+            wait_completed=bool(ready),
+        )
 
     def _invalidate_paddleocr_prewarm_state(self):
         lock = self._ensure_paddleocr_prewarm_state()
@@ -676,11 +935,19 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             )
             self._paddleocr_prewarm_generation += 1
             self._paddleocr_prewarmed_settings = None
+            generation = self._paddleocr_prewarm_generation
             if not active:
                 self._paddleocr_prewarm_event.set()
                 self._paddleocr_prewarm_thread = None
                 self._paddleocr_prewarm_settings = None
                 self._paddleocr_prewarm_event = threading.Event()
+        self._update_paddleocr_prewarm_metrics(
+            generation=generation,
+            status="invalidated",
+            outcome="invalidated",
+            active=bool(active),
+            ready=False,
+        )
 
     def schedule_initial_ui_readiness(self):
         """Prepare overlays before starting background OCR initialization."""
@@ -693,11 +960,28 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             selected_ocr_model = self.get_ocr_model_setting()
         except Exception as e:
             log_debug(f"PaddleOCR startup prewarm skipped; OCR model unavailable: {e}")
+            self._update_paddleocr_prewarm_metrics(
+                status="skipped",
+                outcome="ocr_model_unavailable",
+                reason="application startup",
+                trigger="startup",
+                start_path="schedule_initial",
+                active=False,
+            )
             return False
         if selected_ocr_model != PADDLEOCR_MODEL_CODE:
             log_debug(
                 "PaddleOCR startup prewarm skipped; selected OCR model is "
                 f"{selected_ocr_model}"
+            )
+            self._update_paddleocr_prewarm_metrics(
+                status="skipped",
+                outcome="ocr_model_not_paddleocr",
+                reason="application startup",
+                trigger="startup",
+                start_path="schedule_initial",
+                active=False,
+                ready=False,
             )
             return False
         try:
@@ -706,6 +990,13 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 lambda: self.ensure_paddleocr_ready_if_selected("application startup"),
             )
             log_debug("PaddleOCR startup prewarm scheduled")
+            self._update_paddleocr_prewarm_metrics(
+                status="scheduled",
+                outcome="scheduled",
+                reason="application startup",
+                trigger="startup",
+                start_path="schedule_initial",
+            )
             return True
         except Exception as e:
             log_debug(f"PaddleOCR startup prewarm scheduling failed: {e}")
@@ -717,6 +1008,14 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             selected_ocr_model = self.get_ocr_model_setting()
         except Exception as e:
             log_debug(f"PaddleOCR prewarm skipped ({reason}); OCR model unavailable: {e}")
+            self._update_paddleocr_prewarm_metrics(
+                status="skipped",
+                outcome="ocr_model_unavailable",
+                reason=str(reason or ""),
+                trigger=self._paddleocr_prewarm_trigger_code(reason),
+                start_path="ensure_selected",
+                active=False,
+            )
             return False
         if selected_ocr_model != PADDLEOCR_MODEL_CODE:
             return False
@@ -726,25 +1025,64 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             settings = get_paddleocr_settings_from_app(self)
         except Exception as e:
             log_debug(f"PaddleOCR prewarm skipped ({reason}); settings unavailable: {e}")
+            self._update_paddleocr_prewarm_metrics(
+                status="skipped",
+                outcome="settings_unavailable",
+                reason=str(reason or ""),
+                trigger=self._paddleocr_prewarm_trigger_code(reason),
+                start_path="ensure_selected",
+                active=False,
+            )
             return False
         return self.start_paddleocr_prewarm(settings, reason)
 
     def start_paddleocr_prewarm(self, settings, reason="PaddleOCR selected"):
         lock = self._ensure_paddleocr_prewarm_state()
+        trigger = self._paddleocr_prewarm_trigger_code(reason)
+        settings_summary = summarize_paddleocr_settings(settings)
+        host = get_paddleocr_runtime_host_info()
         with lock:
             if self._paddleocr_prewarmed_settings == settings:
+                generation = self._paddleocr_prewarm_generation
+                self._update_paddleocr_prewarm_metrics(
+                    generation=generation,
+                    reason=str(reason or ""),
+                    trigger=trigger,
+                    start_path="start_thread",
+                    status="skipped",
+                    outcome="already_ready",
+                    settings_summary=settings_summary,
+                    host=host,
+                    active=False,
+                    ready=True,
+                    waited_for_ready=False,
+                )
                 log_debug(f"PaddleOCR prewarm skipped ({reason}); engine already ready")
                 return False
+
             active_thread = self._paddleocr_prewarm_thread
-            if (
-                active_thread is not None
-                and active_thread.is_alive()
-            ):
+            if active_thread is not None and active_thread.is_alive():
                 active_settings = self._paddleocr_prewarm_settings
                 if active_settings == settings:
                     detail = "matching engine"
+                    outcome = "already_running_matching"
                 else:
                     detail = "different engine settings"
+                    outcome = "already_running_different"
+                generation = self._paddleocr_prewarm_generation
+                self._update_paddleocr_prewarm_metrics(
+                    generation=generation,
+                    reason=str(reason or ""),
+                    trigger=trigger,
+                    start_path="start_thread",
+                    status="skipped",
+                    outcome=outcome,
+                    settings_summary=settings_summary,
+                    host=host,
+                    active=True,
+                    ready=False,
+                    waited_for_ready=False,
+                )
                 log_debug(
                     "PaddleOCR prewarm already running "
                     f"({reason}; {detail})"
@@ -757,6 +1095,34 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarm_event.set()
             ready_event = threading.Event()
             self._paddleocr_prewarm_event = ready_event
+            # Publish "started" before launching the worker so a synchronous
+            # inline thread (tests) cannot be overwritten after completion.
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                reason=str(reason or ""),
+                trigger=trigger,
+                start_path="start_thread",
+                status="started",
+                outcome="started",
+                settings_summary=settings_summary,
+                host=host,
+                active=True,
+                ready=False,
+                waited_for_ready=False,
+                wait_path="",
+                wait_s=None,
+                wait_ready=False,
+                wait_completed=False,
+                phase_text_recognition_s=None,
+                phase_full_engine_s=None,
+                total_s=None,
+                text_recognition={},
+                full_engine={},
+                error_type="",
+                first_ocr_wait_s=None,
+                first_ocr_wait_ready=None,
+                first_ocr_wait_generation=None,
+            )
             prewarm_thread = threading.Thread(
                 target=self._run_paddleocr_prewarm,
                 args=(settings, generation, reason, ready_event),
@@ -775,34 +1141,81 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     "PaddleOCR prewarm thread failed to start "
                     f"({reason}): {start_error}"
                 )
+                self._update_paddleocr_prewarm_metrics(
+                    generation=generation,
+                    reason=str(reason or ""),
+                    trigger=trigger,
+                    start_path="start_thread",
+                    status="failed",
+                    outcome="thread_start_failed",
+                    settings_summary=settings_summary,
+                    host=host,
+                    active=False,
+                    ready=False,
+                    error_type=type(start_error).__name__,
+                )
                 return False
+
         log_debug(
             "PaddleOCR prewarm started "
             f"reason={reason} version={settings.ocr_version} "
-            f"size={settings.model_size} device={settings.device}"
+            f"size={settings.model_size} device={settings.device} "
+            f"generation={generation}"
         )
         return True
+
 
     def wait_for_paddleocr_prewarm(self, settings, timeout=20.0):
         """Wait for an active matching prewarm instead of initializing twice."""
         lock = self._ensure_paddleocr_prewarm_state()
         with lock:
+            generation = self._paddleocr_prewarm_generation
             if self._paddleocr_prewarmed_settings == settings:
-                return True
-            active_thread = self._paddleocr_prewarm_thread
-            if (
-                active_thread is None
-                or not active_thread.is_alive()
-            ):
-                return False
-            ready_event = self._paddleocr_prewarm_event
+                ready_now = True
+                active = False
+                ready_event = None
+            else:
+                ready_now = False
+                active_thread = self._paddleocr_prewarm_thread
+                active = (
+                    active_thread is not None
+                    and active_thread.is_alive()
+                )
+                ready_event = self._paddleocr_prewarm_event if active else None
+
+        if ready_now:
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                wait_path="worker_wait",
+                waited_for_ready=False,
+                wait_timeout_s=float(timeout),
+                wait_completed=True,
+                wait_ready=True,
+                wait_s=0.0,
+                ready=True,
+            )
+            return True
+        if not active or ready_event is None:
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                wait_path="worker_wait",
+                waited_for_ready=False,
+                wait_timeout_s=float(timeout),
+                wait_completed=False,
+                wait_ready=False,
+                wait_s=0.0,
+                ready=False,
+            )
+            return False
 
         started_at = time.monotonic()
         timeout_seconds = max(0.0, float(timeout))
         deadline = started_at + timeout_seconds
         completed = False
+        stopped = False
         while True:
             if hasattr(self, "is_running") and not bool(self.is_running):
+                stopped = True
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
@@ -814,30 +1227,86 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         lock = self._ensure_paddleocr_prewarm_state()
         with lock:
             ready = self._paddleocr_prewarmed_settings == settings
+            generation = self._paddleocr_prewarm_generation
+        if stopped:
+            outcome = "wait_stopped"
+        elif ready:
+            outcome = "wait_ready"
+        elif completed:
+            outcome = "wait_completed_not_ready"
+        else:
+            outcome = "wait_timeout"
+        self._update_paddleocr_prewarm_metrics(
+            generation=generation,
+            wait_path="worker_wait",
+            waited_for_ready=True,
+            wait_timeout_s=float(timeout_seconds),
+            wait_completed=bool(completed),
+            wait_ready=bool(ready),
+            wait_s=round(max(0.0, waited), 4),
+            outcome=outcome,
+            ready=bool(ready),
+        )
         log_debug(
             "PaddleOCR worker prewarm wait "
-            f"completed={completed} ready={ready} duration={waited:.2f}s"
+            f"completed={completed} ready={ready} duration={waited:.2f}s "
+            f"generation={generation}"
         )
         return ready
 
     def _run_paddleocr_prewarm(self, settings, generation, reason, ready_event):
         start_time = time.monotonic()
+        text_phase_metrics = {}
+        full_phase_metrics = {}
+        text_recognition_duration = None
+        full_engine_duration = None
         try:
             text_recognition_started = time.monotonic()
-            get_paddleocr_text_recognition_engine(settings)
+            get_paddleocr_text_recognition_engine(
+                settings,
+                phase_metrics=text_phase_metrics,
+            )
             text_recognition_duration = time.monotonic() - text_recognition_started
             log_debug(
                 "PaddleOCR prewarm phase=text_recognition "
-                f"duration={text_recognition_duration:.2f}s"
+                f"duration={text_recognition_duration:.2f}s "
+                f"kind={text_phase_metrics.get('build_kind', 'unknown')} "
+                f"generation={generation}"
+            )
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                reason=str(reason or ""),
+                status="running",
+                outcome="phase_text_recognition",
+                phase_text_recognition_s=round(text_recognition_duration, 4),
+                text_recognition=dict(text_phase_metrics),
+                active=True,
+                ready=False,
             )
             full_engine_started = time.monotonic()
-            get_paddleocr_engine(settings)
+            get_paddleocr_engine(
+                settings,
+                phase_metrics=full_phase_metrics,
+            )
             full_engine_duration = time.monotonic() - full_engine_started
             log_debug(
                 "PaddleOCR prewarm phase=full_engine "
-                f"duration={full_engine_duration:.2f}s"
+                f"duration={full_engine_duration:.2f}s "
+                f"kind={full_phase_metrics.get('build_kind', 'unknown')} "
+                f"generation={generation}"
+            )
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                reason=str(reason or ""),
+                status="running",
+                outcome="phase_full_engine",
+                phase_full_engine_s=round(full_engine_duration, 4),
+                full_engine=dict(full_phase_metrics),
+                active=True,
+                ready=False,
             )
         except Exception as e:
+            duration = time.monotonic() - start_time
             lock = self._ensure_paddleocr_prewarm_state()
             with lock:
                 if ready_event is self._paddleocr_prewarm_event:
@@ -845,7 +1314,29 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     self._paddleocr_prewarm_settings = None
                     self._paddleocr_prewarm_thread = None
             ready_event.set()
-            log_debug(f"PaddleOCR prewarm failed ({reason}): {e}")
+            self._update_paddleocr_prewarm_metrics(
+                generation=generation,
+                reason=str(reason or ""),
+                status="failed",
+                outcome="failed",
+                total_s=round(duration, 4),
+                phase_text_recognition_s=(
+                    None
+                    if text_recognition_duration is None
+                    else round(text_recognition_duration, 4)
+                ),
+                phase_full_engine_s=(
+                    None
+                    if full_engine_duration is None
+                    else round(full_engine_duration, 4)
+                ),
+                text_recognition=dict(text_phase_metrics),
+                full_engine=dict(full_phase_metrics),
+                active=False,
+                ready=False,
+                error_type=type(e).__name__,
+            )
+            log_debug(f"PaddleOCR prewarm failed ({reason}): {type(e).__name__}")
             return
 
         duration = time.monotonic() - start_time
@@ -857,10 +1348,38 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     if generation == self._paddleocr_prewarm_generation
                     else None
                 )
+                ready = self._paddleocr_prewarmed_settings is not None
                 self._paddleocr_prewarm_settings = None
                 self._paddleocr_prewarm_thread = None
+            else:
+                ready = False
         ready_event.set()
-        log_debug(f"PaddleOCR prewarm completed ({reason}) in {duration:.2f}s")
+        self._update_paddleocr_prewarm_metrics(
+            generation=generation,
+            reason=str(reason or ""),
+            status="completed",
+            outcome="completed" if ready else "completed_stale",
+            phase_text_recognition_s=(
+                None
+                if text_recognition_duration is None
+                else round(text_recognition_duration, 4)
+            ),
+            phase_full_engine_s=(
+                None
+                if full_engine_duration is None
+                else round(full_engine_duration, 4)
+            ),
+            total_s=round(duration, 4),
+            text_recognition=dict(text_phase_metrics),
+            full_engine=dict(full_phase_metrics),
+            active=False,
+            ready=bool(ready),
+            error_type="",
+        )
+        log_debug(
+            f"PaddleOCR prewarm completed ({reason}) in {duration:.2f}s "
+            f"generation={generation} ready={bool(ready)}"
+        )
 
     def clear_ocr_stability_gate(self, reason="OCR state changed"):
         """Clear pending OCR text that has not yet been submitted for translation."""

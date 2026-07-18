@@ -1,7 +1,9 @@
 import os
+import platform
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -32,6 +34,111 @@ def _sanitize_exception_reason_for_log(error, max_chars=120):
     if not reason:
         return "no detail"
     return reason[: max(1, int(max_chars))].rstrip()
+
+
+def _elapsed_seconds(started_at, clock=None):
+    clock = clock or time.monotonic
+    try:
+        return max(0.0, float(clock()) - float(started_at))
+    except Exception:
+        return 0.0
+
+
+def summarize_paddleocr_settings(settings):
+    """Return a path-safe settings summary for diagnostics (no user paths)."""
+    settings = normalize_paddleocr_settings(settings)
+    source_dir_configured = bool(str(settings.source_dir or "").strip())
+    return {
+        "lang": settings.lang,
+        "ocr_version": settings.ocr_version,
+        "model_size": settings.model_size,
+        "device": settings.device,
+        "min_score": round(float(settings.min_score), 3),
+        "upscale": round(float(settings.upscale), 3),
+        "text_det_limit_side_len": int(settings.text_det_limit_side_len),
+        "text_det_limit_type": settings.text_det_limit_type,
+        "use_textline_orientation": bool(settings.use_textline_orientation),
+        "source_dir_configured": source_dir_configured,
+        "source_dir_present": bool(_resolve_local_source_dir(settings.source_dir)),
+    }
+
+
+def get_paddleocr_runtime_host_info():
+    """Return coarse host facts for prewarm diagnostics (no env values)."""
+    try:
+        cpu_count = os.cpu_count() or 0
+    except Exception:
+        cpu_count = 0
+    try:
+        system_name = platform.system() or "unknown"
+    except Exception:
+        system_name = "unknown"
+    try:
+        machine = platform.machine() or "unknown"
+    except Exception:
+        machine = "unknown"
+    return {
+        "cpu_count": int(cpu_count),
+        "platform": str(system_name),
+        "machine": str(machine),
+        "python_bits": 64 if sys.maxsize > 2**32 else 32,
+    }
+
+
+def _probe_ppocrv6_model_files(model_name):
+    """Classify whether official model files appear present without exposing paths."""
+    name = str(model_name or "").strip()
+    if not name:
+        return "unknown"
+    candidates = []
+    try:
+        home = os.path.expanduser("~")
+        if home and home != "~":
+            candidates.append(os.path.join(home, ".paddlex", "official_models", name))
+    except Exception:
+        pass
+    for env_key in ("PADDLE_PDX_CACHE_HOME", "PADDLEX_HOME", "PADDLE_HOME"):
+        try:
+            root = os.environ.get(env_key)
+        except Exception:
+            root = None
+        if root:
+            candidates.append(os.path.join(str(root), "official_models", name))
+            candidates.append(os.path.join(str(root), name))
+    saw_parent = False
+    for candidate in candidates:
+        try:
+            parent = os.path.dirname(candidate)
+            if parent and os.path.isdir(parent):
+                saw_parent = True
+            if os.path.isdir(candidate):
+                return "present"
+        except Exception:
+            continue
+    if saw_parent or candidates:
+        return "absent"
+    return "unknown"
+
+
+def _classify_engine_build_kind(files_before, files_after, cache_hit):
+    if cache_hit:
+        return "cache_hit"
+    if files_before == "absent" and files_after == "present":
+        return "model_download_and_build"
+    if files_before == "present":
+        return "model_build_cached_files"
+    if files_before == "absent":
+        return "model_construct_files_absent"
+    return "model_construct"
+
+
+def _record_phase_metrics(phase_metrics, **values):
+    if phase_metrics is None:
+        return
+    try:
+        phase_metrics.update(values)
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -177,10 +284,18 @@ def _import_text_recognition(settings):
             ) from second_error
 
 
-def _build_paddleocr_engine(settings):
+def _build_paddleocr_engine(settings, phase_metrics=None, clock=None):
     settings = normalize_paddleocr_settings(settings)
+    clock = clock or time.monotonic
+    total_started = clock()
+    import_started = clock()
     PaddleOCR = _import_paddleocr(settings)
+    import_duration = _elapsed_seconds(import_started, clock)
     det_model_name, rec_model_name = resolve_ppocrv6_model_names(settings.model_size)
+    probe_started = clock()
+    det_files_before = _probe_ppocrv6_model_files(det_model_name)
+    rec_files_before = _probe_ppocrv6_model_files(rec_model_name)
+    probe_duration = _elapsed_seconds(probe_started, clock)
     kwargs = {
         "ocr_version": settings.ocr_version,
         "text_detection_model_name": det_model_name,
@@ -201,23 +316,85 @@ def _build_paddleocr_engine(settings):
         f"version={settings.ocr_version} det={det_model_name} rec={rec_model_name} "
         f"device={settings.device} min_score={settings.min_score}"
     )
-    return PaddleOCR(**kwargs)
+    construct_started = clock()
+    engine = PaddleOCR(**kwargs)
+    construct_duration = _elapsed_seconds(construct_started, clock)
+    det_files_after = _probe_ppocrv6_model_files(det_model_name)
+    rec_files_after = _probe_ppocrv6_model_files(rec_model_name)
+    files_before = (
+        "present"
+        if det_files_before == "present" and rec_files_before == "present"
+        else (
+            "absent"
+            if det_files_before == "absent" or rec_files_before == "absent"
+            else "unknown"
+        )
+    )
+    files_after = (
+        "present"
+        if det_files_after == "present" and rec_files_after == "present"
+        else (
+            "absent"
+            if det_files_after == "absent" or rec_files_after == "absent"
+            else "unknown"
+        )
+    )
+    build_kind = _classify_engine_build_kind(files_before, files_after, cache_hit=False)
+    _record_phase_metrics(
+        phase_metrics,
+        engine_kind="full",
+        cache_hit=False,
+        import_s=round(import_duration, 4),
+        model_files_probe_s=round(probe_duration, 4),
+        model_files_before=files_before,
+        model_files_after=files_after,
+        construct_s=round(construct_duration, 4),
+        build_kind=build_kind,
+        total_s=round(_elapsed_seconds(total_started, clock), 4),
+    )
+    return engine
 
 
-def get_paddleocr_engine(settings):
+def get_paddleocr_engine(settings, phase_metrics=None, clock=None):
     settings = normalize_paddleocr_settings(settings)
+    clock = clock or time.monotonic
+    total_started = clock()
     with _PADDLEOCR_ENGINE_CACHE_LOCK:
         engine = _PADDLEOCR_ENGINE_CACHE.get(settings)
         if engine is None:
-            engine = _build_paddleocr_engine(settings)
+            engine = _build_paddleocr_engine(
+                settings,
+                phase_metrics=phase_metrics,
+                clock=clock,
+            )
             _PADDLEOCR_ENGINE_CACHE[settings] = engine
+        else:
+            _record_phase_metrics(
+                phase_metrics,
+                engine_kind="full",
+                cache_hit=True,
+                import_s=0.0,
+                model_files_probe_s=0.0,
+                model_files_before="present",
+                model_files_after="present",
+                construct_s=0.0,
+                build_kind="cache_hit",
+                total_s=round(_elapsed_seconds(total_started, clock), 4),
+            )
         return engine
 
 
-def _build_paddleocr_text_recognition_engine(settings):
+def _build_paddleocr_text_recognition_engine(settings, phase_metrics=None, clock=None):
     settings = normalize_paddleocr_settings(settings)
+    clock = clock or time.monotonic
+    total_started = clock()
+    import_started = clock()
     TextRecognition = _import_text_recognition(settings)
+    import_duration = _elapsed_seconds(import_started, clock)
     _det_model_name, rec_model_name = resolve_ppocrv6_model_names(settings.model_size)
+    probe_started = clock()
+    files_before = _probe_ppocrv6_model_files(rec_model_name)
+    probe_duration = _elapsed_seconds(probe_started, clock)
     kwargs = {
         "model_name": rec_model_name,
     }
@@ -229,16 +406,52 @@ def _build_paddleocr_text_recognition_engine(settings):
         "Initializing PaddleOCR TextRecognition "
         f"rec={rec_model_name} device={settings.device} min_score={settings.min_score}"
     )
-    return TextRecognition(**kwargs)
+    construct_started = clock()
+    engine = TextRecognition(**kwargs)
+    construct_duration = _elapsed_seconds(construct_started, clock)
+    files_after = _probe_ppocrv6_model_files(rec_model_name)
+    build_kind = _classify_engine_build_kind(files_before, files_after, cache_hit=False)
+    _record_phase_metrics(
+        phase_metrics,
+        engine_kind="text_recognition",
+        cache_hit=False,
+        import_s=round(import_duration, 4),
+        model_files_probe_s=round(probe_duration, 4),
+        model_files_before=files_before,
+        model_files_after=files_after,
+        construct_s=round(construct_duration, 4),
+        build_kind=build_kind,
+        total_s=round(_elapsed_seconds(total_started, clock), 4),
+    )
+    return engine
 
 
-def get_paddleocr_text_recognition_engine(settings):
+def get_paddleocr_text_recognition_engine(settings, phase_metrics=None, clock=None):
     settings = normalize_paddleocr_settings(settings)
+    clock = clock or time.monotonic
+    total_started = clock()
     with _PADDLEOCR_TEXT_REC_ENGINE_CACHE_LOCK:
         engine = _PADDLEOCR_TEXT_REC_ENGINE_CACHE.get(settings)
         if engine is None:
-            engine = _build_paddleocr_text_recognition_engine(settings)
+            engine = _build_paddleocr_text_recognition_engine(
+                settings,
+                phase_metrics=phase_metrics,
+                clock=clock,
+            )
             _PADDLEOCR_TEXT_REC_ENGINE_CACHE[settings] = engine
+        else:
+            _record_phase_metrics(
+                phase_metrics,
+                engine_kind="text_recognition",
+                cache_hit=True,
+                import_s=0.0,
+                model_files_probe_s=0.0,
+                model_files_before="present",
+                model_files_after="present",
+                construct_s=0.0,
+                build_kind="cache_hit",
+                total_s=round(_elapsed_seconds(total_started, clock), 4),
+            )
         return engine
 
 

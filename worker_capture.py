@@ -579,7 +579,15 @@ def process_local_ocr_frame(
             None,
         )
         if callable(wait_for_prewarm):
-            wait_for_prewarm(settings, timeout=20.0)
+            wait_started = time.monotonic()
+            wait_ready = bool(wait_for_prewarm(settings, timeout=20.0))
+            waited_s = max(0.0, time.monotonic() - wait_started)
+            note_first_wait = getattr(app, "note_paddleocr_first_ocr_wait", None)
+            if callable(note_first_wait):
+                try:
+                    note_first_wait(settings, waited_s, wait_ready)
+                except Exception:
+                    pass
         ocr_cleaned_text, _lines = _recognize_subtitle_with_paddleocr(
             screenshot_pil,
             settings,

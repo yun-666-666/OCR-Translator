@@ -1,4 +1,4 @@
-﻿# gui_builder.py
+# gui_builder.py
 import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser
 import threading
@@ -217,6 +217,11 @@ def run_profile_network_task_async(app, button, task, on_success, failure_title)
 _TIMING_LABELS = [
     ("capture_duration", "Capture"),
     ("ocr_duration", "OCR"),
+    ("paddleocr_prewarm_total_duration", "PaddleOCR prewarm total"),
+    ("paddleocr_prewarm_text_recognition_duration", "PaddleOCR prewarm text-rec"),
+    ("paddleocr_prewarm_full_engine_duration", "PaddleOCR prewarm full"),
+    ("paddleocr_prewarm_wait_duration", "PaddleOCR worker wait"),
+    ("paddleocr_first_ocr_wait_duration", "PaddleOCR first OCR wait"),
     ("translation_queue_time", "Translation queue"),
     ("translation_worker_time", "Translation worker/API"),
     ("translation_total_latency", "Total translation"),
@@ -275,6 +280,26 @@ def _format_runtime_metrics_snapshot(snapshot):
     )
     race_winner = labels.get("race_winner") or "-"
     lines.append(f"Race winner: {race_winner}")
+    prewarm_status = labels.get("paddleocr_prewarm_status") or "-"
+    prewarm_outcome = labels.get("paddleocr_prewarm_outcome") or "-"
+    prewarm_reason = labels.get("paddleocr_prewarm_reason") or "-"
+    prewarm_settings = labels.get("paddleocr_prewarm_settings") or "-"
+    prewarm_host = labels.get("paddleocr_prewarm_host") or "-"
+    lines.append(
+        "PaddleOCR prewarm: "
+        f"status={prewarm_status} outcome={prewarm_outcome} "
+        f"gen={gauges.get('paddleocr_prewarm_generation', 0)} "
+        f"active={gauges.get('paddleocr_prewarm_active', 0)} "
+        f"ready={gauges.get('paddleocr_prewarm_ready', 0)}"
+    )
+    lines.append(f"PaddleOCR prewarm reason: {prewarm_reason}")
+    lines.append(f"PaddleOCR prewarm settings: {prewarm_settings}")
+    lines.append(f"PaddleOCR prewarm host: {prewarm_host}")
+    if gauges.get("paddleocr_first_ocr_wait_s") is not None:
+        lines.append(
+            "PaddleOCR first OCR wait: "
+            f"{_format_metric_seconds(gauges.get('paddleocr_first_ocr_wait_s'))}"
+        )
     return "\n".join(lines)
 
 
