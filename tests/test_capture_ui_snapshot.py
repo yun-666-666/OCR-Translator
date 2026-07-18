@@ -44,7 +44,7 @@ class CaptureUISnapshotTests(unittest.TestCase):
             is_running=True,
             current_scan_interval=50,
             base_scan_interval=50,
-            update_adaptive_scan_interval=lambda: None,
+            update_adaptive_scan_interval=forbidden,
             get_ocr_model_setting=lambda: "custom_ai",
             is_api_based_ocr_model=lambda model=None: True,
             source_area=[10, 20, 14, 24],
@@ -157,6 +157,38 @@ class CaptureUISnapshotTests(unittest.TestCase):
         self.assertNotIn("source_overlay", source)
         self.assertNotIn("tk.Toplevel", source)
         self.assertNotIn("TclError", source)
+        self.assertNotIn("update_adaptive_scan_interval", source)
+
+    def test_ui_thread_refreshes_adaptive_snapshot_while_capture_runs(self):
+        from app_capture_ocr import AppCaptureOcrMixin
+
+        root = Mock()
+        root.after.return_value = "capture-refresh"
+        app = types.SimpleNamespace(
+            root=root,
+            is_running=True,
+            _capture_ui_snapshot_refresh_generation=0,
+            _capture_ui_snapshot_refresh_after_id=None,
+            update_adaptive_scan_interval=Mock(),
+        )
+        app.stop_capture_ui_snapshot_refresh = types.MethodType(
+            AppCaptureOcrMixin.stop_capture_ui_snapshot_refresh,
+            app,
+        )
+        app._refresh_capture_ui_snapshot_on_ui_thread = types.MethodType(
+            AppCaptureOcrMixin._refresh_capture_ui_snapshot_on_ui_thread,
+            app,
+        )
+
+        AppCaptureOcrMixin.start_capture_ui_snapshot_refresh(app)
+
+        app.update_adaptive_scan_interval.assert_called_once_with()
+        root.after.assert_called_once_with(
+            500,
+            app._refresh_capture_ui_snapshot_on_ui_thread,
+            2,
+        )
+        self.assertEqual(app._capture_ui_snapshot_refresh_after_id, "capture-refresh")
 
 
 if __name__ == "__main__":

@@ -316,6 +316,50 @@ class AppCaptureOcrMixin:
 
         return get_capture_ui_snapshot(self)
 
+    def start_capture_ui_snapshot_refresh(self):
+        """Refresh adaptive capture inputs from the Tk thread while running."""
+        self.stop_capture_ui_snapshot_refresh()
+        generation = int(
+            getattr(self, "_capture_ui_snapshot_refresh_generation", 0) or 0
+        ) + 1
+        self._capture_ui_snapshot_refresh_generation = generation
+        self._refresh_capture_ui_snapshot_on_ui_thread(generation)
+
+    def stop_capture_ui_snapshot_refresh(self):
+        """Cancel the UI-owned adaptive snapshot refresh, if one is pending."""
+        after_id = getattr(self, "_capture_ui_snapshot_refresh_after_id", None)
+        self._capture_ui_snapshot_refresh_after_id = None
+        self._capture_ui_snapshot_refresh_generation = int(
+            getattr(self, "_capture_ui_snapshot_refresh_generation", 0) or 0
+        ) + 1
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+
+    def _refresh_capture_ui_snapshot_on_ui_thread(self, generation):
+        """Run adaptive interval reads and snapshot publication on Tk's thread."""
+        if generation != getattr(self, "_capture_ui_snapshot_refresh_generation", 0):
+            return
+        if not getattr(self, "is_running", False):
+            self._capture_ui_snapshot_refresh_after_id = None
+            return
+        self.update_adaptive_scan_interval()
+        if generation != getattr(self, "_capture_ui_snapshot_refresh_generation", 0):
+            return
+        if not getattr(self, "is_running", False):
+            self._capture_ui_snapshot_refresh_after_id = None
+            return
+        try:
+            self._capture_ui_snapshot_refresh_after_id = self.root.after(
+                500,
+                self._refresh_capture_ui_snapshot_on_ui_thread,
+                generation,
+            )
+        except Exception:
+            self._capture_ui_snapshot_refresh_after_id = None
+
     def handle_empty_ocr_result(self):
         """Handle <EMPTY> OCR result and manage clear translation timeout."""
         current_time = time.monotonic()

@@ -513,7 +513,7 @@ def publish_capture_ui_snapshot(app, *, bump_generation=False, reason=""):
     return snapshot
 
 
-def get_capture_ui_snapshot(app):
+def get_capture_ui_snapshot(app, *, allow_unpublished_build=True):
     """Worker-safe reader for the latest immutable capture snapshot."""
     lock = getattr(app, "_capture_ui_snapshot_lock", None)
     if lock is not None:
@@ -525,6 +525,8 @@ def get_capture_ui_snapshot(app):
     snapshot = getattr(app, "capture_ui_snapshot", None)
     if isinstance(snapshot, CaptureUISnapshot):
         return snapshot
+    if not allow_unpublished_build:
+        return None
     return build_capture_ui_snapshot(app)
 
 
@@ -621,33 +623,34 @@ def run_capture_thread(app):
     # Seed with the currently published generation so startup does not treat the
     # first snapshot as a geometry/settings change that clears OCR state.
     try:
-        initial_snapshot = get_capture_ui_snapshot(app)
-        last_capture_context_signature = (
-            initial_snapshot.generation,
-            None,
-            None,
-            None,
-            None,
-            None,
-            initial_snapshot.ocr_model,
+        initial_snapshot = get_capture_ui_snapshot(
+            app,
+            allow_unpublished_build=False,
         )
+        if initial_snapshot is not None:
+            last_capture_context_signature = (
+                initial_snapshot.generation,
+                None,
+                None,
+                None,
+                None,
+                None,
+                initial_snapshot.ocr_model,
+            )
     except Exception:
         last_capture_context_signature = None
 
     while app.is_running:
         now = time.monotonic()
         try:
-            # Adaptive interval may update plain Python values on the app object.
-            # Snapshot reading below never touches Tk widgets/vars.
-            updater = getattr(app, "update_adaptive_scan_interval", None)
-            if callable(updater):
-                updater()
-
-            snapshot = get_capture_ui_snapshot(app)
-            scan_interval_ms = max(
-                1,
-                int(snapshot.scan_interval_ms or getattr(app, "current_scan_interval", 100) or 100),
+            snapshot = get_capture_ui_snapshot(
+                app,
+                allow_unpublished_build=False,
             )
+            if snapshot is None:
+                time.sleep(min_interval)
+                continue
+            scan_interval_ms = max(1, int(snapshot.scan_interval_ms or 100))
             base_scan_interval = max(min_interval, scan_interval_ms / 1000.0)
             ocr_model = snapshot.ocr_model
             is_api_based = bool(snapshot.is_api_based)

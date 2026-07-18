@@ -191,6 +191,13 @@ class AppLifecycleMixin:
 
         _log_debug("Stopping running OCR/translation process for app exit...")
         self.is_running = False
+        stop_capture_refresh = getattr(
+            self,
+            "stop_capture_ui_snapshot_refresh",
+            None,
+        )
+        if callable(stop_capture_refresh):
+            stop_capture_refresh()
         self.toggle_in_progress = False
 
         active_threads_copy = list(getattr(self, 'threads', []) or [])
@@ -338,6 +345,13 @@ class AppLifecycleMixin:
         if self.is_running:
             _log_debug("Stopping translation process requested by user.")
             self.is_running = False
+            stop_capture_refresh = getattr(
+                self,
+                "stop_capture_ui_snapshot_refresh",
+                None,
+            )
+            if callable(stop_capture_refresh):
+                stop_capture_refresh()
             self._shutdown_finalized = False
 
             # DO NOT request session ends here. This will be done in _finalize_shutdown.
@@ -456,6 +470,13 @@ class AppLifecycleMixin:
                 self._app_is_closing = False
                 self._shutdown_finalized = False
                 self.is_running = True
+                start_capture_refresh = getattr(
+                    self,
+                    "start_capture_ui_snapshot_refresh",
+                    None,
+                )
+                if callable(start_capture_refresh):
+                    start_capture_refresh()
 
                 if hasattr(self, 'translation_handler'):
                     if self.is_api_based_ocr_model():
