@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 import gui_builder
 import custom_ai as custom_ai_module
+from credential_store import CredentialStoreError
 from custom_ai import CustomAIProfileManager, CustomAIProvider
 from gui_builder import filter_model_values, run_profile_network_task_async
 from language_ui import UILanguageManager
@@ -181,38 +182,120 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertTrue(deleted)
             self.assertIn(credential_ref, store.deleted)
 
-    def test_unavailable_profile_credential_store_keeps_plaintext_and_logs_safely(self):
+    def test_unavailable_profile_credential_store_does_not_write_plaintext_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
-            path.write_text(
-                json.dumps({
-                    "profiles": [
-                        {
-                            "id": "legacy-profile",
-                            "name": "Legacy",
-                            "base_url": "https://proxy.example/v1",
-                            "api_key": TEST_SECRET_KEY,
-                            "model": "qwen",
-                            "enabled": True,
-                        }
-                    ]
-                }),
-                encoding="utf-8",
-            )
+            original_payload = {
+                "profiles": [
+                    {
+                        "id": "legacy-profile",
+                        "name": "Legacy",
+                        "base_url": "https://proxy.example/v1",
+                        "api_key": TEST_SECRET_KEY,
+                        "model": "qwen",
+                        "enabled": True,
+                        "translation_failover_enabled": False,
+                        "wire_api": "chat_completions",
+                        "structured_output_mode": "auto",
+                        "reasoning_effort": "low",
+                    }
+                ],
+                "active_translation_profile_id": "legacy-profile",
+                "active_ocr_profile_id": "legacy-profile",
+            }
+            path.write_text(json.dumps(original_payload, indent=2), encoding="utf-8")
+            original_text = path.read_text(encoding="utf-8")
             store = FakeCredentialStore(fail_writes=True)
 
             with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
                 with patch("custom_ai.log_debug") as log_debug:
                     manager = CustomAIProfileManager(path)
+                    # Explicit save must not invent a plaintext fallback path either.
                     manager.save()
 
             persisted_text = path.read_text(encoding="utf-8")
             messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
+            runtime = manager.get_profile("legacy-profile")
+            persisted = json.loads(persisted_text)["profiles"][0]
 
-            self.assertTrue(manager.get_profile("legacy-profile").get("api_key") == TEST_SECRET_KEY, "runtime fallback lost API key")
-            self.assertTrue(TEST_SECRET_KEY in persisted_text, "plaintext fallback should preserve the key when credentials are unavailable")
-            self.assertTrue(messages, "credential fallback did not log a diagnostic")
+            self.assertTrue(runtime.get("api_key") == TEST_SECRET_KEY, "runtime lost API key after failed migration")
+            self.assertFalse(runtime.get("api_key_ref"), "failed credential write must not invent a credential ref")
+            self.assertFalse(runtime.get("_api_key_plaintext_fallback"), "plaintext fallback flag must not be set")
+            self.assertFalse(persisted.get("api_key_ref"), "disk must not invent a credential ref after failed store")
+            # Disk may retain the pre-existing legacy key, but must not gain a new
+            # "credential failed so write plaintext" fallback marker/path.
+            self.assertEqual(persisted.get("api_key"), TEST_SECRET_KEY)
+            self.assertNotIn("_api_key_plaintext_fallback", persisted)
+            self.assertTrue(messages, "credential failure did not log a diagnostic")
             self.assertFalse(any(TEST_SECRET_KEY in message for message in messages), "diagnostic log leaked API key")
+            # No credential store entries were created.
+            self.assertEqual(store.values, {})
+            # Content stays equivalent to the already-saved legacy profile state.
+            self.assertEqual(json.loads(persisted_text)["profiles"][0]["id"], "legacy-profile")
+            self.assertIn("api_key", json.loads(original_text)["profiles"][0])
+
+    def test_add_profile_credential_store_failure_is_atomic_and_redacted(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore(fail_writes=True)
+            manager = CustomAIProfileManager(path, credential_store=store)
+
+            with self.assertRaises(CredentialStoreError) as raised:
+                manager.add_profile(
+                    name="Unsaved",
+                    base_url="https://proxy.example/v1",
+                    api_key=TEST_SECRET_KEY,
+                    model="qwen",
+                )
+
+            error_text = str(raised.exception)
+            self.assertFalse(path.exists(), "failed add must not create profile JSON")
+            self.assertEqual(manager.list_profiles(), [])
+            self.assertEqual(store.values, {})
+            self.assertNotIn(TEST_SECRET_KEY, error_text)
+            self.assertIn("profile", error_text.lower())
+
+    def test_update_profile_credential_store_failure_keeps_previous_ref_and_disk(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+            profile = manager.add_profile(
+                name="Original",
+                base_url="https://proxy.example/v1",
+                api_key=TEST_SECRET_KEY,
+                model="old-model",
+            )
+            profile_id = profile["id"]
+            credential_ref = profile["api_key_ref"]
+            before_text = path.read_text(encoding="utf-8")
+            before_payload = json.loads(before_text)
+
+            store.fail_writes = True
+            with self.assertRaises(CredentialStoreError) as raised:
+                manager.update_profile(
+                    profile_id,
+                    name="Unsaved",
+                    api_key=UPDATED_TEST_SECRET_KEY,
+                    model="new-model",
+                )
+
+            restored = manager.get_profile(profile_id)
+            after_text = path.read_text(encoding="utf-8")
+            after_payload = json.loads(after_text)
+            error_text = str(raised.exception)
+
+            self.assertEqual(restored["name"], "Original")
+            self.assertEqual(restored["model"], "old-model")
+            self.assertEqual(restored["api_key"], TEST_SECRET_KEY)
+            self.assertEqual(restored["api_key_ref"], credential_ref)
+            self.assertTrue(store.matches(credential_ref, TEST_SECRET_KEY))
+            self.assertEqual(after_payload, before_payload)
+            assert_secret_not_in_text(self, after_text, "custom_ai_profiles.json after failed update")
+            self.assertNotIn("api_key", after_payload["profiles"][0])
+            self.assertNotIn(UPDATED_TEST_SECRET_KEY, after_text)
+            self.assertNotIn(UPDATED_TEST_SECRET_KEY, error_text)
+            self.assertNotIn(TEST_SECRET_KEY, error_text)
 
     def test_provider_config_save_moves_api_keys_to_credential_refs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

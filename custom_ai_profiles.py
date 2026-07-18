@@ -8,7 +8,10 @@ import threading
 import time
 import uuid
 
-from credential_store import create_default_credential_store as _base_credential_store_factory
+from credential_store import (
+    CredentialStoreError,
+    create_default_credential_store as _base_credential_store_factory,
+)
 from custom_ai_policy import (
     ACTIVE_PROFILE_KINDS,
     CUSTOM_AI_CREDENTIAL_SERVICE,
@@ -194,9 +197,12 @@ class CustomAIProfileManager:
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
             if credential_ref:
                 serialized["api_key_ref"] = credential_ref
-            api_key = str(profile.get("api_key") or "")
-            if api_key and (profile.get("_api_key_plaintext_fallback") or not credential_ref):
-                serialized["api_key"] = api_key
+            else:
+                # Preserve already-on-disk legacy plaintext only when no credential
+                # ref exists. Never write plaintext as a failed-store fallback.
+                api_key = str(profile.get("api_key") or "")
+                if api_key:
+                    serialized["api_key"] = api_key
             serialized["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
                 profile.get("reasoning_effort")
                 or profile.get("model_reasoning_effort")
@@ -214,28 +220,36 @@ class CustomAIProfileManager:
     def _versioned_credential_ref(self, profile_id):
         return f"{self._credential_ref(profile_id)}:{uuid.uuid4().hex}"
 
-    def _log_credential_issue(self, action, credential_ref, error, fallback=False):
-        fallback_text = "; plaintext fallback retained" if fallback else ""
+    def _log_credential_issue(self, action, credential_ref, error):
         _log_debug(
             "Custom AI credential "
-            f"{action} failed for {credential_ref}: {type(error).__name__}{fallback_text}"
+            f"{action} failed for {credential_ref}: {type(error).__name__}"
+        )
+
+    def _credential_failure_message(self, action, profile_id):
+        safe_id = str(profile_id or "unknown").strip() or "unknown"
+        return (
+            f"Failed to {action} Custom AI credential for profile {safe_id}; "
+            "profile changes were not saved"
         )
 
     def _store_profile_api_key(self, profile, api_key, action):
+        """Store a secret in the credential backend. Raises on failure (no plaintext fallback)."""
         credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
         if not credential_ref:
             credential_ref = self._credential_ref(profile["id"])
-        profile["api_key_ref"] = credential_ref
         try:
             self.credential_store.set_secret(credential_ref, str(api_key))
-            profile["api_key"] = str(api_key)
-            profile.pop("_api_key_plaintext_fallback", None)
-            return True
         except Exception as e:
-            profile["api_key"] = str(api_key)
-            profile["_api_key_plaintext_fallback"] = True
-            self._log_credential_issue(action, credential_ref, e, fallback=True)
-            return False
+            self._log_credential_issue(action, credential_ref, e)
+            raise CredentialStoreError(
+                self._credential_failure_message(action, profile.get("id"))
+            ) from e
+        profile["api_key_ref"] = credential_ref
+        profile["api_key"] = str(api_key)
+        profile.pop("_api_key_plaintext_fallback", None)
+        profile.pop("credential_ref", None)
+        return True
 
     def _resolve_profile_api_key(self, profile, credential_ref):
         try:
@@ -294,11 +308,21 @@ class CustomAIProfileManager:
             plaintext_key = str(profile.get("api_key") or "")
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
             if plaintext_key:
-                if not credential_ref:
-                    credential_ref = self._credential_ref(profile_id)
-                sanitized["api_key_ref"] = credential_ref
-                if self._store_profile_api_key(sanitized, plaintext_key, "migration"):
+                # Migrate plaintext off disk only when the credential store accepts it.
+                # On failure keep runtime key in memory and leave disk untouched (no
+                # plaintext fallback write introduced by this process).
+                if credential_ref:
+                    sanitized["api_key_ref"] = credential_ref
+                try:
+                    self._store_profile_api_key(sanitized, plaintext_key, "migration")
                     should_save = True
+                except CredentialStoreError:
+                    sanitized.pop("_api_key_plaintext_fallback", None)
+                    sanitized["api_key"] = plaintext_key
+                    if credential_ref:
+                        sanitized["api_key_ref"] = credential_ref
+                    else:
+                        sanitized.pop("api_key_ref", None)
             elif credential_ref:
                 sanitized["api_key_ref"] = credential_ref
                 sanitized["api_key"] = self._resolve_profile_api_key(sanitized, credential_ref)
@@ -427,7 +451,12 @@ class CustomAIProfileManager:
         self._validate_profile(profile)
         with self._transaction_lock:
             staged_data = self._snapshot_data()
-            self._store_profile_api_key(profile, str(api_key), "write")
+            try:
+                self._store_profile_api_key(profile, str(api_key), "write")
+            except CredentialStoreError as error:
+                raise CredentialStoreError(
+                    self._credential_failure_message("write", profile.get("id"))
+                ) from error
             staged_data["profiles"].append(profile)
             for active_kind in ACTIVE_PROFILE_KINDS:
                 active_key = self._active_key(active_kind)
@@ -511,11 +540,17 @@ class CustomAIProfileManager:
                     profile_id
                 )
                 staged_profile.pop("credential_ref", None)
-                self._store_profile_api_key(
-                    staged_profile,
-                    str(updates.get("api_key") or ""),
-                    "write",
-                )
+                try:
+                    self._store_profile_api_key(
+                        staged_profile,
+                        str(updates.get("api_key") or ""),
+                        "write",
+                    )
+                except CredentialStoreError as error:
+                    # Staged snapshot is discarded; published memory/disk stay intact.
+                    raise CredentialStoreError(
+                        self._credential_failure_message("write", profile_id)
+                    ) from error
 
             if not self._save_staged_data(staged_data):
                 if staged_new_credential:
