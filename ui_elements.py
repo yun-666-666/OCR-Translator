@@ -270,8 +270,25 @@ class ResizableMovableFrame(tk.Toplevel):
         self._resize_start_height = 0
         self._resize_direction = None
         self._resize_start_geometry = None
+        self._geometry_changed_callback = None
 
         self.is_visible_during_ocr = not start_hidden # Flag (though not actively used in capture logic now)
+
+    def set_geometry_changed_callback(self, callback):
+        """Register a UI-thread callback after move/resize completes."""
+        self._geometry_changed_callback = callback
+
+    def _notify_geometry_changed(self):
+        callback = getattr(self, "_geometry_changed_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as error:
+            log_debug(
+                "Geometry changed callback failed: "
+                f"{type(error).__name__} - {error}"
+            )
 
     def update_color(self, new_color):
         """Update the color of all overlay components without changing window opacity."""
@@ -300,6 +317,7 @@ class ResizableMovableFrame(tk.Toplevel):
         """Reset drag start position."""
         self._drag_start_x = 0
         self._drag_start_y = 0
+        self._notify_geometry_changed()
 
     def do_move(self, event):
         """Move window based on mouse drag."""
@@ -324,6 +342,7 @@ class ResizableMovableFrame(tk.Toplevel):
         """Reset resize state."""
         self._resize_direction = None
         self._resize_start_geometry = None
+        self._notify_geometry_changed()
 
     def do_resize_edge(self, event):
         """Resize window based on mouse drag from the active edge or corner."""

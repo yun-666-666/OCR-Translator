@@ -551,13 +551,17 @@ class UIInteractionHandler:
             )
             if self.app.source_overlay and self.app.source_overlay.winfo_exists():
                 area = self.app.source_overlay.get_geometry()
-                if area: cfg['source_area_x1'], cfg['source_area_y1'], \
-                         cfg['source_area_x2'], cfg['source_area_y2'] = map(str, area)
+                if area:
+                    cfg['source_area_x1'], cfg['source_area_y1'], \
+                        cfg['source_area_x2'], cfg['source_area_y2'] = map(str, area)
+                    self.app.source_area = list(area)
                 cfg['source_area_visible'] = str(self.app.source_overlay.winfo_viewable())
             if self.app.target_overlay and self.app.target_overlay.winfo_exists():
                 area = self.app.target_overlay.get_geometry()
-                if area: cfg['target_area_x1'], cfg['target_area_y1'], \
-                         cfg['target_area_x2'], cfg['target_area_y2'] = map(str, area)
+                if area:
+                    cfg['target_area_x1'], cfg['target_area_y1'], \
+                        cfg['target_area_x2'], cfg['target_area_y2'] = map(str, area)
+                    self.app.target_area = list(area)
                 cfg['target_area_visible'] = str(self.app.target_overlay.winfo_viewable())
 
             self.app.configuration_handler.save_current_window_geometry()
@@ -568,6 +572,11 @@ class UIInteractionHandler:
 
             self.app.stable_threshold = int(cfg['stability_threshold'])
             self.app.clear_translation_timeout = int(cfg['clear_translation_timeout'])
+            if hasattr(self.app, "publish_capture_ui_snapshot"):
+                self.app.publish_capture_ui_snapshot(
+                    bump_generation=True,
+                    reason="settings saved",
+                )
             log_debug("Settings saved successfully by UIInteractionHandler.save_settings.")
 
             if hasattr(self.app, 'status_label') and self.app.status_label.winfo_exists():

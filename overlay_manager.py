@@ -35,6 +35,21 @@ def _widget_exists_om(widget):
         return False
 
 
+def _publish_source_geometry_change(app, reason="source overlay geometry changed"):
+    """UI-thread publisher for source overlay move/resize completion."""
+    overlay = getattr(app, "source_overlay", None)
+    if overlay is not None:
+        try:
+            area = overlay.get_geometry()
+            if area:
+                app.source_area = list(area)
+        except Exception:
+            pass
+    publisher = getattr(app, "publish_capture_ui_snapshot", None)
+    if callable(publisher):
+        publisher(bump_generation=True, reason=reason)
+
+
 def _valid_area_om(area):
     try:
         x1, y1, x2, y2 = map(int, area)
@@ -193,12 +208,18 @@ def select_source_area_om(app):
         app.source_area = selected
         log_debug(f"OverlayManager: Source area selected: {app.source_area}")
         messagebox.showinfo(
-            app.ui_lang.get_label("dialog_area_selected_title", "Area Selected"), 
-            f"{app.ui_lang.get_label('dialog_source_area_set_message', 'Source area set to:')}\n{app.source_area}", 
+            app.ui_lang.get_label("dialog_area_selected_title", "Area Selected"),
+            f"{app.ui_lang.get_label('dialog_source_area_set_message', 'Source area set to:')}\n{app.source_area}",
             parent=app.root
         )
         create_source_overlay_om(app)
-        
+        publisher = getattr(app, "publish_capture_ui_snapshot", None)
+        if callable(publisher):
+            publisher(
+                bump_generation=True,
+                reason="source area selected",
+            )
+
         if app.source_overlay and app.source_overlay.winfo_exists() and app.source_overlay.winfo_viewable():
             app.source_overlay.hide()
             app.config['Settings']['source_area_visible'] = 'False'
@@ -242,7 +263,7 @@ def create_source_overlay_om(app, force_hidden=False):
          except (ValueError, KeyError) as e:
              log_debug(f"OverlayManager: Could not load source area from config for overlay creation: {e}")
              return
-    
+
     if app.source_overlay and app.source_overlay.winfo_exists():
         try:
             app.source_overlay.destroy()
@@ -259,8 +280,12 @@ def create_source_overlay_om(app, force_hidden=False):
             start_hidden=force_hidden,
         )
         app.source_overlay.attributes("-alpha", 0.7)
-        
+
         app.source_overlay.update_color(app.source_colour_var.get())
+        if hasattr(app.source_overlay, "set_geometry_changed_callback"):
+            app.source_overlay.set_geometry_changed_callback(
+                lambda: _publish_source_geometry_change(app)
+            )
 
         should_be_visible = app.config['Settings'].getboolean('source_area_visible', fallback=False)
         if force_hidden:
@@ -271,6 +296,13 @@ def create_source_overlay_om(app, force_hidden=False):
             app.source_overlay.show()
         elif not should_be_visible and app.source_overlay.winfo_viewable():
             app.source_overlay.hide()
+
+        publisher = getattr(app, "publish_capture_ui_snapshot", None)
+        if callable(publisher):
+            publisher(
+                bump_generation=True,
+                reason="source overlay created",
+            )
         
         log_debug(f"OverlayManager: Created source overlay. Visible: {app.source_overlay.winfo_viewable()}")
     except Exception as e_cso:

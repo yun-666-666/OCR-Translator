@@ -437,6 +437,12 @@ class AppLifecycleMixin:
                 except tk.TclError:
                     _log_debug("Warning: Error ensuring target overlay visibility at start (likely closed).")
 
+                if hasattr(self, "publish_capture_ui_snapshot"):
+                    self.publish_capture_ui_snapshot(
+                        bump_generation=True,
+                        reason="translation starting",
+                    )
+
                 self._clear_queue(self.ocr_queue)
                 self._clear_queue(self.translation_queue)
                 self._reset_translation_scheduler_session_state(

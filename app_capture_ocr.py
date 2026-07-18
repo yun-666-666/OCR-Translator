@@ -227,6 +227,7 @@ class AppCaptureOcrMixin:
                 )
                 self._last_adaptive_log_state = adaptive_state
                 self._last_adaptive_log_time = now
+            self.publish_capture_ui_snapshot(reason="local adaptive scan interval")
             return
 
         # Measure current OCR load
@@ -297,6 +298,23 @@ class AppCaptureOcrMixin:
             _log_debug(adaptive_log_message)
             self._last_adaptive_log_state = adaptive_state
             self._last_adaptive_log_time = now
+        # Keep the capture worker on plain Python values.
+        self.publish_capture_ui_snapshot(reason="adaptive scan interval")
+
+    def publish_capture_ui_snapshot(self, *, bump_generation=False, reason=""):
+        """Publish an immutable capture snapshot for the worker hot path."""
+        from worker_capture import publish_capture_ui_snapshot
+
+        return publish_capture_ui_snapshot(
+            self,
+            bump_generation=bump_generation,
+            reason=reason,
+        )
+
+    def get_capture_ui_snapshot(self):
+        from worker_capture import get_capture_ui_snapshot
+
+        return get_capture_ui_snapshot(self)
 
     def handle_empty_ocr_result(self):
         """Handle <EMPTY> OCR result and manage clear translation timeout."""
@@ -872,6 +890,10 @@ class AppCaptureOcrMixin:
 
     def select_source_area(self):
         select_source_area_om(self)
+        self.publish_capture_ui_snapshot(
+            bump_generation=True,
+            reason="source area selected",
+        )
         self.save_settings()
 
     def select_target_area(self):
@@ -880,6 +902,10 @@ class AppCaptureOcrMixin:
 
     def create_source_overlay(self):
         create_source_overlay_om(self)
+        self.publish_capture_ui_snapshot(
+            bump_generation=True,
+            reason="source overlay created",
+        )
 
     def create_target_overlay(self):
         create_target_overlay_om(self)  # System recreation, preserve position

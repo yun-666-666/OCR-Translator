@@ -224,6 +224,11 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # OCR Preview window
         self.ocr_preview_window = None
 
+        # Immutable capture inputs for the worker hot path.
+        self.capture_ui_generation = 0
+        self.capture_ui_snapshot = None
+        self._capture_ui_snapshot_lock = threading.Lock()
+
         self.config = load_app_config()
         restore_areas_from_config_om(self)
         self.language_manager = LanguageManager()
@@ -458,6 +463,10 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     else:
                         self.current_scan_interval = int(new_scan_interval * 1.5)  # Maintain 150% overload ratio
                         log_debug(f"Adaptive scan interval updated during overload: base={self.base_scan_interval}ms, current={self.current_scan_interval}ms")
+                    if hasattr(self, "publish_capture_ui_snapshot"):
+                        self.publish_capture_ui_snapshot(
+                            reason="scan interval changed",
+                        )
 
                 self.schedule_settings_save()
             elif self._suppress_traces:
@@ -883,6 +892,11 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 self.clear_paddleocr_runtime_cache("OCR parameter changed")
         except Exception as e:
             log_debug(f"Error clearing OCR runtime after OCR parameter change: {e}")
+        if hasattr(self, "publish_capture_ui_snapshot"):
+            self.publish_capture_ui_snapshot(
+                bump_generation=True,
+                reason="OCR parameter changed",
+            )
         if self.ocr_preview_window is not None:
             try:
                 if self.ocr_preview_window.winfo_exists():
@@ -919,6 +933,12 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             # Update UI to show/hide OCR model-specific fields
             if hasattr(self, 'ui_interaction_handler'):
                 self.ui_interaction_handler.update_ocr_model_ui()
+
+            if hasattr(self, "publish_capture_ui_snapshot"):
+                self.publish_capture_ui_snapshot(
+                    bump_generation=True,
+                    reason="OCR model changed",
+                )
 
             # Refresh OCR preview if it's open to use the new OCR model
             if self.ocr_preview_window is not None:

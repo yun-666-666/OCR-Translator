@@ -317,17 +317,12 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
         metrics = RuntimeMetrics(clock=lambda: 100.0)
-
-        class FakeOverlay:
-            def winfo_exists(self):
-                return True
-
-            def get_geometry(self):
-                return (10, 20, 18, 28)
+        from worker_capture import CaptureUISnapshot, publish_capture_ui_snapshot
 
         app = types.SimpleNamespace(
             is_running=True,
             current_scan_interval=200,
+            base_scan_interval=200,
             scan_interval_var=types.SimpleNamespace(get=lambda: 200),
             update_adaptive_scan_interval=lambda: None,
             get_ocr_model_setting=lambda: "custom_ai",
@@ -335,7 +330,8 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             get_effective_ocr_concurrency_limit=lambda provider=None: 2,
             active_ocr_calls={"first", "second"},
             max_concurrent_ocr_calls=8,
-            source_overlay=FakeOverlay(),
+            source_area=[10, 20, 18, 28],
+            source_overlay=None,
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
@@ -343,7 +339,9 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             last_processed_subtitle=None,
             previous_text="",
             text_stability_counter=0,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
         )
+        publish_capture_ui_snapshot(app, reason="test setup")
         original_put_nowait = app.ocr_queue.put_nowait
 
         def stop_after_put(item):
@@ -356,7 +354,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             app.active_ocr_calls.clear()
 
         with (
-            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
             patch.object(
                 worker_threads,
                 "capture_screen_region",
@@ -372,22 +369,18 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             metrics.snapshot()["counters"]["api_ocr_capture_backpressure_skip"],
             1,
         )
+        self.assertIsInstance(app.capture_ui_snapshot, CaptureUISnapshot)
 
     def test_custom_ai_cooldown_bypasses_backpressure_for_paddle_fallback(self):
         worker_threads = import_worker_threads_for_tests()
         screenshot = Image.new("RGB", (8, 8), (4, 5, 6))
         metrics = RuntimeMetrics(clock=lambda: 100.0)
-
-        class FakeOverlay:
-            def winfo_exists(self):
-                return True
-
-            def get_geometry(self):
-                return (10, 20, 18, 28)
+        from worker_capture import publish_capture_ui_snapshot
 
         app = types.SimpleNamespace(
             is_running=True,
             current_scan_interval=200,
+            base_scan_interval=200,
             scan_interval_var=types.SimpleNamespace(get=lambda: 200),
             update_adaptive_scan_interval=lambda: None,
             get_ocr_model_setting=lambda: "custom_ai",
@@ -398,7 +391,8 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             translation_handler=types.SimpleNamespace(
                 get_active_custom_ai_ocr_cooldown_seconds=lambda: 30.0
             ),
-            source_overlay=FakeOverlay(),
+            source_area=[10, 20, 18, 28],
+            source_overlay=None,
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
@@ -406,7 +400,9 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             last_processed_subtitle=None,
             previous_text="",
             text_stability_counter=0,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
         )
+        publish_capture_ui_snapshot(app, reason="test setup")
         original_put_nowait = app.ocr_queue.put_nowait
 
         def stop_after_put(item):
@@ -419,7 +415,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             app.is_running = False
 
         with (
-            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
             patch.object(
                 worker_threads,
                 "capture_screen_region",
@@ -447,29 +442,29 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
         capture_regions = []
-
-        class FakeOverlay:
-            def winfo_exists(self):
-                return True
-
-            def get_geometry(self):
-                return (10, 20, 18, 28)
+        from worker_capture import publish_capture_ui_snapshot
 
         app = types.SimpleNamespace(
             is_running=True,
             current_scan_interval=50,
+            base_scan_interval=50,
             scan_interval_var=types.SimpleNamespace(get=lambda: 50),
             update_adaptive_scan_interval=lambda: None,
             get_ocr_model_setting=lambda: "custom_ai",
             is_api_based_ocr_model=lambda model=None: True,
-            source_overlay=FakeOverlay(),
+            source_area=[10, 20, 18, 28],
+            source_overlay=None,
             ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
             ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
             ocr_queue=queue.Queue(maxsize=4),
             last_processed_subtitle=None,
             previous_text="",
             text_stability_counter=0,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            active_ocr_calls=set(),
+            get_effective_ocr_concurrency_limit=lambda provider=None: 2,
         )
+        publish_capture_ui_snapshot(app, reason="test setup")
 
         original_put_nowait = app.ocr_queue.put_nowait
 
@@ -486,7 +481,6 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
             return screenshot
 
         with (
-            patch.object(worker_threads.tk, "Toplevel", FakeOverlay),
             patch.object(worker_threads, "capture_screen_region", side_effect=capture_func),
             patch.object(worker_threads.time, "sleep", return_value=None),
         ):
@@ -495,6 +489,136 @@ class LatencyCaptureThreadBackendSelectionTests(unittest.TestCase):
         self.assertEqual(capture_regions, [(10, 20, 8, 8), (10, 20, 8, 8)])
         app.ocr_stability_gate.clear.assert_called()
         self.assertIs(app.ocr_queue.get_nowait(), screenshot)
+
+    def test_capture_thread_uses_immutable_snapshot_without_tk_widgets(self):
+        worker_threads = import_worker_threads_for_tests()
+        from worker_capture import CaptureUISnapshot, publish_capture_ui_snapshot
+
+        screenshot = Image.new("RGB", (8, 8), (7, 8, 9))
+        forbidden = Mock(side_effect=AssertionError("capture hot path touched Tk"))
+
+        class ForbiddenVar:
+            def get(self):
+                forbidden()
+                return 0
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            current_scan_interval=100,
+            base_scan_interval=100,
+            scan_interval_var=types.SimpleNamespace(get=lambda: 100),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            update_adaptive_scan_interval=lambda: None,
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: True,
+            source_area=[5, 6, 13, 14],
+            source_overlay=None,
+            ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
+            ocr_queue=queue.Queue(maxsize=2),
+            last_processed_subtitle="old",
+            previous_text="old",
+            text_stability_counter=3,
+            active_ocr_calls=set(),
+            get_effective_ocr_concurrency_limit=lambda provider=None: 2,
+        )
+        snapshot = publish_capture_ui_snapshot(app, reason="test setup")
+        self.assertIsInstance(snapshot, CaptureUISnapshot)
+        self.assertEqual(snapshot.source_geometry, (5, 6, 13, 14))
+        # Poison Tk-like APIs only after publishing the immutable snapshot.
+        app.source_overlay = types.SimpleNamespace(
+            winfo_exists=forbidden,
+            get_geometry=forbidden,
+        )
+        app.scan_interval_var = ForbiddenVar()
+        app.keep_linebreaks_var = ForbiddenVar()
+
+        original_put_nowait = app.ocr_queue.put_nowait
+
+        def stop_after_put(item):
+            original_put_nowait(item)
+            app.is_running = False
+
+        app.ocr_queue.put_nowait = stop_after_put
+
+        with (
+            patch.object(
+                worker_threads,
+                "capture_screen_region",
+                return_value=screenshot,
+            ) as capture,
+            patch.object(worker_threads.time, "sleep", return_value=None),
+        ):
+            worker_threads.run_capture_thread(app)
+
+        capture.assert_called_once_with((5, 6, 8, 8))
+        self.assertIs(app.ocr_queue.get_nowait(), screenshot)
+        forbidden.assert_not_called()
+
+    def test_capture_generation_change_invalidates_old_ocr_state(self):
+        worker_threads = import_worker_threads_for_tests()
+        from worker_capture import publish_capture_ui_snapshot
+
+        screenshot_a = Image.new("RGB", (8, 8), (1, 1, 1))
+        screenshot_b = Image.new("RGB", (8, 8), (2, 2, 2))
+        app = types.SimpleNamespace(
+            is_running=True,
+            current_scan_interval=50,
+            base_scan_interval=50,
+            update_adaptive_scan_interval=lambda: None,
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: True,
+            source_area=[10, 20, 18, 28],
+            source_overlay=None,
+            ocr_frame_cache=types.SimpleNamespace(clear=Mock()),
+            ocr_stability_gate=types.SimpleNamespace(clear=Mock(return_value=True)),
+            ocr_queue=queue.Queue(maxsize=2),
+            last_processed_subtitle="stale subtitle",
+            previous_text="stale text",
+            text_stability_counter=9,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            active_ocr_calls=set(),
+            get_effective_ocr_concurrency_limit=lambda provider=None: 2,
+        )
+        publish_capture_ui_snapshot(app, reason="initial")
+        frames = [screenshot_a, screenshot_b]
+        captured = []
+
+        def capture_side_effect(region):
+            frame = frames.pop(0)
+            if not frames:
+                # After first capture, bump generation so the next loop clears
+                # OCR state bound to the previous generation.
+                publish_capture_ui_snapshot(
+                    app,
+                    bump_generation=True,
+                    reason="geometry changed",
+                )
+            return frame
+
+        def stop_after_put(item):
+            captured.append(item)
+            if len(captured) >= 2:
+                app.is_running = False
+
+        app.ocr_queue.put_nowait = stop_after_put
+
+        with (
+            patch.object(
+                worker_threads,
+                "capture_screen_region",
+                side_effect=capture_side_effect,
+            ),
+            patch.object(worker_threads.time, "sleep", return_value=None),
+        ):
+            worker_threads.run_capture_thread(app)
+
+        self.assertIsNone(app.last_processed_subtitle)
+        self.assertEqual(app.previous_text, "")
+        self.assertEqual(app.text_stability_counter, 0)
+        app.ocr_frame_cache.clear.assert_called()
+        app.ocr_stability_gate.clear.assert_called()
+        self.assertEqual(len(captured), 2)
 
 
 class LatencyOcrCacheTests(unittest.TestCase):
