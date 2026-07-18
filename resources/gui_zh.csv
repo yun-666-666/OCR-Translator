@@ -21,6 +21,7 @@ shortcut_save_settings,保存设置
 shortcut_clear_cache,清空缓存
 shortcut_clear_log,清空调试日志
 status_running,运行中（按 ~ 停止）
+status_provider_transient,翻译服务暂时不可用
 status_stopped,已停止（按 ~ 开始）
 settings_tab_title,设置
 translation_model_label,翻译模型：

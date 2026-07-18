@@ -116,6 +116,9 @@ from worker_translation import (
     _get_oldest_active_translation_age,
     _invalidate_pending_translation_request,
     reset_translation_scheduler_session_state,
+    reset_translation_failure_visibility,
+    note_transient_translation_failure,
+    clear_transient_translation_failure_status,
     _flush_pending_translation_request,
     _queue_pending_translation_request,
     _expedite_pending_translation_request,
@@ -1123,6 +1126,7 @@ def process_translation_response(app, translation_result, translation_sequence, 
                     f"sequence {translation_sequence} "
                     f"{summarize_text_for_log(translation_result)}"
                 )
+                note_transient_translation_failure(app, translation_sequence)
                 _clear_local_ocr_submit_state(app)
                 return
             log_debug(
@@ -1163,6 +1167,11 @@ def process_translation_response(app, translation_result, translation_sequence, 
             )
             app.last_displayed_translation_sequence = translation_sequence
             app.last_successful_translation_time = time.monotonic()
+            clear_transient_translation_failure_status(
+                app,
+                translation_sequence=translation_sequence,
+                reason="success",
+            )
             if ocr_sequence_number == 0:
                 _remember_local_ocr_submit(app, original_text)
         else:

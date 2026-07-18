@@ -15,6 +15,9 @@ ROUTE_SUPERSEDE_MIN_SAMPLES = 8
 ROUTE_SUPERSEDE_LEARNING_SECONDS = 3.0
 ROUTE_SUPERSEDE_P90_FRACTION = 0.5
 ROUTE_SUPERSEDE_MAX_SECONDS = 4.0
+TRANSIENT_FAILURE_STATUS_STREAK = 3
+TRANSIENT_FAILURE_STATUS_DURATION_SECONDS = 8.0
+TRANSIENT_FAILURE_STATUS_THROTTLE_SECONDS = 30.0
 
 
 def _facade():
@@ -62,6 +65,309 @@ def _schedule_ui_callback(app, callback, *args):
             f"{type(schedule_error).__name__} - {schedule_error}"
         )
         return False
+
+
+def _failure_visibility_session_generation(app):
+    try:
+        return int(getattr(app, "translation_failure_visibility_generation", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump_failure_visibility_session_generation(app):
+    generation = _failure_visibility_session_generation(app) + 1
+    app.translation_failure_visibility_generation = generation
+    return generation
+
+
+def _get_failure_visibility_provider_key(app):
+    profiles = getattr(app, "custom_ai_profiles", None)
+    getter = getattr(profiles, "get_active_profile", None)
+    profile = None
+    if callable(getter):
+        try:
+            profile = getter("translation")
+        except Exception:
+            profile = None
+    if isinstance(profile, dict):
+        profile_id = str(profile.get("id") or "").strip()
+        if profile_id:
+            return f"custom_ai:{profile_id}"
+        profile_name = str(profile.get("name") or "").strip()
+        if profile_name:
+            return f"custom_ai:name:{profile_name}"
+    return "custom_ai:default"
+
+
+def _empty_failure_visibility_state(provider_key, session_generation, now=None):
+    return {
+        "provider_key": provider_key,
+        "session_generation": int(session_generation or 0),
+        "streak": 0,
+        "first_failure_monotonic": None if now is None else float(now),
+        "last_shown_monotonic": 0.0,
+        "last_sequence": 0,
+        "shown": False,
+        "ui_generation": 0,
+    }
+
+
+def _get_failure_visibility_state(app):
+    state = getattr(app, "translation_failure_visibility", None)
+    if isinstance(state, dict):
+        return state
+    return None
+
+
+def _status_label_is_usable(app):
+    if getattr(app, "_app_is_closing", False):
+        return False
+    if hasattr(app, "is_running") and not bool(app.is_running):
+        return False
+    status_label = getattr(app, "status_label", None)
+    if status_label is None:
+        return False
+    exists = getattr(status_label, "winfo_exists", None)
+    try:
+        if callable(exists) and not bool(exists()):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def _running_status_text(app):
+    ui_lang = getattr(app, "ui_lang", None)
+    getter = getattr(ui_lang, "get_label", None)
+    if callable(getter):
+        try:
+            running = getter("status_running", "Running (Press ~ to Stop)")
+        except Exception:
+            running = "Running (Press ~ to Stop)"
+    else:
+        running = "Running (Press ~ to Stop)"
+    running = str(running or "Running (Press ~ to Stop)")
+    if running.startswith("Status:"):
+        return running
+    return f"Status: {running}"
+
+
+def _transient_failure_status_text(app):
+    ui_lang = getattr(app, "ui_lang", None)
+    getter = getattr(ui_lang, "get_label", None)
+    if callable(getter):
+        try:
+            message = getter(
+                "status_provider_transient",
+                "Translation service temporarily unavailable",
+            )
+        except Exception:
+            message = "Translation service temporarily unavailable"
+    else:
+        message = "Translation service temporarily unavailable"
+    message = str(message or "Translation service temporarily unavailable")
+    if message.startswith("Status:"):
+        return message
+    return f"Status: {message}"
+
+
+def _set_status_label_text(app, text):
+    if not _status_label_is_usable(app):
+        return False
+    status_label = getattr(app, "status_label", None)
+    config = getattr(status_label, "config", None)
+    if not callable(config):
+        return False
+    try:
+        current = None
+        cget = getattr(status_label, "cget", None)
+        if callable(cget):
+            try:
+                current = cget("text")
+            except Exception:
+                current = None
+        if current == text:
+            return False
+        config(text=text)
+        return True
+    except Exception as status_error:
+        _log_debug(
+            "LATENCY: failed to update failure visibility status: "
+            f"{type(status_error).__name__} - {status_error}"
+        )
+        return False
+
+
+def reset_translation_failure_visibility(app, clear_status=False, reason=""):
+    """Reset provider/session-scoped transient failure visibility state."""
+    state = _get_failure_visibility_state(app)
+    was_shown = bool(isinstance(state, dict) and state.get("shown"))
+    session_generation = _bump_failure_visibility_session_generation(app)
+    provider_key = _get_failure_visibility_provider_key(app)
+    app.translation_failure_visibility = _empty_failure_visibility_state(
+        provider_key,
+        session_generation,
+        now=None,
+    )
+    if clear_status and was_shown:
+        _set_status_label_text(app, _running_status_text(app))
+    if reason:
+        _log_debug_coalesced(
+            "translation-failure-visibility-reset",
+            "LATENCY: reset translation failure visibility "
+            f"reason={reason} provider={provider_key} "
+            f"session_generation={session_generation}",
+            interval_seconds=5.0,
+        )
+    return app.translation_failure_visibility
+
+
+def _ensure_failure_visibility_state(app, provider_key=None):
+    session_generation = _failure_visibility_session_generation(app)
+    provider_key = provider_key or _get_failure_visibility_provider_key(app)
+    state = _get_failure_visibility_state(app)
+    if not isinstance(state, dict):
+        state = _empty_failure_visibility_state(
+            provider_key,
+            session_generation,
+            now=None,
+        )
+        app.translation_failure_visibility = state
+        return state
+
+    state_provider = str(state.get("provider_key") or "")
+    state_generation = int(state.get("session_generation") or 0)
+    if state_provider != provider_key or state_generation != session_generation:
+        was_shown = bool(state.get("shown"))
+        state = _empty_failure_visibility_state(
+            provider_key,
+            session_generation,
+            now=None,
+        )
+        app.translation_failure_visibility = state
+        if was_shown:
+            _set_status_label_text(app, _running_status_text(app))
+    return state
+
+
+def _should_show_transient_failure_status(state, now):
+    streak = int(state.get("streak") or 0)
+    first_failure = state.get("first_failure_monotonic")
+    duration_hit = False
+    if first_failure is not None:
+        try:
+            duration_hit = (
+                float(now) - float(first_failure)
+            ) >= TRANSIENT_FAILURE_STATUS_DURATION_SECONDS
+        except (TypeError, ValueError):
+            duration_hit = False
+    threshold_hit = (
+        streak >= TRANSIENT_FAILURE_STATUS_STREAK or duration_hit
+    )
+    if not threshold_hit:
+        return False
+    if not state.get("shown"):
+        return True
+    last_shown = float(state.get("last_shown_monotonic") or 0.0)
+    return (float(now) - last_shown) >= TRANSIENT_FAILURE_STATUS_THROTTLE_SECONDS
+
+
+def note_transient_translation_failure(app, translation_sequence):
+    """Track consecutive transient failures and show a throttled status hint."""
+    if getattr(app, "_app_is_closing", False):
+        return False
+    if hasattr(app, "is_running") and not bool(app.is_running):
+        return False
+
+    try:
+        sequence = int(translation_sequence or 0)
+    except (TypeError, ValueError):
+        sequence = 0
+    if sequence <= 0:
+        return False
+
+    provider_key = _get_failure_visibility_provider_key(app)
+    state = _ensure_failure_visibility_state(app, provider_key=provider_key)
+    last_sequence = int(state.get("last_sequence") or 0)
+    if sequence < last_sequence:
+        return False
+    if sequence == last_sequence and int(state.get("streak") or 0) > 0:
+        return False
+
+    now = time.monotonic()
+    streak = int(state.get("streak") or 0)
+    if streak <= 0 or state.get("first_failure_monotonic") is None:
+        state["first_failure_monotonic"] = now
+        streak = 0
+    streak += 1
+    state["streak"] = streak
+    state["last_sequence"] = sequence
+    state["provider_key"] = provider_key
+    state["session_generation"] = _failure_visibility_session_generation(app)
+
+    if not _should_show_transient_failure_status(state, now):
+        return False
+    if not _status_label_is_usable(app):
+        return False
+
+    status_text = _transient_failure_status_text(app)
+    if not _set_status_label_text(app, status_text):
+        # Either unusable or already showing the same text.
+        state["shown"] = True
+        if not state.get("last_shown_monotonic"):
+            state["last_shown_monotonic"] = now
+        return False
+
+    state["shown"] = True
+    state["last_shown_monotonic"] = now
+    state["ui_generation"] = int(state.get("ui_generation") or 0) + 1
+    _log_debug_coalesced(
+        "translation-failure-visibility-shown",
+        "LATENCY: showing throttled transient provider status "
+        f"provider={provider_key} streak={streak} sequence={sequence}",
+        interval_seconds=5.0,
+    )
+    return True
+
+
+def clear_transient_translation_failure_status(
+    app,
+    translation_sequence=None,
+    reason="success",
+):
+    """Clear throttled failure status after the first successful translation."""
+    state = _get_failure_visibility_state(app)
+    if not isinstance(state, dict):
+        return False
+
+    if translation_sequence is not None:
+        try:
+            sequence = int(translation_sequence or 0)
+        except (TypeError, ValueError):
+            sequence = 0
+        last_sequence = int(state.get("last_sequence") or 0)
+        if sequence and last_sequence and sequence < last_sequence:
+            return False
+
+    was_shown = bool(state.get("shown"))
+    provider_key = _get_failure_visibility_provider_key(app)
+    session_generation = _failure_visibility_session_generation(app)
+    app.translation_failure_visibility = _empty_failure_visibility_state(
+        provider_key,
+        session_generation,
+        now=None,
+    )
+
+    if was_shown and _status_label_is_usable(app):
+        _set_status_label_text(app, _running_status_text(app))
+        _log_debug_coalesced(
+            "translation-failure-visibility-cleared",
+            "LATENCY: cleared transient provider status "
+            f"reason={reason} provider={provider_key}",
+            interval_seconds=5.0,
+        )
+        return True
+    return was_shown
 
 
 def _get_translation_submit_interval_seconds(app, text_to_translate):
@@ -246,6 +552,11 @@ def reset_translation_scheduler_session_state(app, reason):
         getattr(app, "translation_profile_refresh_generation", 0) or 0
     ) + 1
     app.last_translation_submit_monotonic = 0.0
+    reset_translation_failure_visibility(
+        app,
+        clear_status=False,
+        reason=reason,
+    )
 
     sequence_floor = 0
     for sequence_name in (
@@ -465,8 +776,18 @@ def refresh_translation_after_profile_change(app, reason="profile changed"):
     if candidate is None and isinstance(latest_candidate, dict):
         candidate = latest_candidate
     if not candidate or not getattr(app, "is_running", False):
+        reset_translation_failure_visibility(
+            app,
+            clear_status=True,
+            reason=reason,
+        )
         return False
     if not candidate.get("text"):
+        reset_translation_failure_visibility(
+            app,
+            clear_status=True,
+            reason=reason,
+        )
         return False
 
     previous_generation = int(
@@ -474,6 +795,11 @@ def refresh_translation_after_profile_change(app, reason="profile changed"):
     )
     refresh_generation = previous_generation + 1
     app.translation_profile_refresh_generation = refresh_generation
+    reset_translation_failure_visibility(
+        app,
+        clear_status=True,
+        reason=reason,
+    )
     try:
         app.root.after(
             0,
@@ -604,6 +930,11 @@ def _build_streaming_display_callback(app, translation_sequence):
                     processed_text,
                 )
                 app.last_successful_translation_time = time.monotonic()
+                clear_transient_translation_failure_status(
+                    app,
+                    translation_sequence=translation_sequence,
+                    reason="stream_success",
+                )
         except Exception as stream_error:
             _log_debug(
                 "Streaming translation display failed: "

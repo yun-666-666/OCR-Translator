@@ -21,6 +21,7 @@ shortcut_save_settings,Zapisz ustawienia
 shortcut_clear_cache,Wyczyść bufor tłumaczenia
 shortcut_clear_log,Wyczyść dziennik debugowania
 status_running,"program uruchomiony (naciśnij ~, aby zatrzymać)"
+status_provider_transient,Usługa tłumaczenia tymczasowo niedostępna
 status_stopped,"program zatrzymany (naciśnij ~, aby rozpocząć)"
 settings_tab_title,Ustawienia
 translation_model_label,Model tłumaczenia:

@@ -4024,6 +4024,324 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 self.assertIsNone(app.last_local_ocr_submitted_norm)
                 self.assertIsNone(app.last_local_ocr_submitted_scope)
 
+    def _make_failure_visibility_app(self, **overrides):
+        status_texts = []
+
+        class StatusLabel:
+            def __init__(self):
+                self._text = "Status: Running (Press ~ to Stop)"
+
+            def cget(self, _name):
+                return self._text
+
+            def config(self, **kwargs):
+                if "text" in kwargs:
+                    self._text = kwargs["text"]
+                    status_texts.append(self._text)
+
+            def winfo_exists(self):
+                return True
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            _app_is_closing=False,
+            last_displayed_translation_sequence=0,
+            latest_translation_sequence_started=0,
+            last_successful_translation_time=123.0,
+            last_local_ocr_submitted_text="NMMNm",
+            last_local_ocr_submitted_norm="nmmnm",
+            last_local_ocr_submitted_scope=("scope",),
+            update_translation_text=lambda _text: None,
+            status_label=StatusLabel(),
+            ui_lang=types.SimpleNamespace(
+                get_label=lambda key, default=None: {
+                    "status_running": "Running (Press ~ to Stop)",
+                    "status_provider_transient": (
+                        "Translation service temporarily unavailable"
+                    ),
+                }.get(key, default if default is not None else key)
+            ),
+            custom_ai_profiles=types.SimpleNamespace(
+                get_active_profile=lambda _kind: {
+                    "id": "profile-a",
+                    "name": "Profile A",
+                }
+            ),
+        )
+        for key, value in overrides.items():
+            setattr(app, key, value)
+        app._status_texts = status_texts
+        return app
+
+    def test_single_transient_failure_does_not_show_status_hint(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app(
+            latest_translation_sequence_started=1,
+        )
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Streaming API response did not contain message content"
+        )
+
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            1,
+            "NMMNm",
+            0,
+        )
+
+        self.assertEqual(app._status_texts, [])
+        state = getattr(app, "translation_failure_visibility", None)
+        self.assertIsInstance(state, dict)
+        self.assertEqual(state.get("streak"), 1)
+        self.assertFalse(bool(state.get("shown")))
+
+    def test_consecutive_transient_failures_show_throttled_status_hint(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app()
+        error_text = (
+            "Custom AI translation error: SSLEOFError - "
+            "TLS/SSL connection was closed "
+            "(unexpected_eof_while_reading)"
+        )
+        clock = {"now": 100.0}
+
+        def advance_monotonic():
+            clock["now"] += 0.1
+            return clock["now"]
+
+        with patch(
+            "worker_translation.time.monotonic",
+            side_effect=advance_monotonic,
+        ), patch(
+            "worker_threads.time.monotonic",
+            side_effect=advance_monotonic,
+        ):
+            for sequence in (1, 2, 3, 4, 5):
+                app.latest_translation_sequence_started = sequence
+                worker_threads.process_translation_response(
+                    app,
+                    error_text,
+                    sequence,
+                    "NMMNm",
+                    0,
+                )
+
+        self.assertEqual(
+            app._status_texts,
+            ["Status: Translation service temporarily unavailable"],
+        )
+        state = app.translation_failure_visibility
+        self.assertTrue(state.get("shown"))
+        self.assertEqual(state.get("streak"), 5)
+        self.assertNotIn("api.x.ai", "".join(app._status_texts))
+        self.assertNotIn("SSLEOFError", "".join(app._status_texts))
+
+    def test_duration_threshold_shows_status_hint_without_large_streak(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app()
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Structured translation response contained empty translation"
+        )
+        clock = {"now": 50.0}
+
+        def advance_monotonic():
+            value = clock["now"]
+            clock["now"] += 8.5
+            return value
+
+        with patch(
+            "worker_translation.time.monotonic",
+            side_effect=advance_monotonic,
+        ), patch(
+            "worker_threads.time.monotonic",
+            side_effect=advance_monotonic,
+        ):
+            app.latest_translation_sequence_started = 1
+            worker_threads.process_translation_response(
+                app,
+                error_text,
+                1,
+                "NMMNm",
+                0,
+            )
+            app.latest_translation_sequence_started = 2
+            worker_threads.process_translation_response(
+                app,
+                error_text,
+                2,
+                "NMMNm",
+                0,
+            )
+
+        self.assertEqual(
+            app._status_texts,
+            ["Status: Translation service temporarily unavailable"],
+        )
+        self.assertEqual(app.translation_failure_visibility.get("streak"), 2)
+
+    def test_success_clears_transient_failure_status_hint(self):
+        worker_threads = import_worker_threads_for_tests()
+        displayed = []
+        app = self._make_failure_visibility_app(
+            update_translation_text=displayed.append,
+        )
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Streaming API response did not contain message content"
+        )
+        clock = {"now": 10.0}
+
+        def advance_monotonic():
+            clock["now"] += 0.1
+            return clock["now"]
+
+        with patch(
+            "worker_translation.time.monotonic",
+            side_effect=advance_monotonic,
+        ), patch(
+            "worker_threads.time.monotonic",
+            side_effect=advance_monotonic,
+        ):
+            for sequence in (1, 2, 3):
+                app.latest_translation_sequence_started = sequence
+                worker_threads.process_translation_response(
+                    app,
+                    error_text,
+                    sequence,
+                    "NMMNm",
+                    0,
+                )
+            app.latest_translation_sequence_started = 4
+            worker_threads.process_translation_response(
+                app,
+                "Hello world",
+                4,
+                "NMMNm",
+                0,
+            )
+
+        self.assertEqual(
+            app._status_texts,
+            [
+                "Status: Translation service temporarily unavailable",
+                "Status: Running (Press ~ to Stop)",
+            ],
+        )
+        self.assertEqual(displayed, ["Hello world"])
+        state = app.translation_failure_visibility
+        self.assertEqual(state.get("streak"), 0)
+        self.assertFalse(bool(state.get("shown")))
+
+    def test_stale_sequence_and_stop_do_not_update_failure_status(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app(
+            latest_translation_sequence_started=5,
+            last_displayed_translation_sequence=5,
+        )
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Streaming API response did not contain message content"
+        )
+
+        # Older than the latest displayed sequence: ignore entirely.
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            4,
+            "NMMNm",
+            0,
+        )
+        self.assertEqual(app._status_texts, [])
+        self.assertIsNone(getattr(app, "translation_failure_visibility", None))
+
+        # After stop, already-reached visibility must not touch the status bar.
+        app.is_running = False
+        app.latest_translation_sequence_started = 8
+        app.last_displayed_translation_sequence = 5
+        app.translation_failure_visibility = {
+            "provider_key": "custom_ai:profile-a",
+            "session_generation": 1,
+            "streak": 5,
+            "first_failure_monotonic": 1.0,
+            "last_shown_monotonic": 0.0,
+            "last_sequence": 7,
+            "shown": False,
+            "ui_generation": 1,
+        }
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            8,
+            "NMMNm",
+            0,
+        )
+        self.assertEqual(app._status_texts, [])
+
+    def test_provider_switch_resets_failure_visibility_streak(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app()
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Streaming API response did not contain message content"
+        )
+        clock = {"now": 1.0}
+
+        def advance_monotonic():
+            clock["now"] += 0.1
+            return clock["now"]
+
+        profiles = {
+            "translation": {"id": "profile-a", "name": "Profile A"},
+        }
+
+        def get_active_profile(kind):
+            return profiles.get(kind)
+
+        app.custom_ai_profiles = types.SimpleNamespace(
+            get_active_profile=get_active_profile,
+        )
+
+        with patch(
+            "worker_translation.time.monotonic",
+            side_effect=advance_monotonic,
+        ), patch(
+            "worker_threads.time.monotonic",
+            side_effect=advance_monotonic,
+        ):
+            for sequence in (1, 2):
+                app.latest_translation_sequence_started = sequence
+                worker_threads.process_translation_response(
+                    app,
+                    error_text,
+                    sequence,
+                    "NMMNm",
+                    0,
+                )
+            profiles["translation"] = {"id": "profile-b", "name": "Profile B"}
+            for sequence in (3, 4, 5):
+                app.latest_translation_sequence_started = sequence
+                worker_threads.process_translation_response(
+                    app,
+                    error_text,
+                    sequence,
+                    "NMMNm",
+                    0,
+                )
+
+        # First provider never hit the threshold; second provider shows once at 3.
+        self.assertEqual(
+            app._status_texts,
+            ["Status: Translation service temporarily unavailable"],
+        )
+        self.assertEqual(
+            app.translation_failure_visibility.get("provider_key"),
+            "custom_ai:profile-b",
+        )
+        self.assertEqual(app.translation_failure_visibility.get("streak"), 3)
+
     def test_streaming_translation_partial_updates_are_scheduled_on_ui_thread(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []

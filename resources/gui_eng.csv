@@ -21,6 +21,7 @@ shortcut_save_settings,Save Settings
 shortcut_clear_cache,Clear Cache
 shortcut_clear_log,Clear Debug Log
 status_running,Running (Press ~ to Stop)
+status_provider_transient,Translation service temporarily unavailable
 status_stopped,Stopped (Press ~ to Start)
 settings_tab_title,Settings
 translation_model_label,Translation Model:
