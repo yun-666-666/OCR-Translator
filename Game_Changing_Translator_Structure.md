@@ -1,13 +1,15 @@
 # Game-Changing Translator - File Structure Reference
 
+> **ARCHIVED / LEGACY DOCUMENT** — The inventory below originally described Gemini/OpenAI/DeepL/MarianMT packaging. Prefer the current live-path contract in `tests/test_live_path_inventory.py` and the developer live-path note in [`docs/developer-guide.md`](docs/developer-guide.md).
+
 > **For detailed development information, see [`docs/developer-guide.md`](docs/developer-guide.md)**
 
 This document provides a quick reference to the application's file organization and architecture.
 
-## 🏗️ Architecture Overview
+## Architecture Overview (current live path)
 
 ```
-Entry Point (main.py) 
+Entry Point (main.py)
     ↓
 Central Coordinator (app_logic.py)
     ↓
@@ -16,144 +18,75 @@ Central Coordinator (app_logic.py)
 │   (modular) │ (threads)   │ (helpers)   │ (interface) │
 └─────────────┴─────────────┴─────────────┴─────────────┘
     ↓
-Unified Cache System → File Persistence
+PaddleOCR / Custom AI OCR → Unified Cache → Custom AI Translation → Overlay
 ```
 
-## 🌟 Key Features
+## Key Features (live path)
 
-### **Dynamic Gemini Model Configuration**
-- **CSV-based model management** - All Gemini models configured in `resources/gemini_models.csv`
-- **Separate OCR and Translation models** - Different models can be selected for each operation
-- **Automatic cost calculation** - Token costs update based on selected models
-- **Real-time model switching** - No application restart required
+### Custom AI translation and OCR
+- Profile-based OpenAI-compatible endpoints for translation and API OCR
+- Credential store for API keys (no plaintext fallback on store failure)
+- Unified short logs and usage reporting (missing usage stays `n/a`, not `$0`)
 
-### **Unified Caching System**
-- **Two-tier cache architecture** - In-memory LRU cache + persistent file storage
-- **40-60% memory reduction** compared to previous multi-cache approach
-- **Thread-safe operations** with proper locking mechanisms
+### Local PaddleOCR
+- Packaged CPU/GPU builds validate matching Paddle runtime
+- OCR preview and capture pipeline remain on the live path
 
-### **Comprehensive API Monitoring**
-- **Real-time cost tracking** for Gemini API usage (OCR + Translation)
-- **Detailed logging** with token analysis and performance metrics
-- **Export capabilities** for usage statistics and billing analysis
+### Unified Caching System
+- In-memory LRU cache + optional persistence for Custom AI translation
+- Thread-safe operations with proper locking mechanisms
 
-## 📁 Core Application Files
+### Overlay display
+- PySide6 RTL-capable translation overlays with tkinter fallback
 
-### **Entry Point & Coordination**
+## Core Application Files (live path)
+
+### Entry Point & Coordination
 - **`main.py`** - Application entry point
 - **`app_logic.py`** - Central coordinator and main application class
-- **`__init__.py`** - Package definition
 
-### **Modular Handlers** (`handlers/`)
-- **`cache_manager.py`** - File-based translation cache persistence
+### Modular Handlers (`handlers/`)
 - **`configuration_handler.py`** - Settings and configuration management
 - **`display_manager.py`** - UI updates for overlays and debug info
-- **`gemini_models_manager.py`** - Dynamic Gemini model configuration management
 - **`hotkey_handler.py`** - Keyboard shortcut management
-- **`statistics_handler.py`** - API usage monitoring and cost tracking
-- **`translation_handler.py`** - Translation provider coordination
+- **`translation_handler.py`** - Custom AI translation/OCR coordination
+- **`translation_context.py`** / **`translation_requests.py`** / **`translation_results.py`** - Live request path; results module keeps **inert archived** legacy adapters only
 - **`ui_interaction_handler.py`** - User interface interaction management
 
-### **Core Processing**
-- **`worker_threads.py`** - Background threads (capture → OCR → translation)
-- **`unified_translation_cache.py`** - LRU cache system for all translation providers
-- **`marian_mt_translator.py`** - Local neural translation implementation
-- **`convert_marian.py`** - HuggingFace model conversion utility (© HuggingFace Team)
+### Core Processing
+- **`worker_threads.py`** / **`worker_capture.py`** / **`worker_ocr.py`** / **`worker_translation.py`** - Background pipeline
+- **`unified_translation_cache.py`** - LRU cache for Custom AI translation
+- **`paddle_ocr_backend.py`** - Local OCR backend
+- **`custom_ai*.py`** - Custom AI profiles, transport, requests
 
-### **Utilities**
+### Utilities
 - **`ocr_utils.py`** - OCR processing and text extraction
 - **`translation_utils.py`** - Translation helper functions
-- **`language_manager.py`** - Language code mappings for different services
-- **`config_manager.py`** - Configuration file handling
-- **`resource_handler.py`** - Resource path resolution
-- **`resource_copier.py`** - Resource management for compiled builds
+- **`language_manager.py`** - Language code mappings (Custom AI lists)
+- **`config_manager.py`** - App-data configuration path with atomic saves
+- **`resource_handler.py`** / **`resource_copier.py`** - Resource path resolution for builds
 - **`logger.py`** - Application logging
 
-### **User Interface**
-- **`gui_builder.py`** - UI construction and tab creation
+### User Interface
+- **`gui_builder.py`** / **`gui_settings_builder.py`** - UI construction
 - **`language_ui.py`** - Multi-language interface support
 - **`overlay_manager.py`** - Source/target overlay window management
+- **`pyside_overlay.py`** - PySide6 RTL translation overlays
 - **`ui_elements.py`** - Custom UI components
-- **`constants.py`** - Application constants and language definitions
+- **`constants.py`** - Application constants
 
-## 📋 Build & Configuration
+## Archived inventory (removed from live tree)
 
-### **Build Files**
-- **`GameChangingTranslator.spec`** - PyInstaller spec (CPU-optimized)
-- **`GameChangingTranslator_GPU.spec`** - PyInstaller spec (GPU/CUDA-optimized)
-- **`compile_app.py`** - Python compilation utility
-- **`setup.py`** - cx_Freeze setup configuration
-- **`requirements.txt`** - Python dependencies
+The following were part of older product surfaces and must not be re-added to packaging without an explicit decision:
 
-### **Scripts**
-- **`run.bat`** - Application launcher
-- **`install_dependencies.bat`** - Dependency installer
-- **`run_python_compiler.bat`** - Build automation script
+- `marian_mt_translator.py`, `convert_marian.py`
+- `handlers/gemini_*`, `handlers/openai_*`, `handlers/ocr_provider_base.py`, `handlers/llm_provider_base.py`
+- `handlers/cache_manager.py`, `handlers/statistics_handler.py`
+- Provider-only CSVs under `resources/` for DeepL / Gemini / OpenAI / MarianMT
+- PyInstaller hidden imports for `deepl`, `google.genai`, `torch`/`transformers` Marian stacks, etc.
 
-### **Configuration**
-- **`ocr_translator_config.ini`** - User settings (runtime-generated)
+## Build & Configuration
 
-## 📚 Resources & Data
-
-### **Language Resources** (`resources/`)
-```
-resources/
-├── Translation APIs
-│   ├── google_trans_source.csv / google_trans_target.csv
-│   ├── deepl_trans_source.csv / deepl_trans_target.csv
-│   ├── gemini_trans_source.csv / gemini_trans_target.csv
-│   └── gemini_models.csv         # Gemini model configurations and costs
-├── MarianMT Models
-│   ├── MarianMT_select_models.csv
-│   └── MarianMT_models_short_list.csv
-├── UI Localization
-│   ├── gui_eng.csv / gui_pol.csv
-│   └── language_display_names.csv
-└── Language Mappings
-    └── lang_codes.csv
-```
-
-### **Runtime Data** (Generated)
-- **Cache Files**: `deepl_cache.txt`, `googletrans_cache.txt`, `gemini_cache.txt`
-- **API Logs**: `Gemini_API_call_logs.txt`, `GEMINI_API_OCR_short_log.txt`, `GEMINI_API_TRA_short_log.txt`
-- **Debug**: `translator_debug.log`, `debug_images/`
-- **Models**: `marian_models_cache/`
-
-## 📖 Documentation
-
-### **User Documentation** (`docs/`)
-- **`developer-guide.md`** - **Comprehensive development guide**
-- **`user-manual.html`** / **`user-manual_pl.html`** - User manuals (EN/PL)
-- **`installation.html`** / **`installation_pl.html`** - Installation guides (EN/PL)
-- **`gallery.html`** / **`gallery_pl.html`** - Application galleries (EN/PL)
-- **`troubleshooting.md`** - Problem resolution guide
-- **`flags/`**, **`gallery/`**, **`screenshots/`** - Visual assets
-
-### **Project Documentation**
-- **`README.md`** - Project overview and quick start
-- **`CHANGELOG.md`** - Version history
-- **`LICENSE`** - GPL v3 license
-- **`ATTRIBUTION.md`** - Third-party attributions
-- **`CONTRIBUTORS.md`** - Project contributors
-
----
-
-## 🏛️ Key Architecture Benefits
-
-1. **🔧 Modular Design** - Each handler manages specific functionality
-2. **⚡ Performance** - Background threads + unified caching
-3. **🌍 Localization** - Multi-language UI and comprehensive language support
-4. **📊 Monitoring** - Complete API usage tracking and cost management
-5. **🚀 Build Flexibility** - Multiple compilation options (CPU/GPU)
-6. **🛠️ Maintainability** - Clear separation of concerns and well-organized structure
-
----
-
-> **📘 For detailed development information including:**
-> - How to add new features
-> - Testing procedures  
-> - Build instructions
-> - Code architecture details
-> - Contributing guidelines
->
-> **See the comprehensive [`docs/developer-guide.md`](docs/developer-guide.md)**
+- **`GameChangingTranslator.spec`** / **`GameChangingTranslator_GPU.spec`** - Live-path PyInstaller specs (no legacy provider deps)
+- **`compile_app.py`** - Validates Paddle runtime without mutating dependencies
+- **`ocr_translator_config.example.ini`** - Example settings; runtime config resolves to app-data with optional CWD migration

@@ -1,5 +1,7 @@
 # Troubleshooting Guide
 
+> **Live path note:** Supported OCR is PaddleOCR or Custom AI OCR; supported translation is Custom AI profiles (OpenAI-compatible endpoints). Sections that mention MarianMT, DeepL, Google Translate, Gemini, or OpenAI standalone providers are **archived legacy reference** only and are not active product paths.
+
 This guide addresses common issues you might encounter when using Game-Changing Translator.
 
 ## Application Startup Issues
@@ -55,7 +57,6 @@ This guide addresses common issues you might encounter when using Game-Changing 
 - Verify the language pair is supported by your selected Custom AI profile or OpenAI-compatible endpoint
 - For non-Latin languages, verify the selected PaddleOCR language or use a Custom AI OCR profile
 - Check that the CSV language files are properly installed in the application directory
-- If you have explicitly re-enabled a legacy MarianMT path, ensure the model exists for your language pair
 
 ### API key errors
 
@@ -64,20 +65,11 @@ This guide addresses common issues you might encounter when using Game-Changing 
 **Solutions:**
 - Verify you've entered the correct Custom AI API key and base URL in the Settings tab
 - Check if your API key has expired or reached its limit
-- If you have explicitly re-enabled a legacy Google Translate API or DeepL API path, verify that provider's account and service status
+- Confirm the active translation profile is a Custom AI profile (legacy Google/DeepL/Gemini/OpenAI/MarianMT keys are not used on the live path)
 
-### Legacy MarianMT translation errors
+### Legacy MarianMT translation errors *(archived)*
 
-**Symptoms:** "MarianMT error" or "Translation error" messages.
-
-**Solutions:**
-- This applies only if you are using a legacy MarianMT path rather than the current Custom AI translation path
-- First-time use requires downloading models, which may take time
-- Ensure you have sufficient disk space for the model (~500MB per language pair)
-- Check your internet connection for initial model download
-- Try increasing the beam search value for better translation quality
-- If an error persists, switch to an API-based method temporarily
-- Check if the language pair is supported by MarianMT
+**Status:** MarianMT is not part of the current live path. If you still see MarianMT wording, switch the translation model to a Custom AI profile.
 
 ### Slow or intermittent translations
 
