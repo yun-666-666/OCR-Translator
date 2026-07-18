@@ -468,6 +468,7 @@ class CustomAITransportMixin:
         seconds=60.0,
         request_kind=None,
         request_sequence=None,
+        exponential_backoff=False,
     ):
         try:
             cooldown_seconds = max(1.0, min(300.0, float(seconds)))
@@ -495,6 +496,24 @@ class CustomAITransportMixin:
             applied = request_sequence >= latest_event_sequence
             if applied:
                 self._profile_health_event_sequences[cache_key] = request_sequence
+                failure_counts = getattr(
+                    self,
+                    "_profile_unavailable_failure_counts",
+                    None,
+                )
+                if failure_counts is None:
+                    failure_counts = {}
+                    self._profile_unavailable_failure_counts = failure_counts
+                if exponential_backoff:
+                    failure_streak = failure_counts.get(cache_key, 0) + 1
+                    failure_counts[cache_key] = failure_streak
+                    cooldown_seconds = min(
+                        180.0,
+                        cooldown_seconds * (2 ** (failure_streak - 1)),
+                    )
+                else:
+                    failure_streak = 0
+                    failure_counts.pop(cache_key, None)
                 existing_until = self._profile_unavailable_cooldowns.get(
                     cache_key,
                     0.0,
@@ -502,6 +521,7 @@ class CustomAITransportMixin:
                 cooldown_until = max(existing_until, now + cooldown_seconds)
                 self._profile_unavailable_cooldowns[cache_key] = cooldown_until
             else:
+                failure_streak = 0
                 cooldown_until = self._profile_unavailable_cooldowns.get(
                     cache_key,
                     0.0,
@@ -513,6 +533,7 @@ class CustomAITransportMixin:
                 f"provider={values.get('name', 'Custom AI')} "
                 f"request_kind={request_kind or 'shared'} "
                 f"seconds={max(0.0, cooldown_until - now):.1f} "
+                f"failure_streak={failure_streak} "
                 f"detail={str(detail or '').strip()[:160]}"
             )
         else:
@@ -551,6 +572,13 @@ class CustomAITransportMixin:
                 return False
             self._profile_health_event_sequences[cache_key] = request_sequence
             self._profile_unavailable_cooldowns.pop(cache_key, None)
+            failure_counts = getattr(
+                self,
+                "_profile_unavailable_failure_counts",
+                None,
+            )
+            if failure_counts is not None:
+                failure_counts.pop(cache_key, None)
         return True
 
     def get_cooldown_remaining(self, profile, request_kind=None):

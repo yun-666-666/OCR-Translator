@@ -806,8 +806,20 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
     def _run_paddleocr_prewarm(self, settings, generation, reason, ready_event):
         start_time = time.monotonic()
         try:
+            text_recognition_started = time.monotonic()
             get_paddleocr_text_recognition_engine(settings)
+            text_recognition_duration = time.monotonic() - text_recognition_started
+            log_debug(
+                "PaddleOCR prewarm phase=text_recognition "
+                f"duration={text_recognition_duration:.2f}s"
+            )
+            full_engine_started = time.monotonic()
             get_paddleocr_engine(settings)
+            full_engine_duration = time.monotonic() - full_engine_started
+            log_debug(
+                "PaddleOCR prewarm phase=full_engine "
+                f"duration={full_engine_duration:.2f}s"
+            )
         except Exception as e:
             lock = self._ensure_paddleocr_prewarm_state()
             with lock:

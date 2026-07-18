@@ -395,6 +395,32 @@ class CustomAICapabilitiesMixin:
                 request_payload.pop("reasoning", None)
         return request_payload
 
+    def _profile_requires_explicit_reasoning_effort(self, profile):
+        """Return whether an xAI/Grok request must declare a reasoning mode.
+
+        The relay path otherwise treats an omitted value as its own default
+        reasoning mode.  Grok models therefore need an explicit contract so
+        the profile choice is not silently replaced upstream.
+        """
+        profile = profile if isinstance(profile, dict) else {}
+        model = str(profile.get("model") or "").strip().lower()
+        return model.startswith(("grok", "xai/", "x-ai/"))
+
+    def _reasoning_effort_for_payload(self, profile, effort):
+        """Return the wire-compatible explicit reasoning value.
+
+        Current xAI Grok endpoints reject the literal ``none`` value.  Their
+        lowest accepted explicit value is ``low``; mapping only that wire value
+        keeps an xAI profile from silently acquiring a relay default or failing
+        with a parameter error.
+        """
+        if (
+            effort == CUSTOM_AI_REASONING_EFFORT_NONE
+            and self._profile_requires_explicit_reasoning_effort(profile)
+        ):
+            return "low"
+        return effort
+
     def _apply_reasoning_effort_to_payload(
         self,
         profile,
@@ -407,10 +433,14 @@ class CustomAICapabilitiesMixin:
             profile,
             request_kind,
         )
-        if effort == CUSTOM_AI_REASONING_EFFORT_NONE:
+        payload_effort = self._reasoning_effort_for_payload(profile, effort)
+        if (
+            payload_effort == CUSTOM_AI_REASONING_EFFORT_NONE
+            and not self._profile_requires_explicit_reasoning_effort(profile)
+        ):
             return self._without_reasoning_effort(payload)
         request_payload = dict(payload)
-        request_payload["reasoning_effort"] = effort
+        request_payload["reasoning_effort"] = payload_effort
         return request_payload
 
     def _without_structured_output(self, payload):

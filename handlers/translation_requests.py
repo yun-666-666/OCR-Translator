@@ -237,6 +237,23 @@ class TranslationRequestsMixin:
             return 300.0
         return 30.0
 
+    def _custom_ai_profile_failure_uses_exponential_backoff(self, error_text):
+        lowered = str(error_text or "").strip().lower()
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "connection",
+            "non-json",
+            "non json",
+            "bad gateway",
+            "gateway",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+        return any(marker in lowered for marker in transient_markers)
+
     def _begin_custom_ai_profile_request(self, profile, request_kind):
         begin = getattr(
             self.custom_ai_provider,
@@ -267,15 +284,16 @@ class TranslationRequestsMixin:
             None,
         )
         if callable(marker):
-            marker(
-                profile,
-                error_text,
-                seconds=self._custom_ai_profile_failure_cooldown_seconds(
+            marker_kwargs = {
+                "seconds": self._custom_ai_profile_failure_cooldown_seconds(
                     error_text
                 ),
-                request_kind=request_kind,
-                request_sequence=request_sequence,
-            )
+                "request_kind": request_kind,
+                "request_sequence": request_sequence,
+            }
+            if self._custom_ai_profile_failure_uses_exponential_backoff(error_text):
+                marker_kwargs["exponential_backoff"] = True
+            marker(profile, error_text, **marker_kwargs)
 
     def perform_ocr(
         self,

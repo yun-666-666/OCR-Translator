@@ -880,6 +880,32 @@ class LatencyShutdownTests(unittest.TestCase):
         self.assertEqual(len(scheduled), 1)
         self.assertEqual(scheduled[0][0], 100)
 
+    def test_graceful_shutdown_wait_log_is_coalesced_to_one_second(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.translation_handler = types.SimpleNamespace(
+            ocr_providers={},
+            providers={},
+        )
+        app.active_ocr_calls = set()
+        app.active_translation_calls = {11}
+        app._shutdown_start_time = 100.0
+        app.root = types.SimpleNamespace(after=Mock())
+        app._finalize_shutdown = Mock()
+
+        with patch.object(app_logic, "log_debug") as log_debug:
+            for now in (105.0, 105.2, 106.0):
+                with patch.object(app_logic.time, "monotonic", return_value=now):
+                    app._graceful_shutdown_poll()
+
+        wait_logs = [
+            call.args[0]
+            for call in log_debug.call_args_list
+            if "Waiting for pending API calls" in call.args[0]
+        ]
+        self.assertEqual(len(wait_logs), 2)
+
 
 class TranslationSessionBoundaryTests(unittest.TestCase):
     def test_scheduler_session_reset_invalidates_previous_session_state(self):

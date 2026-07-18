@@ -250,19 +250,29 @@ class AppLifecycleMixin:
             pending_translation += len(self.active_translation_calls)
 
         # Check if timeout is reached or all calls are done
-        elapsed = time.monotonic() - self._shutdown_start_time
+        now = time.monotonic()
+        elapsed = now - self._shutdown_start_time
         if (pending_ocr == 0 and pending_translation == 0) or elapsed > 20.0:
             if elapsed > 20.0:
                 _log_debug(f"Warning: Shutdown timeout of 20.0s reached. Some API calls may not have completed.")
             else:
                 _log_debug("All pending API calls have completed.")
 
+            self._shutdown_wait_log_next_at = 0.0
             _log_debug(f"Graceful shutdown for thread pools completed in {elapsed:.2f}s.")
             self._finalize_shutdown() # Proceed to the final steps
             return
 
         # If not done, poll again shortly
-        _log_debug(f"Waiting for pending API calls to complete... OCR: {pending_ocr}, Translation: {pending_translation}")
+        next_wait_log_at = float(
+            getattr(self, "_shutdown_wait_log_next_at", 0.0) or 0.0
+        )
+        if now >= next_wait_log_at:
+            _log_debug(
+                "Waiting for pending API calls to complete... "
+                f"OCR: {pending_ocr}, Translation: {pending_translation}"
+            )
+            self._shutdown_wait_log_next_at = now + 1.0
         if self._root_window_alive() and not getattr(self, '_app_is_closing', False):
             self.root.after(100, self._graceful_shutdown_poll)
 

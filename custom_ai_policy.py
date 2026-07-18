@@ -316,6 +316,18 @@ class CustomAILatencyModeAdvisor:
                     sample_count,
                 )
 
+            if self._consecutive_errors >= 2:
+                bounded_retry = min(
+                    configured_timeout * 0.9,
+                    max(float(floor_seconds), p90_seconds * 1.25),
+                )
+                return CustomAIRequestTimeoutDecision(
+                    bounded_retry,
+                    "repeated_error_bounded_retry",
+                    p90_seconds,
+                    sample_count,
+                )
+
             if self._consecutive_errors > 0:
                 return CustomAIRequestTimeoutDecision(
                     configured_timeout,

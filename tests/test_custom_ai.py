@@ -3429,6 +3429,55 @@ class CustomAIProviderTests(unittest.TestCase):
                 0.0,
             )
 
+    def test_repeated_transient_profile_failures_back_off_and_success_resets(self):
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "relay-profile",
+            "base_url": "https://relay.example/v1",
+            "api_key": "secret",
+            "model": "relay-model",
+        }
+        cooldowns = []
+        for index, now in enumerate((100.0, 101.0, 102.0, 103.0), start=1):
+            request_sequence = provider.begin_profile_request(
+                profile,
+                request_kind="translation",
+            )
+            with patch("custom_ai_transport.time.monotonic", return_value=now):
+                cooldowns.append(
+                    provider.mark_profile_unavailable(
+                        profile,
+                        "HTTP 500",
+                        seconds=15.0,
+                        request_kind="translation",
+                        request_sequence=request_sequence,
+                        exponential_backoff=True,
+                    )
+                )
+
+        self.assertEqual(cooldowns, [15.0, 30.0, 60.0, 120.0])
+
+        provider.mark_profile_available(
+            profile,
+            request_kind="translation",
+            request_sequence=request_sequence,
+        )
+        reset_sequence = provider.begin_profile_request(
+            profile,
+            request_kind="translation",
+        )
+        with patch("custom_ai_transport.time.monotonic", return_value=104.0):
+            reset_cooldown = provider.mark_profile_unavailable(
+                profile,
+                "HTTP 500",
+                seconds=15.0,
+                request_kind="translation",
+                request_sequence=reset_sequence,
+                exponential_backoff=True,
+            )
+
+        self.assertEqual(reset_cooldown, 15.0)
+
     def test_successful_response_resets_rate_limit_backoff_counter(self):
         class Response:
             status_code = 429
@@ -4716,6 +4765,28 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(translation_payload["reasoning_effort"], "medium")
         self.assertEqual(ocr_payload["reasoning_effort"], "medium")
         self.assertEqual(translation_payload.get("max_tokens"), 64)
+
+    def test_grok_payloads_map_none_to_the_lowest_explicit_reasoning_effort(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "grok-4.5",
+            "reasoning_effort": "none",
+        }
+
+        translation_payload = provider.build_translation_payload(
+            profile,
+            "Hi",
+            "en",
+            "zh-CN",
+        )
+        ocr_payload = provider.build_ocr_payload(
+            profile,
+            b"webp-bytes",
+            "en",
+        )
+
+        self.assertEqual(translation_payload["reasoning_effort"], "low")
+        self.assertEqual(ocr_payload["reasoning_effort"], "low")
 
     def test_responses_translation_and_ocr_payloads_include_reasoning_effort(self):
         provider = CustomAIProvider()
@@ -6523,6 +6594,18 @@ class CustomAILatencyModeAdvisorTests(unittest.TestCase):
         self.assertEqual(recovery.seconds, 10.0)
         self.assertEqual(recovery.reason, "recent_error_probe")
         self.assertEqual(recovered.seconds, 4.0)
+
+    def test_repeated_route_errors_bound_a_slow_route_retry_deadline(self):
+        advisor = self._make_advisor()
+        for duration in (6.5, 7.0, 7.2, 7.4, 7.6, 7.8, 8.0, 8.2):
+            advisor.observe_request(duration, success=True)
+        advisor.observe_request(10.0, success=False)
+        advisor.observe_request(10.0, success=False)
+
+        decision = self._resolve_request_timeout(advisor)
+
+        self.assertEqual(decision.seconds, 9.0)
+        self.assertEqual(decision.reason, "repeated_error_bounded_retry")
 
     def test_stream_and_race_modes_keep_full_deadline(self):
         advisor = self._make_advisor()

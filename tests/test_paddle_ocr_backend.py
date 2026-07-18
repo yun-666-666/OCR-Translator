@@ -650,10 +650,11 @@ class PaddleOCRPrewarmTests(unittest.TestCase):
         with patch.object(app_logic.threading, "Thread", side_effect=make_thread):
             with patch.object(app_logic, "get_paddleocr_text_recognition_engine") as text_engine:
                 with patch.object(app_logic, "get_paddleocr_engine") as full_engine:
-                    started = app_logic.GameChangingTranslator.ensure_paddleocr_ready_if_selected(
-                        app,
-                        "settings saved",
-                    )
+                    with patch.object(app_logic, "log_debug") as log_debug:
+                        started = app_logic.GameChangingTranslator.ensure_paddleocr_ready_if_selected(
+                            app,
+                            "settings saved",
+                        )
 
         self.assertTrue(started)
         self.assertEqual(len(created_threads), 1)
@@ -661,6 +662,9 @@ class PaddleOCRPrewarmTests(unittest.TestCase):
         self.assertIsInstance(text_engine.call_args.args[0], PaddleOCRSettings)
         self.assertEqual(text_engine.call_args.args[0].ocr_version, "PP-OCRv6")
         full_engine.assert_called_once_with(text_engine.call_args.args[0])
+        messages = [call.args[0] for call in log_debug.call_args_list]
+        self.assertTrue(any("phase=text_recognition" in message for message in messages))
+        self.assertTrue(any("phase=full_engine" in message for message in messages))
 
     def test_worker_waits_for_matching_paddleocr_prewarm(self):
         import app_logic
