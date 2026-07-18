@@ -1005,6 +1005,32 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertAlmostEqual(usage.get("cost_usd"), 0.0000123456)
 
+    def test_extract_usage_marks_missing_usage_without_zero_tokens(self):
+        provider = CustomAIProvider()
+
+        missing = provider._extract_usage({"choices": [{"message": {"content": "ok"}}]})
+        empty = provider._extract_usage({"usage": {}})
+        explicit_zero = provider._extract_usage({
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+        })
+
+        self.assertTrue(missing.get("usage_missing"))
+        self.assertNotIn("prompt_tokens", missing)
+        self.assertNotIn("completion_tokens", missing)
+        self.assertNotIn("cost_usd", missing)
+
+        self.assertTrue(empty.get("usage_missing"))
+        self.assertNotIn("prompt_tokens", empty)
+
+        self.assertFalse(explicit_zero.get("usage_missing"))
+        self.assertEqual(explicit_zero.get("prompt_tokens"), 0)
+        self.assertEqual(explicit_zero.get("completion_tokens"), 0)
+        self.assertEqual(explicit_zero.get("total_tokens"), 0)
+
     def test_normalize_chat_completions_url(self):
         provider = CustomAIProvider()
 
@@ -2865,7 +2891,9 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertEqual(result, "Hello")
         self.assertEqual(partials, ["Hel", "Hello"])
-        self.assertEqual(usage["total_tokens"], 0)
+        self.assertTrue(usage.get("usage_missing"))
+        self.assertNotIn("total_tokens", usage)
+        self.assertNotIn("prompt_tokens", usage)
         self.assertTrue(provider.http_client.stream_flags[0])
         self.assertTrue(provider.http_client.payloads[0]["stream"])
 
@@ -7289,6 +7317,83 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             handler.close()
 
         self.assertIn("Cost: $0.00001234", append_text.call_args.args[1])
+
+    def test_custom_ai_short_log_marks_missing_usage_as_na(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+        provider = CustomAIProvider()
+        missing_usage = provider._extract_usage({"choices": [{"message": {"content": "ok"}}]})
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                with patch.object(
+                    handler,
+                    "_record_custom_prompt_cache_usage",
+                    wraps=handler._record_custom_prompt_cache_usage,
+                ) as cache_record:
+                    handler._log_custom_short_call(
+                        "translation",
+                        profile,
+                        "translated",
+                        missing_usage,
+                        0.25,
+                    )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn("usage_missing", block)
+        self.assertIn("Input Tokens: n/a", block)
+        self.assertIn("Output Tokens: n/a", block)
+        self.assertIn("Cached Input Tokens: n/a", block)
+        self.assertIn("Cost: n/a", block)
+        self.assertNotIn("Input Tokens: 0", block)
+        self.assertNotIn("Output Tokens: 0", block)
+        self.assertNotIn("Cost: $0", block)
+        self.assertNotIn("translated", block)
+        # Unknown usage must not enter zero-token cache averages.
+        cache_metrics = handler._get_custom_prompt_cache_metrics(profile=profile)
+        self.assertEqual(cache_metrics["sample_count"], 0)
+        self.assertIsNone(cache_metrics["input_tokens_ema"])
+        cache_record.assert_called_once()
+
+    def test_custom_ai_short_log_keeps_explicit_zero_usage_numeric(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "cached_prompt_tokens": 0,
+                        "cost_usd": 0.0,
+                    },
+                    0.25,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn("Input Tokens: 0", block)
+        self.assertIn("Output Tokens: 0", block)
+        self.assertIn("Cost: $0.00000000", block)
+        self.assertNotIn("usage_missing", block)
 
     def test_custom_ai_short_log_default_omits_result_body(self):
         unique_body = "UNIQUE_CUSTOM_AI_SHORT_LOG_BODY_DEFAULT"

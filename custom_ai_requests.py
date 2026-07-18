@@ -546,17 +546,39 @@ class CustomAIRequestsMixin:
                 return [configured_model]
         raise ValueError("Unable to fetch model list. Tried: " + "; ".join(errors))
 
+    def _usage_int_field(self, usage, *keys):
+        """Return an int when a usage field is present; None when all keys are absent."""
+        if not isinstance(usage, dict):
+            return None
+        for key in keys:
+            if key not in usage:
+                continue
+            value = usage.get(key)
+            if value is None:
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _extract_usage(self, response_json):
         usage = response_json.get("usage") if isinstance(response_json, dict) else None
-        if not isinstance(usage, dict):
-            return {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "cached_prompt_tokens": 0,
-            }
-        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        if not isinstance(usage, dict) or not usage:
+            # Preserve "missing" vs "explicit zero"; never invent token/cost numbers.
+            return {"usage_missing": True}
+
+        prompt_tokens = self._usage_int_field(
+            usage,
+            "prompt_tokens",
+            "input_tokens",
+        )
+        completion_tokens = self._usage_int_field(
+            usage,
+            "completion_tokens",
+            "output_tokens",
+        )
+        total_tokens = self._usage_int_field(usage, "total_tokens")
         prompt_details = (
             usage.get("prompt_tokens_details")
             or usage.get("input_tokens_details")
@@ -567,46 +589,63 @@ class CustomAIRequestsMixin:
             or usage.get("output_tokens_details")
             or {}
         )
-        cached_prompt_tokens = (
-            int(prompt_details.get("cached_tokens") or 0)
-            if isinstance(prompt_details, dict)
-            else 0
-        )
-        cached_input_ratio = (
-            cached_prompt_tokens / prompt_tokens
-            if prompt_tokens > 0
-            else 0.0
-        )
-        reasoning_tokens = None
+        cached_prompt_tokens = None
+        if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+            try:
+                cached_prompt_tokens = int(prompt_details.get("cached_tokens") or 0)
+            except (TypeError, ValueError):
+                cached_prompt_tokens = None
+
+        if (
+            prompt_tokens is None
+            and completion_tokens is None
+            and total_tokens is None
+            and cached_prompt_tokens is None
+            and not (
+                isinstance(completion_details, dict)
+                and "reasoning_tokens" in completion_details
+            )
+            and usage.get("cost_in_usd_ticks") is None
+        ):
+            return {"usage_missing": True}
+
+        normalized_usage = {"usage_missing": False}
+        if prompt_tokens is not None:
+            normalized_usage["prompt_tokens"] = prompt_tokens
+            normalized_usage["input_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            normalized_usage["completion_tokens"] = completion_tokens
+            normalized_usage["output_tokens"] = completion_tokens
+        if total_tokens is not None:
+            normalized_usage["total_tokens"] = total_tokens
+        elif prompt_tokens is not None and completion_tokens is not None:
+            normalized_usage["total_tokens"] = prompt_tokens + completion_tokens
+
+        if cached_prompt_tokens is not None:
+            normalized_usage["cached_prompt_tokens"] = cached_prompt_tokens
+            normalized_usage["cached_input_tokens"] = cached_prompt_tokens
+            if prompt_tokens and prompt_tokens > 0:
+                normalized_usage["cached_input_ratio"] = (
+                    cached_prompt_tokens / prompt_tokens
+                )
+            else:
+                normalized_usage["cached_input_ratio"] = 0.0
+
         if (
             isinstance(completion_details, dict)
             and "reasoning_tokens" in completion_details
         ):
             try:
-                reasoning_tokens = int(
+                normalized_usage["reasoning_tokens"] = int(
                     completion_details.get("reasoning_tokens") or 0
                 )
             except (TypeError, ValueError):
-                reasoning_tokens = 0
-        cost_usd = None
+                pass
+
         try:
             cost_ticks = usage.get("cost_in_usd_ticks")
             if cost_ticks is not None:
-                cost_usd = float(cost_ticks) / 10_000_000_000
+                normalized_usage["cost_usd"] = float(cost_ticks) / 10_000_000_000
         except (TypeError, ValueError):
-            cost_usd = None
-        normalized_usage = {
-            "prompt_tokens": prompt_tokens,
-            "input_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "output_tokens": completion_tokens,
-            "total_tokens": int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
-            "cached_prompt_tokens": cached_prompt_tokens,
-            "cached_input_tokens": cached_prompt_tokens,
-            "cached_input_ratio": cached_input_ratio,
-        }
-        if reasoning_tokens is not None:
-            normalized_usage["reasoning_tokens"] = reasoning_tokens
-        if cost_usd is not None:
-            normalized_usage["cost_usd"] = cost_usd
+            pass
         return normalized_usage

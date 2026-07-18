@@ -412,10 +412,31 @@ class TranslationContextMixin:
                 pass
         return context_size
 
-    def _custom_usage_number(self, usage, *keys):
+    def _custom_usage_is_missing(self, usage):
+        if not isinstance(usage, dict) or not usage:
+            return True
+        if usage.get("usage_missing"):
+            return True
+        known_keys = (
+            "input_tokens",
+            "prompt_tokens",
+            "output_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+            "cached_prompt_tokens",
+            "reasoning_tokens",
+            "cost_usd",
+        )
+        return not any(key in usage for key in known_keys)
+
+    def _custom_usage_number(self, usage, *keys, default=0.0):
+        """Return a numeric usage value, or default when the field is absent/unknown."""
         if not isinstance(usage, dict):
-            return 0.0
+            return default
         for key in keys:
+            if key not in usage:
+                continue
             value = usage.get(key)
             if value is None:
                 continue
@@ -423,26 +444,62 @@ class TranslationContextMixin:
                 return max(0.0, float(value))
             except (TypeError, ValueError):
                 continue
-        return 0.0
+        return default
+
+    def _custom_usage_optional_number(self, usage, *keys):
+        """Like _custom_usage_number, but returns None when the field is missing."""
+        if not isinstance(usage, dict):
+            return None
+        for key in keys:
+            if key not in usage:
+                continue
+            value = usage.get(key)
+            if value is None:
+                continue
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _format_custom_usage_count(self, value):
+        if value is None:
+            return "n/a"
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return "n/a"
+
+    def _format_custom_usage_cost(self, value):
+        if value is None:
+            return "n/a"
+        try:
+            return f"${float(value):.8f}"
+        except (TypeError, ValueError):
+            return "n/a"
 
     def _custom_usage_cached_input_ratio(self, usage):
-        prompt_tokens = self._custom_usage_number(
+        if self._custom_usage_is_missing(usage):
+            return None, None
+        prompt_tokens = self._custom_usage_optional_number(
             usage,
             "input_tokens",
             "prompt_tokens",
         )
-        cached_tokens = self._custom_usage_number(
+        cached_tokens = self._custom_usage_optional_number(
             usage,
             "cached_input_tokens",
             "cached_prompt_tokens",
         )
         ratio_value = None
-        if isinstance(usage, dict):
+        if isinstance(usage, dict) and "cached_input_ratio" in usage:
             try:
                 ratio_value = float(usage.get("cached_input_ratio"))
             except (TypeError, ValueError):
                 ratio_value = None
         if ratio_value is None:
+            if prompt_tokens is None or cached_tokens is None:
+                return None, prompt_tokens
             ratio_value = cached_tokens / prompt_tokens if prompt_tokens > 0 else 0.0
         return max(0.0, min(1.0, ratio_value)), prompt_tokens
 
@@ -453,8 +510,13 @@ class TranslationContextMixin:
         profile=None,
     ):
         cached_ratio, prompt_tokens = self._custom_usage_cached_input_ratio(usage)
-        if call_type != "translation" or prompt_tokens <= 0:
-            return cached_ratio
+        if (
+            call_type != "translation"
+            or prompt_tokens is None
+            or prompt_tokens <= 0
+            or cached_ratio is None
+        ):
+            return 0.0 if cached_ratio is None else cached_ratio
 
         alpha = CUSTOM_PROMPT_CACHE_EMA_ALPHA
         with self._custom_route_state_lock:

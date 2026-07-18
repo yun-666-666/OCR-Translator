@@ -113,31 +113,32 @@ Call Duration: {call_duration:.3f} seconds
     def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
         try:
             # Metrics/latency bookkeeping always runs, even when disk logging is off.
-            cost = self._custom_usage_number(usage, "cost_usd")
-            prompt_tokens = int(self._custom_usage_number(
+            usage_missing = self._custom_usage_is_missing(usage)
+            cost = self._custom_usage_optional_number(usage, "cost_usd")
+            prompt_tokens = self._custom_usage_optional_number(
                 usage,
                 "input_tokens",
                 "prompt_tokens",
-            ))
-            completion_tokens = int(self._custom_usage_number(
+            )
+            completion_tokens = self._custom_usage_optional_number(
                 usage,
                 "output_tokens",
                 "completion_tokens",
-            ))
+            )
             reasoning_tokens_line = ""
             if isinstance(usage, dict) and "reasoning_tokens" in usage:
-                reasoning_tokens = int(self._custom_usage_number(
+                reasoning_tokens = self._custom_usage_optional_number(
                     usage,
                     "reasoning_tokens",
-                ))
-                reasoning_tokens_line = (
-                    f"Reasoning Tokens: {reasoning_tokens}\n"
                 )
-            cached_prompt_tokens = int(self._custom_usage_number(
+                reasoning_tokens_line = (
+                    f"Reasoning Tokens: {self._format_custom_usage_count(reasoning_tokens)}\n"
+                )
+            cached_prompt_tokens = self._custom_usage_optional_number(
                 usage,
                 "cached_input_tokens",
                 "cached_prompt_tokens",
-            ))
+            )
             cached_input_ratio = self._record_custom_prompt_cache_usage(
                 call_type,
                 usage,
@@ -185,18 +186,28 @@ Call Duration: {call_duration:.3f} seconds
                     result_section = (
                         f"Result: {summarize_text_for_log(result_text)}\n\n"
                     )
+                if usage_missing:
+                    usage_status_line = "Usage: usage_missing\n"
+                    cached_ratio_text = "n/a"
+                else:
+                    usage_status_line = ""
+                    if cached_prompt_tokens is None and prompt_tokens is None:
+                        cached_ratio_text = "n/a"
+                    else:
+                        cached_ratio_text = f"{cached_input_ratio:.2f}"
                 block = (
                     f"{session_header}"
                     f"{header}\n"
                     f"Provider: {profile.get('name')}\n"
                     f"Model: {profile.get('model')}\n"
                     f"Duration: {duration:.3f}s\n"
-                    f"Input Tokens: {prompt_tokens}\n"
-                    f"Cached Input Tokens: {cached_prompt_tokens}\n"
-                    f"cached_input_ratio={cached_input_ratio:.2f}\n"
-                    f"Output Tokens: {completion_tokens}\n"
+                    f"{usage_status_line}"
+                    f"Input Tokens: {self._format_custom_usage_count(prompt_tokens)}\n"
+                    f"Cached Input Tokens: {self._format_custom_usage_count(cached_prompt_tokens)}\n"
+                    f"cached_input_ratio={cached_ratio_text}\n"
+                    f"Output Tokens: {self._format_custom_usage_count(completion_tokens)}\n"
                     f"{reasoning_tokens_line}"
-                    f"Cost: ${cost:.8f}\n"
+                    f"Cost: {self._format_custom_usage_cost(cost)}\n"
                     f"{result_section}"
                 )
                 log_executor.submit(
