@@ -7106,17 +7106,21 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             translation_handler_module,
             "append_rotating_text",
         ) as append_text:
-            handler._log_custom_short_call(
-                "translation",
-                profile,
-                "translated",
-                {
-                    "prompt_tokens": 1200,
-                    "completion_tokens": 20,
-                    "cached_prompt_tokens": 1024,
-                },
-                0.25,
-            )
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 1200,
+                        "completion_tokens": 20,
+                        "cached_prompt_tokens": 1024,
+                    },
+                    0.25,
+                )
             handler.close()
 
         self.assertIn(
@@ -7131,6 +7135,8 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "Reasoning Tokens:",
             append_text.call_args.args[1],
         )
+        self.assertNotIn("translated", append_text.call_args.args[1])
+        self.assertIn("Result: chars=", append_text.call_args.args[1])
 
     def test_custom_ai_short_log_records_reasoning_tokens(self):
         handler = TranslationHandler(object())
@@ -7140,17 +7146,21 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             translation_handler_module,
             "append_rotating_text",
         ) as append_text:
-            handler._log_custom_short_call(
-                "translation",
-                profile,
-                "translated",
-                {
-                    "prompt_tokens": 1200,
-                    "completion_tokens": 20,
-                    "reasoning_tokens": 11,
-                },
-                0.25,
-            )
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 1200,
+                        "completion_tokens": 20,
+                        "reasoning_tokens": 11,
+                    },
+                    0.25,
+                )
             handler.close()
 
         self.assertIn(
@@ -7166,20 +7176,125 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             translation_handler_module,
             "append_rotating_text",
         ) as append_text:
-            handler._log_custom_short_call(
-                "translation",
-                profile,
-                "translated",
-                {
-                    "prompt_tokens": 1200,
-                    "completion_tokens": 20,
-                    "cost_usd": 0.00001234,
-                },
-                0.25,
-            )
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {
+                        "prompt_tokens": 1200,
+                        "completion_tokens": 20,
+                        "cost_usd": 0.00001234,
+                    },
+                    0.25,
+                )
             handler.close()
 
         self.assertIn("Cost: $0.00001234", append_text.call_args.args[1])
+
+    def test_custom_ai_short_log_default_omits_result_body(self):
+        unique_body = "UNIQUE_CUSTOM_AI_SHORT_LOG_BODY_DEFAULT"
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 4,
+                    },
+                    0.11,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertNotIn(unique_body, block)
+        self.assertIn(
+            f"Result: {translation_handler_module.summarize_text_for_log(unique_body)}",
+            block,
+        )
+
+    def test_custom_ai_short_log_opt_in_includes_result_body(self):
+        unique_body = "UNIQUE_CUSTOM_AI_SHORT_LOG_BODY_OPT_IN"
+        app = types.SimpleNamespace(
+            custom_ai_log_content_enabled_var=DummyVar(True)
+        )
+        handler = TranslationHandler(app)
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 4,
+                    },
+                    0.11,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn(unique_body, block)
+
+    def test_custom_ai_short_log_metrics_run_when_debug_logging_disabled(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Translator", "model": "translation-model"}
+
+        with patch.object(
+            translation_handler_module,
+            "append_rotating_text",
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=False,
+            ):
+                with patch.object(
+                    handler,
+                    "_record_custom_prompt_cache_usage",
+                    return_value=0.42,
+                ) as cache_record:
+                    with patch.object(
+                        handler,
+                        "_record_custom_ai_latency_observation",
+                    ) as latency_record:
+                        handler._log_custom_short_call(
+                            "translation",
+                            profile,
+                            "body-should-not-hit-disk",
+                            {
+                                "prompt_tokens": 100,
+                                "completion_tokens": 5,
+                                "cached_prompt_tokens": 40,
+                            },
+                            0.2,
+                        )
+            handler.close()
+
+        append_text.assert_not_called()
+        cache_record.assert_called_once()
+        latency_record.assert_called_once()
 
     def test_low_cached_ratio_conservatively_reduces_custom_ai_context_budget(self):
         class App:
@@ -7258,13 +7373,17 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             release_write.wait(timeout=2.0)
 
         def log_call():
-            handler._log_custom_short_call(
-                "translation",
-                {"name": "Translator", "model": "demo"},
-                "translated",
-                {"prompt_tokens": 1, "completion_tokens": 1},
-                0.01,
-            )
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    {"name": "Translator", "model": "demo"},
+                    "translated",
+                    {"prompt_tokens": 1, "completion_tokens": 1},
+                    0.01,
+                )
             log_returned.set()
 
         with patch.object(

@@ -63,6 +63,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'main_window_y': '23',
     'translation_model': 'custom_ai', # Default model
     'debug_logging_enabled': 'False',
+    'custom_ai_log_content_enabled': 'False',
     'gui_language':'English',
     # OCR Model Selection
     'ocr_model': 'paddleocr',

@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from logger import (
+    CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+    CUSTOM_AI_SHORT_LOG_MAX_BYTES,
     append_rotating_text,
     log_debug,
     log_debug_coalesced,
@@ -90,16 +92,26 @@ class TranslationHandler(TranslationContextMixin, TranslationRequestsMixin, Tran
         
         log_debug("Translation handler initialized with custom AI provider and unified cache")
 
+    def _is_custom_ai_log_content_enabled(self):
+        """Return True only when the user explicitly opts into short-log bodies."""
+        var = getattr(self.app, "custom_ai_log_content_enabled_var", None)
+        if var is None:
+            return False
+        try:
+            return bool(var.get())
+        except Exception:
+            return False
+
     def _write_custom_short_log(self, log_file, block):
         try:
             append_rotating_text(
                 log_file,
                 block,
-                max_bytes=2 * 1024 * 1024,
-                backup_count=2,
+                max_bytes=CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+                backup_count=CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
             )
         except Exception as e:
-            _log_debug(f"Custom AI short log write failed: {e}")
+            log_debug(f"Custom AI short log write failed: {e}")
 
     def _format_dialog_text(self, text):
         """Format dialog text by adding line breaks before dashes that follow sentence-ending punctuation.

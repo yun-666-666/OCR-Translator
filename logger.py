@@ -10,6 +10,14 @@ from pathlib import Path
 DEBUG_LOG_FILENAME = "translator_debug.log"
 DEBUG_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEBUG_LOG_BACKUP_COUNT = 3
+CUSTOM_AI_OCR_SHORT_LOG_FILENAME = "CustomAI_OCR_Short_Log.txt"
+CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME = "CustomAI_Translation_Short_Log.txt"
+CUSTOM_AI_SHORT_LOG_MAX_BYTES = 2 * 1024 * 1024
+CUSTOM_AI_SHORT_LOG_BACKUP_COUNT = 2
+CUSTOM_AI_SHORT_LOG_FILENAMES = (
+    CUSTOM_AI_OCR_SHORT_LOG_FILENAME,
+    CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
+)
 
 _debug_logging_enabled = True
 _writer_registry = {}
@@ -373,6 +381,25 @@ def log_debug_coalesced(event_key, message, interval_seconds=5.0):
     return True
 
 
+def clear_custom_ai_short_logs():
+    """Clear Custom AI short logs and their rotation backups via shared writers."""
+    for filename in CUSTOM_AI_SHORT_LOG_FILENAMES:
+        path = resolve_runtime_log_path(filename)
+        writer = _get_writer(
+            path,
+            CUSTOM_AI_SHORT_LOG_MAX_BYTES,
+            CUSTOM_AI_SHORT_LOG_BACKUP_COUNT,
+        )
+        writer.clear()
+        for index in range(1, CUSTOM_AI_SHORT_LOG_BACKUP_COUNT + 1):
+            backup = Path(f"{path}.{index}")
+            try:
+                if backup.exists():
+                    backup.unlink()
+            except OSError:
+                pass
+
+
 def clear_debug_log():
     """Safely clear the active debug log while preserving the shared writer."""
     marker = f"{time.strftime('%Y-%m-%d %H:%M:%S')}: Debug log cleared by user.\n"
@@ -384,6 +411,7 @@ def clear_debug_log():
     )
     writer.clear(marker)
     _debug_log_coalescer.clear()
+    clear_custom_ai_short_logs()
 
 
 ensure_test_log_environment()

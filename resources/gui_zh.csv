@@ -29,6 +29,9 @@ ocr_model_paddleocr,PaddleOCR（离线）
 source_lang_label,源语言：
 target_lang_label,目标语言：
 custom_context_window_label,联系上下文句数：
+custom_ai_log_content_label,Custom AI 短日志正文：
+custom_ai_log_content_checkbox,在短日志中保存 OCR/翻译文本
+custom_ai_log_content_warning,警告：启用后会将识别/翻译内容写入磁盘。
 ai_optimization_mode_label,AI 自动优化：
 ai_optimization_mode_auto,自动（推荐）
 ai_optimization_mode_stream,流式输出

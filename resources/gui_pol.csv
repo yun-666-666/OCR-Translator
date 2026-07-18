@@ -29,6 +29,9 @@ ocr_model_paddleocr,PaddleOCR (lokalny)
 source_lang_label,Język źródłowy:
 target_lang_label,Język docelowy:
 custom_context_window_label,Napisy kontekstu Custom AI:
+custom_ai_log_content_label,Treść short log Custom AI:
+custom_ai_log_content_checkbox,Zapisuj tekst OCR/tłumaczenia w short logach
+custom_ai_log_content_warning,Ostrzeżenie: włączenie zapisuje tekst OCR/tłumaczenia na dysku.
 ai_optimization_mode_label,Optymalizacja AI:
 ai_optimization_mode_auto,Automatyczna (zalecana)
 ai_optimization_mode_stream,Strumieniowanie

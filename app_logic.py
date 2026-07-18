@@ -306,6 +306,13 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.update_translation_model_names()
         self.translation_model_values = {v: k for k, v in self.translation_model_names.items()}
         self.custom_context_window_var = tk.IntVar(value=int(self.config['Settings'].get('custom_context_window', '5')))
+        self.custom_ai_log_content_enabled_var = tk.BooleanVar(
+            value=self.config.getboolean(
+                'Settings',
+                'custom_ai_log_content_enabled',
+                fallback=False,
+            )
+        )
         self.ai_optimization_mode_var = tk.StringVar(
             value=normalize_ai_optimization_mode(
                 self.config['Settings'].get(
@@ -486,6 +493,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.ocr_frame_cache_size_var.trace_add("write", self.on_ocr_frame_cache_size_change)
         self.enable_instant_cache_display_var.trace_add("write", self.settings_changed_callback)
         self.custom_context_window_var.trace_add("write", self.custom_context_window_changed_callback)
+        self.custom_ai_log_content_enabled_var.trace_add("write", self.settings_changed_callback)
         self.ai_optimization_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
         for paddleocr_var in (

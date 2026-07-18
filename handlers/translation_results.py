@@ -6,7 +6,13 @@ import sys
 import time
 from datetime import datetime, timedelta
 
-from logger import log_debug_coalesced, summarize_text_for_log
+from logger import (
+    CUSTOM_AI_OCR_SHORT_LOG_FILENAME,
+    CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
+    is_debug_logging_enabled,
+    log_debug_coalesced,
+    summarize_text_for_log,
+)
 from translation_utils import is_translation_error_result
 
 REQUESTS_AVAILABLE = False
@@ -106,6 +112,47 @@ Call Duration: {call_duration:.3f} seconds
     # === UNIFIED TRANSLATE METHOD ===
     def _log_custom_short_call(self, call_type, profile, result_text, usage, duration):
         try:
+            # Metrics/latency bookkeeping always runs, even when disk logging is off.
+            cost = self._custom_usage_number(usage, "cost_usd")
+            prompt_tokens = int(self._custom_usage_number(
+                usage,
+                "input_tokens",
+                "prompt_tokens",
+            ))
+            completion_tokens = int(self._custom_usage_number(
+                usage,
+                "output_tokens",
+                "completion_tokens",
+            ))
+            reasoning_tokens_line = ""
+            if isinstance(usage, dict) and "reasoning_tokens" in usage:
+                reasoning_tokens = int(self._custom_usage_number(
+                    usage,
+                    "reasoning_tokens",
+                ))
+                reasoning_tokens_line = (
+                    f"Reasoning Tokens: {reasoning_tokens}\n"
+                )
+            cached_prompt_tokens = int(self._custom_usage_number(
+                usage,
+                "cached_input_tokens",
+                "cached_prompt_tokens",
+            ))
+            cached_input_ratio = self._record_custom_prompt_cache_usage(
+                call_type,
+                usage,
+                profile=profile,
+            )
+            if call_type == "translation":
+                self._record_custom_ai_latency_observation(
+                    duration,
+                    success=True,
+                    profile=profile,
+                )
+
+            if not is_debug_logging_enabled():
+                return
+
             with self._custom_log_state_lock:
                 log_executor = self._custom_log_executor
                 if log_executor is None:
@@ -113,9 +160,9 @@ Call Duration: {call_duration:.3f} seconds
                     return
 
                 log_file = (
-                    "CustomAI_OCR_Short_Log.txt"
+                    CUSTOM_AI_OCR_SHORT_LOG_FILENAME
                     if call_type == "ocr"
-                    else "CustomAI_Translation_Short_Log.txt"
+                    else CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME
                 )
                 session_header = ""
                 if call_type not in self._custom_session_started:
@@ -128,41 +175,15 @@ Call Duration: {call_duration:.3f} seconds
                     if call_type == "ocr"
                     else "===== TRANSLATION CALL ======="
                 )
-                cost = self._custom_usage_number(usage, "cost_usd")
-                prompt_tokens = int(self._custom_usage_number(
-                    usage,
-                    "input_tokens",
-                    "prompt_tokens",
-                ))
-                completion_tokens = int(self._custom_usage_number(
-                    usage,
-                    "output_tokens",
-                    "completion_tokens",
-                ))
-                reasoning_tokens_line = ""
-                if isinstance(usage, dict) and "reasoning_tokens" in usage:
-                    reasoning_tokens = int(self._custom_usage_number(
-                        usage,
-                        "reasoning_tokens",
-                    ))
-                    reasoning_tokens_line = (
-                        f"Reasoning Tokens: {reasoning_tokens}\n"
+                if self._is_custom_ai_log_content_enabled():
+                    result_section = (
+                        "Result:\n--------------------\n"
+                        f"{result_text}\n"
+                        "--------------------\n\n"
                     )
-                cached_prompt_tokens = int(self._custom_usage_number(
-                    usage,
-                    "cached_input_tokens",
-                    "cached_prompt_tokens",
-                ))
-                cached_input_ratio = self._record_custom_prompt_cache_usage(
-                    call_type,
-                    usage,
-                    profile=profile,
-                )
-                if call_type == "translation":
-                    self._record_custom_ai_latency_observation(
-                        duration,
-                        success=True,
-                        profile=profile,
+                else:
+                    result_section = (
+                        f"Result: {summarize_text_for_log(result_text)}\n\n"
                     )
                 block = (
                     f"{session_header}"
@@ -176,7 +197,7 @@ Call Duration: {call_duration:.3f} seconds
                     f"Output Tokens: {completion_tokens}\n"
                     f"{reasoning_tokens_line}"
                     f"Cost: ${cost:.8f}\n"
-                    f"Result:\n--------------------\n{result_text}\n--------------------\n\n"
+                    f"{result_section}"
                 )
                 log_executor.submit(
                     self._write_custom_short_log,

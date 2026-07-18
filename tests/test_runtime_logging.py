@@ -363,22 +363,182 @@ class RotatingTextWriterTests(unittest.TestCase):
             "handlers.translation_handler.append_rotating_text",
             create=True,
         ) as append_text:
-            handler._log_custom_short_call(
-                "translation",
-                profile,
-                "translated",
-                {"prompt_tokens": 3, "completion_tokens": 2},
-                0.25,
-            )
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
             handler.close()
 
         append_text.assert_called_once()
         args, kwargs = append_text.call_args
         self.assertEqual(args[0], "CustomAI_Translation_Short_Log.txt")
         self.assertIn("SESSION 1 STARTED", args[1])
-        self.assertIn("translated", args[1])
+        self.assertIn("chars=", args[1])
+        self.assertNotIn("translated", args[1])
         self.assertEqual(kwargs["max_bytes"], 2 * 1024 * 1024)
         self.assertEqual(kwargs["backup_count"], 2)
+
+    def test_custom_ai_short_log_default_is_content_free(self):
+        unique_body = "UNIQUE_SHORT_LOG_BODY_DEFAULT_PRIVACY_MARKER"
+        handler = TranslationHandler(object())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertNotIn(unique_body, block)
+        self.assertIn("Result: chars=", block)
+        self.assertIn("lines=", block)
+
+    def test_custom_ai_short_log_opt_in_includes_result_body(self):
+        unique_body = "UNIQUE_SHORT_LOG_BODY_OPT_IN_MARKER"
+        app = types.SimpleNamespace(
+            custom_ai_log_content_enabled_var=types.SimpleNamespace(
+                get=lambda: True
+            )
+        )
+        handler = TranslationHandler(app)
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn(unique_body, block)
+        self.assertIn("Result:\n--------------------\n", block)
+
+    def test_custom_ai_short_log_skips_disk_when_debug_logging_disabled(self):
+        class App:
+            custom_ai_log_content_enabled_var = types.SimpleNamespace(
+                get=lambda: False
+            )
+
+        handler = TranslationHandler(App())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=False,
+            ):
+                with patch.object(
+                    handler,
+                    "_record_custom_prompt_cache_usage",
+                    return_value=0.5,
+                ) as cache_record:
+                    with patch.object(
+                        handler,
+                        "_record_custom_ai_latency_observation",
+                    ) as latency_record:
+                        handler._log_custom_short_call(
+                            "translation",
+                            profile,
+                            "should-not-be-written",
+                            {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 2,
+                                "cached_prompt_tokens": 5,
+                            },
+                            0.33,
+                        )
+            handler.close()
+
+        append_text.assert_not_called()
+        cache_record.assert_called_once()
+        latency_record.assert_called_once()
+
+    def test_clear_debug_log_also_clears_custom_ai_short_logs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            previous = os.environ.get("OCR_TRANSLATOR_LOG_DIR")
+            os.environ["OCR_TRANSLATOR_LOG_DIR"] = tmp_dir
+            try:
+                logger.close_log_writers()
+                ocr_path = logger.resolve_runtime_log_path(
+                    logger.CUSTOM_AI_OCR_SHORT_LOG_FILENAME
+                )
+                translation_path = logger.resolve_runtime_log_path(
+                    logger.CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME
+                )
+                debug_path = logger.resolve_runtime_log_path(
+                    logger.DEBUG_LOG_FILENAME
+                )
+                ocr_path.write_text("ocr body\n", encoding="utf-8-sig")
+                translation_path.write_text(
+                    "translation body\n",
+                    encoding="utf-8-sig",
+                )
+                Path(f"{ocr_path}.1").write_text(
+                    "ocr backup\n",
+                    encoding="utf-8-sig",
+                )
+                Path(f"{translation_path}.2").write_text(
+                    "translation backup\n",
+                    encoding="utf-8-sig",
+                )
+                debug_path.write_text("debug body\n", encoding="utf-8-sig")
+
+                logger.clear_debug_log()
+
+                self.assertTrue(debug_path.exists())
+                self.assertIn(
+                    "Debug log cleared by user.",
+                    debug_path.read_text(encoding="utf-8-sig"),
+                )
+                self.assertEqual(
+                    ocr_path.read_text(encoding="utf-8-sig"),
+                    "",
+                )
+                self.assertEqual(
+                    translation_path.read_text(encoding="utf-8-sig"),
+                    "",
+                )
+                self.assertFalse(Path(f"{ocr_path}.1").exists())
+                self.assertFalse(Path(f"{translation_path}.2").exists())
+            finally:
+                logger.close_log_writers()
+                if previous is None:
+                    os.environ.pop("OCR_TRANSLATOR_LOG_DIR", None)
+                else:
+                    os.environ["OCR_TRANSLATOR_LOG_DIR"] = previous
 
     def test_ui_clear_debug_log_uses_shared_writer(self):
         handler = object.__new__(UIInteractionHandler)

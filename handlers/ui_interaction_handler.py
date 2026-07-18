@@ -530,6 +530,9 @@ class UIInteractionHandler:
 
             # OpenAI-specific settings
             cfg['custom_context_window'] = str(self.app.custom_context_window_var.get())
+            cfg['custom_ai_log_content_enabled'] = str(
+                self.app.custom_ai_log_content_enabled_var.get()
+            )
             cfg['ai_optimization_mode'] = self.app.get_ai_optimization_mode()
             cfg['custom_ai_submit_interval_ms'] = str(
                 max(0, min(5000, int(self.app.custom_ai_submit_interval_ms_var.get())))

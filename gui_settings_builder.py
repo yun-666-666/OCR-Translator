@@ -570,6 +570,48 @@ def create_settings_tab(app):
 
     app.custom_context_window_spinbox.bind("<FocusOut>", on_custom_context_window_focus_out)
 
+    app.custom_ai_log_content_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "custom_ai_log_content_label",
+            "Custom AI short-log content:",
+        ),
+    )
+    app.custom_ai_log_content_label.grid(
+        row=18,
+        column=0,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
+    app.custom_ai_log_content_frame = ttk.Frame(frame)
+    app.custom_ai_log_content_frame.grid(
+        row=18,
+        column=1,
+        padx=5,
+        pady=5,
+        sticky="w",
+    )
+    app.custom_ai_log_content_checkbox = ttk.Checkbutton(
+        app.custom_ai_log_content_frame,
+        text=app.ui_lang.get_label(
+            "custom_ai_log_content_checkbox",
+            "Store OCR/translation text in short logs",
+        ),
+        variable=app.custom_ai_log_content_enabled_var,
+    )
+    app.custom_ai_log_content_checkbox.pack(side=tk.TOP, anchor="w")
+    app.custom_ai_log_content_warning = ttk.Label(
+        app.custom_ai_log_content_frame,
+        text=app.ui_lang.get_label(
+            "custom_ai_log_content_warning",
+            "Warning: enabling stores OCR/translation text on disk.",
+        ),
+        wraplength=320,
+        foreground="#8a5a00",
+    )
+    app.custom_ai_log_content_warning.pack(side=tk.TOP, anchor="w", pady=(2, 0))
+
     app.ai_optimization_mode_label = ttk.Label(
         frame,
         text=app.ui_lang.get_label(
@@ -578,7 +620,7 @@ def create_settings_tab(app):
         ),
     )
     app.ai_optimization_mode_label.grid(
-        row=18,
+        row=19,
         column=0,
         padx=5,
         pady=5,
@@ -633,7 +675,7 @@ def create_settings_tab(app):
         state='readonly',
     )
     app.ai_optimization_mode_combobox.grid(
-        row=18,
+        row=19,
         column=1,
         padx=5,
         pady=5,
@@ -663,7 +705,7 @@ def create_settings_tab(app):
             "AI translation minimum interval (ms):",
         ),
     )
-    app.custom_ai_submit_interval_label.grid(row=19, column=0, padx=5, pady=5, sticky="w")
+    app.custom_ai_submit_interval_label.grid(row=20, column=0, padx=5, pady=5, sticky="w")
     app.custom_ai_submit_interval_spinbox = ttk.Spinbox(
         frame,
         from_=0,
@@ -674,7 +716,7 @@ def create_settings_tab(app):
         validate="key",
         validatecommand=(validate_custom_ai_submit_interval, '%P'),
     )
-    app.custom_ai_submit_interval_spinbox.grid(row=19, column=1, padx=5, pady=5, sticky="w")
+    app.custom_ai_submit_interval_spinbox.grid(row=20, column=1, padx=5, pady=5, sticky="w")
 
     def on_custom_ai_submit_interval_focus_out(event):
         try:
@@ -689,7 +731,7 @@ def create_settings_tab(app):
         on_custom_ai_submit_interval_focus_out,
     )
 
-    current_row = getattr(app, "_settings_next_row", 20)
+    current_row = getattr(app, "_settings_next_row", 21)
     ttk.Label(
         frame,
         text=app.ui_lang.get_label(
