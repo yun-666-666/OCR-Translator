@@ -194,7 +194,6 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                         "api_key": TEST_SECRET_KEY,
                         "model": "qwen",
                         "enabled": True,
-                        "translation_failover_enabled": False,
                         "wire_api": "chat_completions",
                         "structured_output_mode": "auto",
                         "reasoning_effort": "low",
@@ -210,8 +209,15 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
                 with patch("custom_ai.log_debug") as log_debug:
                     manager = CustomAIProfileManager(path)
-                    # Explicit save must not invent a plaintext fallback path either.
-                    manager.save()
+                    # Legacy normalization must not replace the JSON when its
+                    # credential migration fails, and an explicit save must fail
+                    # closed rather than rewrite the plaintext key.
+                    self.assertFalse(manager.save())
+                    with self.assertRaises(RuntimeError):
+                        manager.update_profile(
+                            "legacy-profile",
+                            name="Must Not Persist",
+                        )
 
             persisted_text = path.read_text(encoding="utf-8")
             messages = [str(call.args[0]) for call in log_debug.call_args_list if call.args]
@@ -222,10 +228,16 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertFalse(runtime.get("api_key_ref"), "failed credential write must not invent a credential ref")
             self.assertFalse(runtime.get("_api_key_plaintext_fallback"), "plaintext fallback flag must not be set")
             self.assertFalse(persisted.get("api_key_ref"), "disk must not invent a credential ref after failed store")
-            # Disk may retain the pre-existing legacy key, but must not gain a new
-            # "credential failed so write plaintext" fallback marker/path.
+            # Disk is byte-for-byte preserved: no failed migration may rewrite a
+            # legacy plaintext profile while attempting unrelated normalization.
             self.assertEqual(persisted.get("api_key"), TEST_SECRET_KEY)
             self.assertNotIn("_api_key_plaintext_fallback", persisted)
+            self.assertEqual(persisted_text, original_text)
+            self.assertEqual(runtime.get("name"), "Legacy")
+            self.assertNotIn(
+                "api_key",
+                manager.serialize_for_disk()["profiles"][0],
+            )
             self.assertTrue(messages, "credential failure did not log a diagnostic")
             self.assertFalse(any(TEST_SECRET_KEY in message for message in messages), "diagnostic log leaked API key")
             # No credential store entries were created.

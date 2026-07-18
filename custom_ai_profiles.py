@@ -144,6 +144,13 @@ class CustomAIProfileManager:
     def save(self, data=None):
         temporary_path = None
         try:
+            data_to_save = self._snapshot_data() if data is None else data
+            if self._has_unmigrated_plaintext_api_key(data_to_save):
+                _log_debug(
+                    "Custom AI profiles save skipped because a legacy plaintext "
+                    "credential has not migrated to the credential store"
+                )
+                return False
             if self.path.parent and str(self.path.parent) != ".":
                 self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary_path = self.path.with_name(
@@ -151,7 +158,7 @@ class CustomAIProfileManager:
             )
             with temporary_path.open("x", encoding="utf-8", newline="\n") as f:
                 json.dump(
-                    self.serialize_for_disk(data),
+                    self.serialize_for_disk(data_to_save),
                     f,
                     indent=2,
                     ensure_ascii=False,
@@ -173,6 +180,21 @@ class CustomAIProfileManager:
                         "Custom AI profiles temporary-file cleanup failed: "
                         f"{type(cleanup_error).__name__}"
                     )
+
+    @staticmethod
+    def _has_unmigrated_plaintext_api_key(data):
+        """Prevent writes that would preserve a credential-store migration failure."""
+        if not isinstance(data, dict):
+            return False
+        for profile in data.get("profiles", []):
+            if not isinstance(profile, dict):
+                continue
+            credential_ref = str(
+                profile.get("api_key_ref") or profile.get("credential_ref") or ""
+            ).strip()
+            if str(profile.get("api_key") or "") and not credential_ref:
+                return True
+        return False
 
     def serialize_for_disk(self, data=None):
         data = self._snapshot_data() if data is None else data
@@ -197,12 +219,6 @@ class CustomAIProfileManager:
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
             if credential_ref:
                 serialized["api_key_ref"] = credential_ref
-            else:
-                # Preserve already-on-disk legacy plaintext only when no credential
-                # ref exists. Never write plaintext as a failed-store fallback.
-                api_key = str(profile.get("api_key") or "")
-                if api_key:
-                    serialized["api_key"] = api_key
             serialized["reasoning_effort"] = normalize_custom_ai_reasoning_effort(
                 profile.get("reasoning_effort")
                 or profile.get("model_reasoning_effort")
@@ -595,5 +611,4 @@ class CustomAIProfileManager:
             raise ValueError("API key is required")
         if not profile.get("model"):
             raise ValueError("Model name is required")
-
 
