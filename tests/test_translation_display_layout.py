@@ -66,18 +66,22 @@ class _TkFallbackText:
 
 class TranslationDisplayLayoutConfigTests(unittest.TestCase):
     def test_load_app_config_migrates_legacy_keep_linebreaks(self):
-        original_cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as temporary_directory:
+            previous = os.environ.get(config_manager.CONFIG_DIR_ENV)
+            os.environ[config_manager.CONFIG_DIR_ENV] = temporary_directory
             try:
-                os.chdir(temporary_directory)
                 config = configparser.ConfigParser()
                 config["Settings"] = {"keep_linebreaks": "True"}
-                with Path("ocr_translator_config.ini").open("w", encoding="utf-8") as handle:
+                config_path = Path(temporary_directory) / "ocr_translator_config.ini"
+                with config_path.open("w", encoding="utf-8") as handle:
                     config.write(handle)
 
                 loaded = config_manager.load_app_config()
             finally:
-                os.chdir(original_cwd)
+                if previous is None:
+                    os.environ.pop(config_manager.CONFIG_DIR_ENV, None)
+                else:
+                    os.environ[config_manager.CONFIG_DIR_ENV] = previous
 
         self.assertEqual(
             loaded["Settings"]["translation_line_layout"],

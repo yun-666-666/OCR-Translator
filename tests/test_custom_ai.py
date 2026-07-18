@@ -311,22 +311,26 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
     def test_provider_config_save_moves_api_keys_to_credential_refs(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            original_cwd = os.getcwd()
+            import config_manager
+
+            previous = os.environ.get(config_manager.CONFIG_DIR_ENV)
+            os.environ[config_manager.CONFIG_DIR_ENV] = tmp_dir
             config = configparser.ConfigParser()
             config["Settings"] = {"google_translate_api_key": TEST_SECRET_KEY}
             store = FakeCredentialStore()
             try:
-                os.chdir(tmp_dir)
-                import config_manager
-
                 with patch("config_manager.create_default_credential_store", return_value=store, create=True):
                     self.assertTrue(config_manager.save_app_config(config))
 
-                persisted_text = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+                config_path = Path(tmp_dir) / "ocr_translator_config.ini"
+                persisted_text = config_path.read_text(encoding="utf-8")
                 persisted = configparser.ConfigParser()
-                persisted.read("ocr_translator_config.ini", encoding="utf-8")
+                persisted.read(config_path, encoding="utf-8")
             finally:
-                os.chdir(original_cwd)
+                if previous is None:
+                    os.environ.pop(config_manager.CONFIG_DIR_ENV, None)
+                else:
+                    os.environ[config_manager.CONFIG_DIR_ENV] = previous
 
             credential_ref = persisted["Settings"].get("google_translate_api_key_ref")
             assert_secret_not_in_text(self, persisted_text, "ocr_translator_config.ini")
@@ -336,23 +340,27 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
     def test_provider_config_load_resolves_migrated_key_without_rewriting_plaintext(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            original_cwd = os.getcwd()
-            Path(tmp_dir, "ocr_translator_config.ini").write_text(
+            import config_manager
+
+            previous = os.environ.get(config_manager.CONFIG_DIR_ENV)
+            os.environ[config_manager.CONFIG_DIR_ENV] = tmp_dir
+            config_path = Path(tmp_dir) / "ocr_translator_config.ini"
+            config_path.write_text(
                 "[Settings]\ngemini_api_key = test-secret-key\n",
                 encoding="utf-8",
             )
             store = FakeCredentialStore()
             try:
-                os.chdir(tmp_dir)
-                import config_manager
-
                 with patch("config_manager.create_default_credential_store", return_value=store, create=True):
                     loaded = config_manager.load_app_config()
                     resolved_key = config_manager.get_provider_api_key(loaded, "gemini_api_key")
 
-                persisted_text = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+                persisted_text = config_path.read_text(encoding="utf-8")
             finally:
-                os.chdir(original_cwd)
+                if previous is None:
+                    os.environ.pop(config_manager.CONFIG_DIR_ENV, None)
+                else:
+                    os.environ[config_manager.CONFIG_DIR_ENV] = previous
 
             assert_secret_not_in_text(self, persisted_text, "ocr_translator_config.ini")
             self.assertTrue(resolved_key == TEST_SECRET_KEY, "provider key did not resolve from credential store")

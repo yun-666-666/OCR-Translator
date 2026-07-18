@@ -67,18 +67,22 @@ class StartupOptimizationTests(unittest.TestCase):
 
         legacy_model = "tes" + "seract"
         with tempfile.TemporaryDirectory() as tmp_dir:
-            previous_cwd = os.getcwd()
-            os.chdir(tmp_dir)
+            previous = os.environ.get(config_manager.CONFIG_DIR_ENV)
+            os.environ[config_manager.CONFIG_DIR_ENV] = tmp_dir
             try:
-                Path("ocr_translator_config.ini").write_text(
+                config_path = Path(tmp_dir) / "ocr_translator_config.ini"
+                config_path.write_text(
                     f"[Settings]\nocr_model = {legacy_model}\n",
                     encoding="utf-8",
                 )
 
                 loaded_config = config_manager.load_app_config()
-                persisted_config = Path("ocr_translator_config.ini").read_text(encoding="utf-8")
+                persisted_config = config_path.read_text(encoding="utf-8")
             finally:
-                os.chdir(previous_cwd)
+                if previous is None:
+                    os.environ.pop(config_manager.CONFIG_DIR_ENV, None)
+                else:
+                    os.environ[config_manager.CONFIG_DIR_ENV] = previous
 
         self.assertEqual(loaded_config["Settings"]["ocr_model"], "paddleocr")
         self.assertIn("ocr_model = paddleocr", persisted_config)

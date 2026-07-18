@@ -2,6 +2,10 @@
 import configparser
 import os
 import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
 from ai_optimization import (
     AI_OPTIMIZATION_AUTO,
     LEGACY_AI_SETTING_KEYS,
@@ -14,6 +18,10 @@ from logger import log_debug
 from resource_handler import get_resource_path
 
 PROVIDER_CREDENTIAL_SERVICE = "OCR-Translator-Providers"
+CONFIG_FILENAME = "ocr_translator_config.ini"
+CONFIG_DIR_ENV = "OCR_TRANSLATOR_CONFIG_DIR"
+CONFIG_APP_DIR_NAME = "OCR-Translator"
+CONFIG_TEMP_STALE_SECONDS = 300.0
 PROVIDER_API_KEY_SETTINGS = (
     'google_translate_api_key',
     'deepl_api_key',
@@ -30,6 +38,184 @@ def normalize_translation_line_layout(value):
     if normalized == TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES:
         return TRANSLATION_LINE_LAYOUT_PRESERVE_SOURCE_LINES
     return TRANSLATION_LINE_LAYOUT_COMPACT
+
+
+def get_default_app_config_dir():
+    """Stable per-user application data directory for config files."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / CONFIG_APP_DIR_NAME
+        return Path.home() / "AppData" / "Roaming" / CONFIG_APP_DIR_NAME
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if xdg:
+        return Path(xdg) / CONFIG_APP_DIR_NAME
+    return Path.home() / ".config" / CONFIG_APP_DIR_NAME
+
+
+def resolve_app_config_dir():
+    """Resolve active config directory: env override, else stable app-data."""
+    override = os.environ.get(CONFIG_DIR_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    # Keep unit tests from writing into the real user app-data tree.
+    try:
+        from logger import _is_test_process
+        if _is_test_process():
+            return (
+                Path(tempfile.gettempdir())
+                / f"ocr-translator-test-config-{os.getpid()}"
+            )
+    except Exception:
+        pass
+    return get_default_app_config_dir()
+
+
+def get_legacy_config_path():
+    """Pre-migration location: config beside the process working directory."""
+    return Path.cwd() / CONFIG_FILENAME
+
+
+def get_app_config_path():
+    return resolve_app_config_dir() / CONFIG_FILENAME
+
+
+def _cleanup_stale_config_temp_files(config_path):
+    """Remove only this module's stale atomic temp family next to the config."""
+    config_path = Path(config_path)
+    parent = config_path.parent
+    if not parent.exists():
+        return
+    cutoff = time.time() - CONFIG_TEMP_STALE_SECONDS
+    pattern = f".{config_path.name}.*.tmp"
+    try:
+        candidates = list(parent.glob(pattern))
+    except Exception as error:
+        log_debug(
+            "Config temporary-file scan failed: "
+            f"{type(error).__name__}"
+        )
+        return
+    for candidate in candidates:
+        try:
+            if candidate.stat().st_mtime > cutoff:
+                continue
+            candidate.unlink(missing_ok=True)
+        except Exception as error:
+            log_debug(
+                "Config stale temporary-file cleanup failed: "
+                f"{type(error).__name__}"
+            )
+
+
+def _paths_refer_to_same_file(left, right):
+    try:
+        return Path(left).resolve() == Path(right).resolve()
+    except Exception:
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def migrate_legacy_config_if_needed(legacy_path=None, target_path=None):
+    """
+    One-shot, recoverable migration from CWD config to app-data config.
+
+    Copies only when the new path is missing and the legacy path exists/valid.
+    Never overwrites an existing target. Never deletes the legacy file.
+    Returns (migrated: bool, error: str|None).
+    """
+    legacy = Path(legacy_path) if legacy_path is not None else get_legacy_config_path()
+    target = Path(target_path) if target_path is not None else get_app_config_path()
+
+    if not legacy.exists() or not legacy.is_file():
+        return False, None
+    if target.exists():
+        return False, None
+    if _paths_refer_to_same_file(legacy, target):
+        return False, None
+
+    try:
+        raw = legacy.read_bytes()
+    except Exception as error:
+        message = (
+            "Failed to read legacy config for migration "
+            f"({type(error).__name__}); leaving original in place"
+        )
+        log_debug(message)
+        return False, message
+
+    if not raw.strip():
+        message = "Legacy config is empty; migration skipped"
+        log_debug(message)
+        return False, message
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _cleanup_stale_config_temp_files(target)
+        temporary_path = target.with_name(
+            f".{target.name}.{uuid.uuid4().hex}.tmp"
+        )
+        with temporary_path.open("xb") as handle:
+            handle.write(raw)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except (OSError, AttributeError):
+                pass
+        os.replace(temporary_path, target)
+        temporary_path = None
+        log_debug(
+            f"Migrated legacy config from {legacy} to {target}"
+        )
+        return True, None
+    except Exception as error:
+        message = (
+            "Failed to migrate config to app-data location "
+            f"({type(error).__name__}); original config was not deleted"
+        )
+        log_debug(message)
+        try:
+            if "temporary_path" in locals() and temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False, message
+
+
+def _atomic_write_text(path, text):
+    """Write text via same-directory temp + fsync + os.replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _cleanup_stale_config_temp_files(path)
+    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary_path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except (OSError, AttributeError):
+                pass
+        os.replace(temporary_path, path)
+        temporary_path = None
+        return True
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                log_debug(
+                    "Config temporary-file cleanup failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+
+
+def _write_config_atomically(config_object, config_path):
+    from io import StringIO
+
+    buffer = StringIO()
+    config_object.write(buffer)
+    return _atomic_write_text(config_path, buffer.getvalue())
+
 
 DEFAULT_CONFIG_SETTINGS = {
     'scan_interval': '300',
@@ -163,7 +349,8 @@ def get_provider_api_key(config_or_settings, setting_key, credential_store=None)
 
 def load_app_config():
     """Loads configuration from INI file or creates default values."""
-    config_path = 'ocr_translator_config.ini'
+    migrate_legacy_config_if_needed()
+    config_path = str(get_app_config_path())
     config = configparser.ConfigParser()
 
     dynamic_defaults = DEFAULT_CONFIG_SETTINGS.copy()
@@ -309,19 +496,21 @@ def load_app_config():
 
     if settings_changed or not os.path.exists(config_path):
          try:
-            with open(config_path, 'w', encoding='utf-8') as f:
-                config.write(f)
-            log_debug("Config file saved/updated with defaults.")
+            if _write_config_atomically(config, config_path):
+                log_debug(f"Config file saved/updated with defaults at {config_path}")
+            else:
+                log_debug(f"Error writing config file {config_path}: atomic write returned false")
          except Exception as e:
              log_debug(f"Error writing config file {config_path}: {e}")
     return config
 
 def save_app_config(config_object):
-    config_path = 'ocr_translator_config.ini'
+    config_path = str(get_app_config_path())
     try:
         migrate_provider_api_keys_to_credentials(config_object)
-        with open(config_path, 'w', encoding='utf-8') as f:
-            config_object.write(f)
+        if not _write_config_atomically(config_object, config_path):
+            log_debug(f"Error writing settings to file: atomic write failed for {config_path}")
+            return False
         log_debug(f"Settings saved successfully to {config_path}")
         return True
     except Exception as file_err:
