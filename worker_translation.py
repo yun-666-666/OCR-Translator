@@ -119,6 +119,17 @@ def _get_failure_visibility_state(app):
     return None
 
 
+def _is_current_failure_visibility_sequence(app, sequence):
+    """Reject old in-flight replies after a newer translation was submitted."""
+    try:
+        latest_started = int(
+            getattr(app, "latest_translation_sequence_started", 0) or 0
+        )
+    except (TypeError, ValueError):
+        latest_started = 0
+    return latest_started <= 0 or sequence >= latest_started
+
+
 def _status_label_is_usable(app):
     if getattr(app, "_app_is_closing", False):
         return False
@@ -285,6 +296,8 @@ def note_transient_translation_failure(app, translation_sequence):
         sequence = 0
     if sequence <= 0:
         return False
+    if not _is_current_failure_visibility_sequence(app, sequence):
+        return False
 
     provider_key = _get_failure_visibility_provider_key(app)
     state = _ensure_failure_visibility_state(app, provider_key=provider_key)
@@ -345,6 +358,8 @@ def clear_transient_translation_failure_status(
             sequence = int(translation_sequence or 0)
         except (TypeError, ValueError):
             sequence = 0
+        if not _is_current_failure_visibility_sequence(app, sequence):
+            return False
         last_sequence = int(state.get("last_sequence") or 0)
         if sequence and last_sequence and sequence < last_sequence:
             return False

@@ -4097,6 +4097,66 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(state.get("streak"), 1)
         self.assertFalse(bool(state.get("shown")))
 
+    def test_http_503_failure_uses_transient_visibility_path(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = self._make_failure_visibility_app(
+            latest_translation_sequence_started=1,
+        )
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Chat completions request failed (HTTP 503)"
+        )
+
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            1,
+            "NMMNm",
+            0,
+        )
+
+        self.assertEqual(app._status_texts, [])
+        self.assertEqual(app.translation_failure_visibility.get("streak"), 1)
+        self.assertEqual(app.last_displayed_translation_sequence, 0)
+
+    def test_stale_inflight_failure_does_not_count_for_active_provider(self):
+        worker_threads = import_worker_threads_for_tests()
+        profiles = {
+            "translation": {"id": "profile-b", "name": "Profile B"},
+        }
+        app = self._make_failure_visibility_app(
+            latest_translation_sequence_started=2,
+            custom_ai_profiles=types.SimpleNamespace(
+                get_active_profile=lambda kind: profiles.get(kind)
+            ),
+        )
+        error_text = (
+            "Custom AI translation error: ValueError - "
+            "Streaming API response did not contain message content"
+        )
+
+        # Sequence 1 belongs to the former profile and completed after the
+        # current provider's sequence 2 was already submitted.
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            1,
+            "NMMNm",
+            0,
+        )
+        self.assertIsNone(getattr(app, "translation_failure_visibility", None))
+
+        worker_threads.process_translation_response(
+            app,
+            error_text,
+            2,
+            "NMMNm",
+            0,
+        )
+        state = app.translation_failure_visibility
+        self.assertEqual(state.get("provider_key"), "custom_ai:profile-b")
+        self.assertEqual(state.get("streak"), 1)
+
     def test_consecutive_transient_failures_show_throttled_status_hint(self):
         worker_threads = import_worker_threads_for_tests()
         app = self._make_failure_visibility_app()

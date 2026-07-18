@@ -169,9 +169,23 @@ def _is_transient_custom_ai_provider_error(value):
         "tls/ssl connection was closed",
         "ssleoferror",
         "unexpected_eof_while_reading",
+        "http 502",
+        "http 503",
+        "http 504",
+        "bad gateway",
         "read timed out",
+        "read timeout",
+        "connect timeout",
+        "connection timed out",
+        "connection refused",
         "connectionreseterror",
+        "connection reset",
         "connection aborted",
+        "remote end closed",
+        "failed to establish a new connection",
+        "temporary failure in name resolution",
+        "getaddrinfo failed",
+        "all enabled profiles are unavailable",
         "remote host forcibly closed",
         "杩滅▼涓绘満寮鸿揩鍏抽棴",
     )
@@ -912,4 +926,3 @@ def _get_api_ocr_cache_mode_key(
             parts.append(f"reasoning_effort={reasoning_contract}")
 
     return "|".join(parts)
-
