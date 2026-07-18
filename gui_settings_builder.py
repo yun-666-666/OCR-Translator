@@ -231,6 +231,7 @@ def create_settings_tab(app):
     app.ai_profile_reasoning_effort_var = tk.StringVar(
         value=_reasoning_effort_display_value(app, CUSTOM_AI_REASONING_EFFORT_LOW)
     )
+    app.ai_profile_translation_failover_var = tk.BooleanVar(value=False)
     app.ai_profile_model_values = []
 
     def get_profile_by_name(name):
@@ -288,6 +289,7 @@ def create_settings_tab(app):
                     CUSTOM_AI_REASONING_EFFORT_LOW,
                 )
             )
+            app.ai_profile_translation_failover_var.set(False)
             return
         app.ai_profile_selected_id = profile["id"]
         app.ai_profile_name_var.set(profile.get("name", ""))
@@ -308,6 +310,9 @@ def create_settings_tab(app):
                 profile.get("reasoning_effort")
                 or profile.get("model_reasoning_effort"),
             )
+        )
+        app.ai_profile_translation_failover_var.set(
+            bool(profile.get("translation_failover_enabled", False))
         )
 
     def on_profile_name_selected(event=None):
@@ -487,8 +492,25 @@ def create_settings_tab(app):
         sticky="w",
     )
 
+    app.ai_profile_translation_failover_checkbox = ttk.Checkbutton(
+        app.ai_profiles_frame,
+        text=app.ui_lang.get_label(
+            "ai_profile_translation_failover_label",
+            "Allow as translation failover",
+        ),
+        variable=app.ai_profile_translation_failover_var,
+    )
+    app.ai_profile_translation_failover_checkbox.grid(
+        row=6,
+        column=0,
+        columnspan=2,
+        padx=5,
+        pady=3,
+        sticky="w",
+    )
+
     profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
-    profile_buttons.grid(row=0, column=2, rowspan=6, padx=(10, 8), pady=6, sticky="nsew")
+    profile_buttons.grid(row=0, column=2, rowspan=7, padx=(10, 8), pady=6, sticky="nsew")
     ttk.Button(
         profile_buttons,
         text=app.ui_lang.get_label("add_btn", "Add"),

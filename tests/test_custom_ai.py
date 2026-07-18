@@ -709,6 +709,63 @@ class CustomAIProfileManagerTests(unittest.TestCase):
                 "none",
             )
 
+    def test_profile_manager_defaults_translation_failover_false_and_persists_updates(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+
+            profile = manager.add_profile(
+                name="Failover Relay",
+                base_url="https://relay.example/v1",
+                api_key="secret",
+                model="gpt-5.5",
+            )
+            self.assertFalse(profile.get("translation_failover_enabled", True))
+
+            manager.update_profile(
+                profile["id"],
+                translation_failover_enabled=True,
+            )
+            reloaded = CustomAIProfileManager(path, credential_store=store)
+            self.assertTrue(
+                reloaded.get_profile(profile["id"])["translation_failover_enabled"]
+            )
+
+            form_values = gui_builder.build_custom_ai_profile_values_from_form(
+                types.SimpleNamespace(
+                    custom_ai_profiles=reloaded,
+                    ai_profile_selected_id=profile["id"],
+                    ai_profile_name_var=DummyVar("Failover Relay"),
+                    ai_profile_url_var=DummyVar("https://relay.example/v1"),
+                    ai_profile_key_var=DummyVar("secret"),
+                    ai_profile_model_var=DummyVar("gpt-5.5"),
+                    ai_profile_translation_failover_var=DummyVar(True),
+                )
+            )
+            reloaded.update_profile(profile["id"], **form_values)
+            persisted = CustomAIProfileManager(path, credential_store=store)
+            self.assertTrue(
+                persisted.get_profile(profile["id"])["translation_failover_enabled"]
+            )
+
+            form_values_off = gui_builder.build_custom_ai_profile_values_from_form(
+                types.SimpleNamespace(
+                    custom_ai_profiles=persisted,
+                    ai_profile_selected_id=profile["id"],
+                    ai_profile_name_var=DummyVar("Failover Relay"),
+                    ai_profile_url_var=DummyVar("https://relay.example/v1"),
+                    ai_profile_key_var=DummyVar("secret"),
+                    ai_profile_model_var=DummyVar("gpt-5.5"),
+                    ai_profile_translation_failover_var=DummyVar(False),
+                )
+            )
+            persisted.update_profile(profile["id"], **form_values_off)
+            final = CustomAIProfileManager(path, credential_store=store)
+            self.assertFalse(
+                final.get_profile(profile["id"])["translation_failover_enabled"]
+            )
+
     def test_profile_manager_normalizes_invalid_reasoning_effort_to_low(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / "profiles.json"
@@ -9903,6 +9960,118 @@ class ProfileFormValuesTests(unittest.TestCase):
         self.assertEqual(values["wire_api"], "responses")
         self.assertEqual(values["reasoning_effort"], "ultra")
         self.assertEqual(values["structured_output_mode"], "strict")
+
+    def test_profile_form_values_read_translation_failover_checkbox(self):
+        selected_profile = {
+            "id": "profile-1",
+            "name": "Standby",
+            "base_url": "https://api.example/v1",
+            "api_key": "old-secret",
+            "model": "gpt-5.5",
+            "enabled": True,
+            "translation_failover_enabled": False,
+            "wire_api": "chat_completions",
+            "reasoning_effort": "low",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return selected_profile if profile_id == selected_profile["id"] else None
+
+            def list_profiles(self):
+                return [selected_profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            ai_profile_selected_id="profile-1",
+            ai_profile_name_var=DummyVar("Standby"),
+            ai_profile_url_var=DummyVar("https://api.example/v1"),
+            ai_profile_key_var=DummyVar("new-secret"),
+            ai_profile_model_var=DummyVar("gpt-5.5"),
+            ai_profile_translation_failover_var=DummyVar(True),
+        )
+
+        values = gui_builder.build_custom_ai_profile_values_from_form(app)
+
+        self.assertTrue(values["translation_failover_enabled"])
+
+    def test_profile_form_values_default_translation_failover_false_when_missing(self):
+        selected_profile = {
+            "id": "profile-1",
+            "name": "Legacy",
+            "base_url": "https://api.example/v1",
+            "api_key": "old-secret",
+            "model": "gpt-5.5",
+            "enabled": True,
+            "translation_failover_enabled": True,
+            "wire_api": "chat_completions",
+            "reasoning_effort": "low",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return selected_profile if profile_id == selected_profile["id"] else None
+
+            def list_profiles(self):
+                return [selected_profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            ai_profile_selected_id="profile-1",
+            ai_profile_name_var=DummyVar("Legacy"),
+            ai_profile_url_var=DummyVar("https://api.example/v1"),
+            ai_profile_key_var=DummyVar("new-secret"),
+            ai_profile_model_var=DummyVar("gpt-5.5"),
+            ai_profile_translation_failover_var=DummyVar(False),
+        )
+
+        values = gui_builder.build_custom_ai_profile_values_from_form(app)
+
+        self.assertFalse(values["translation_failover_enabled"])
+
+    def test_profile_form_values_default_translation_failover_false_when_checkbox_absent(self):
+        """Form stubs without the checkbox still emit the safe default."""
+        selected_profile = {
+            "id": "profile-1",
+            "name": "Legacy",
+            "base_url": "https://api.example/v1",
+            "api_key": "old-secret",
+            "model": "gpt-5.5",
+            "enabled": True,
+            "translation_failover_enabled": True,
+            "wire_api": "chat_completions",
+            "reasoning_effort": "low",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_profile(self, profile_id):
+                return selected_profile if profile_id == selected_profile["id"] else None
+
+            def list_profiles(self):
+                return [selected_profile]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            ai_profile_selected_id="profile-1",
+            ai_profile_name_var=DummyVar("Legacy"),
+            ai_profile_url_var=DummyVar("https://api.example/v1"),
+            ai_profile_key_var=DummyVar("new-secret"),
+            ai_profile_model_var=DummyVar("gpt-5.5"),
+        )
+
+        values = gui_builder.build_custom_ai_profile_values_from_form(app)
+
+        self.assertFalse(values["translation_failover_enabled"])
+
+    def test_settings_builder_wires_translation_failover_checkbox(self):
+        source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+        self.assertIn("ai_profile_translation_failover_var", source)
+        self.assertIn("translation_failover_enabled", source)
+        self.assertIn("ai_profile_translation_failover_checkbox", source)
+        self.assertIn("Allow as translation failover", source)
 
 
 class UILanguageManagerTests(unittest.TestCase):

@@ -129,6 +129,7 @@ def build_custom_ai_profile_values_from_form(app):
         "api_key": _read_var(app, "ai_profile_key_var"),
         "model": _read_var(app, "ai_profile_model_var", strip=True),
         "enabled": True,
+        "translation_failover_enabled": False,
     }
     selected_profile = _find_selected_custom_ai_profile(app)
     if selected_profile:
@@ -155,6 +156,9 @@ def build_custom_ai_profile_values_from_form(app):
             "ai_profile_structured_output_mode_var",
             strip=True,
         )
+    failover_var = getattr(app, "ai_profile_translation_failover_var", None)
+    if failover_var is not None:
+        values["translation_failover_enabled"] = bool(failover_var.get())
     return values
 
 
