@@ -2,6 +2,7 @@
 
 import concurrent.futures
 import hashlib
+import math
 import sys
 import time
 from urllib.parse import urlsplit, urlunsplit
@@ -45,6 +46,15 @@ class TranslationRequestsMixin:
         if callable(setter):
             try:
                 setter(name, value)
+            except Exception:
+                pass
+
+    def _increment_runtime_metric(self, name, amount=1):
+        metrics = getattr(self.app, "runtime_metrics", None)
+        incrementer = getattr(metrics, "increment", None)
+        if callable(incrementer):
+            try:
+                incrementer(name, amount)
             except Exception:
                 pass
 
@@ -611,6 +621,8 @@ class TranslationRequestsMixin:
 
         with self._custom_context_lock:
             context_generation = self._custom_context_generation
+        timeout_seconds = float(timeout_decision.seconds)
+        deadline_monotonic = time.monotonic() + timeout_seconds
         return {
             "inflight_key": inflight_key,
             "latency_mode": latency_mode,
@@ -619,12 +631,13 @@ class TranslationRequestsMixin:
             "reason": decision.reason,
             "p90_seconds": decision.p90_seconds,
             "sample_count": decision.sample_count,
-            "timeout_seconds": timeout_decision.seconds,
+            "timeout_seconds": timeout_seconds,
             "timeout_reason": timeout_decision.reason,
             "timeout_p90_seconds": timeout_decision.p90_seconds,
             "timeout_sample_count": timeout_decision.sample_count,
             "route_p90_seconds": timeout_decision.p90_seconds,
             "route_sample_count": timeout_decision.sample_count,
+            "deadline_monotonic": deadline_monotonic,
             "profile": dict(profile) if profile else None,
             "source_lang": source_lang,
             "target_lang": target_lang,
@@ -1011,6 +1024,9 @@ class TranslationRequestsMixin:
                 context_generation=context_generation,
                 primary_cache_params=cache_params,
                 force_no_reasoning=force_no_reasoning,
+                request_snapshot=(
+                    request_snapshot if use_request_snapshot else None
+                ),
             )
 
         cached_result = self._get_custom_ai_cached_translation(
@@ -1281,6 +1297,122 @@ class TranslationRequestsMixin:
             or self._abort_obsolete_custom_ai_failover(translation_sequence)
         )
 
+    def _resolve_custom_ai_request_deadline_monotonic(
+        self,
+        request_snapshot=None,
+        timeout_seconds=None,
+        translation_start_monotonic=None,
+    ):
+        """Return the shared request deadline, or None when no budget is frozen."""
+        snapshot_timeout = None
+        if isinstance(request_snapshot, dict):
+            raw_deadline = request_snapshot.get("deadline_monotonic")
+            try:
+                deadline = float(raw_deadline)
+            except (TypeError, ValueError):
+                deadline = None
+            if deadline is not None and math.isfinite(deadline):
+                return deadline
+            raw_timeout = request_snapshot.get("timeout_seconds", timeout_seconds)
+            try:
+                snapshot_timeout = float(raw_timeout)
+            except (TypeError, ValueError):
+                snapshot_timeout = None
+
+        budget = timeout_seconds if timeout_seconds is not None else snapshot_timeout
+        if budget is None:
+            return None
+        try:
+            budget = float(budget)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(budget) or budget < 0.0:
+            return None
+
+        try:
+            start = float(translation_start_monotonic)
+            if not math.isfinite(start):
+                start = time.monotonic()
+        except (TypeError, ValueError):
+            start = time.monotonic()
+        return start + budget
+
+    def _remaining_custom_ai_request_timeout(self, deadline_monotonic, now=None):
+        if deadline_monotonic is None:
+            return None
+        try:
+            deadline = float(deadline_monotonic)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(deadline):
+            return None
+        if now is None:
+            now = time.monotonic()
+        try:
+            current = float(now)
+        except (TypeError, ValueError):
+            current = time.monotonic()
+        return max(0.0, deadline - current)
+
+    def _custom_ai_failover_deadline_result(self):
+        return (
+            "Custom AI translation error: request deadline exhausted "
+            "before a successful translation."
+        )
+
+    def _custom_ai_failover_preflight(
+        self,
+        translation_sequence,
+        deadline_monotonic=None,
+        timeout_seconds=None,
+    ):
+        """Shared stopped/obsolete/deadline gate for safe/stream failover paths.
+
+        Returns a dict:
+        - action="abort": stop without another candidate; result is the return value
+        - action="deadline": budget exhausted; result is a diagnostic timeout message
+        - action="continue": proceed with timeout_seconds for this candidate
+        """
+        if self._abort_stopped_custom_ai_failover(translation_sequence):
+            return {"action": "abort", "result": None, "timeout_seconds": 0.0}
+        if self._custom_ai_translation_is_obsolete(translation_sequence):
+            # Reuse the existing diagnostic log path without double-checking
+            # display/start state elsewhere.
+            self._abort_obsolete_custom_ai_failover(translation_sequence)
+            self._increment_runtime_metric("fallback_obsolete_abort")
+            return {"action": "abort", "result": None, "timeout_seconds": 0.0}
+
+        if deadline_monotonic is None:
+            return {
+                "action": "continue",
+                "result": None,
+                "timeout_seconds": timeout_seconds,
+            }
+
+        remaining = self._remaining_custom_ai_request_timeout(deadline_monotonic)
+        if remaining is None:
+            return {
+                "action": "continue",
+                "result": None,
+                "timeout_seconds": timeout_seconds,
+            }
+        if remaining <= 0.0:
+            self._increment_runtime_metric("fallback_deadline_exhausted")
+            _log_debug(
+                "LATENCY: custom_ai failover stopped because request deadline "
+                f"was exhausted sequence={translation_sequence}"
+            )
+            return {
+                "action": "deadline",
+                "result": self._custom_ai_failover_deadline_result(),
+                "timeout_seconds": 0.0,
+            }
+        return {
+            "action": "continue",
+            "result": None,
+            "timeout_seconds": remaining,
+        }
+
     def _custom_ai_translate_with_failover(
         self,
         primary_profile,
@@ -1298,9 +1430,15 @@ class TranslationRequestsMixin:
         context_generation=None,
         primary_cache_params=None,
         force_no_reasoning=False,
+        request_snapshot=None,
     ):
         failures = []
         primary_id = str(primary_profile.get("id") or "").strip()
+        deadline_monotonic = self._resolve_custom_ai_request_deadline_monotonic(
+            request_snapshot=request_snapshot,
+            timeout_seconds=timeout_seconds,
+            translation_start_monotonic=translation_start_monotonic,
+        )
         candidate_states = []
         for candidate in self._get_custom_ai_failover_profiles(
             primary_profile,
@@ -1331,8 +1469,14 @@ class TranslationRequestsMixin:
             candidate_states.append((candidate, cache_params))
 
         for candidate, cache_params in candidate_states:
-            if self._abort_custom_ai_failover(translation_sequence):
-                return None
+            decision = self._custom_ai_failover_preflight(
+                translation_sequence,
+                deadline_monotonic=deadline_monotonic,
+                timeout_seconds=timeout_seconds,
+            )
+            if decision["action"] != "continue":
+                return decision["result"]
+            candidate_timeout = decision["timeout_seconds"]
             cooldown_seconds = self._custom_ai_profile_cooldown_seconds(candidate)
             if cooldown_seconds > 0:
                 _log_debug(
@@ -1346,6 +1490,7 @@ class TranslationRequestsMixin:
                 candidate,
                 "translation",
             )
+            self._increment_runtime_metric("fallback_candidates_started")
             try:
                 translated_text, usage, duration = self.custom_ai_provider.translate(
                     candidate,
@@ -1361,7 +1506,7 @@ class TranslationRequestsMixin:
                         if latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM
                         else None
                     ),
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=candidate_timeout,
                 )
             except Exception as error:
                 error_text = self._sanitize_custom_ai_profile_error(
@@ -1387,10 +1532,13 @@ class TranslationRequestsMixin:
                     f"provider={candidate.get('name', 'Custom AI')} "
                     f"{type(error).__name__} - {error_text}"
                 )
-                if self._abort_custom_ai_failover(
-                    translation_sequence
-                ):
-                    return None
+                decision = self._custom_ai_failover_preflight(
+                    translation_sequence,
+                    deadline_monotonic=deadline_monotonic,
+                    timeout_seconds=timeout_seconds,
+                )
+                if decision["action"] != "continue":
+                    return decision["result"]
                 continue
 
             if translated_text and not self._is_error_message(translated_text):

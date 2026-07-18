@@ -10613,6 +10613,266 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
         finally:
             handler.close()
 
+    def test_failover_candidates_share_request_deadline_budget(self):
+        handler, primary, fallback = self._make_handler()
+        from runtime_metrics import RuntimeMetrics
+
+        handler.app.runtime_metrics = RuntimeMetrics()
+        try:
+            observed_timeouts = []
+            clock = {"now": 1000.0}
+
+            def translate(profile, *_args, **kwargs):
+                observed_timeouts.append(
+                    (profile["id"], kwargs.get("timeout_seconds"))
+                )
+                if profile["id"] == primary["id"]:
+                    clock["now"] += 6.0
+                    raise TimeoutError("primary read timed out")
+                return "fallback translation", {}, 0.01
+
+            handler.custom_ai_provider.translate = Mock(side_effect=translate)
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                result = handler._custom_ai_translate(
+                    "source",
+                    clock["now"],
+                    timeout_seconds=10.0,
+                    request_snapshot={
+                        "profile": primary,
+                        "source_lang": "en",
+                        "target_lang": "zh-CN",
+                        "cache_params": {
+                            "context": (),
+                            "keep_linebreaks": False,
+                            "custom_prompt": "",
+                        },
+                        "latency_mode": "safe",
+                        "configured_latency_mode": "safe",
+                        "force_no_reasoning": False,
+                        "timeout_seconds": 10.0,
+                        "deadline_monotonic": 1010.0,
+                        "context_generation": 0,
+                    },
+                )
+
+            self.assertEqual(result, "fallback translation")
+            self.assertEqual(
+                observed_timeouts,
+                [
+                    (primary["id"], 10.0),
+                    (fallback["id"], 4.0),
+                ],
+            )
+            counters = handler.app.runtime_metrics.snapshot()["counters"]
+            self.assertEqual(counters.get("fallback_candidates_started"), 2)
+        finally:
+            handler.close()
+
+    def test_failover_skips_remaining_candidates_when_deadline_is_exhausted(self):
+        handler, primary, _fallback = self._make_handler()
+        from runtime_metrics import RuntimeMetrics
+
+        handler.app.runtime_metrics = RuntimeMetrics()
+        try:
+            attempted_profiles = []
+            clock = {"now": 1000.0}
+
+            def translate(profile, *_args, **kwargs):
+                attempted_profiles.append(
+                    (profile["id"], kwargs.get("timeout_seconds"))
+                )
+                clock["now"] = 1010.5
+                raise TimeoutError("primary consumed the full budget")
+
+            handler.custom_ai_provider.translate = Mock(side_effect=translate)
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                result = handler._custom_ai_translate(
+                    "source",
+                    clock["now"],
+                    timeout_seconds=10.0,
+                    request_snapshot={
+                        "profile": primary,
+                        "source_lang": "en",
+                        "target_lang": "zh-CN",
+                        "cache_params": {
+                            "context": (),
+                            "keep_linebreaks": False,
+                            "custom_prompt": "",
+                        },
+                        "latency_mode": "safe",
+                        "configured_latency_mode": "safe",
+                        "force_no_reasoning": False,
+                        "timeout_seconds": 10.0,
+                        "deadline_monotonic": 1010.0,
+                        "context_generation": 0,
+                    },
+                )
+
+            self.assertIsInstance(result, str)
+            self.assertIn("deadline", result.lower())
+            self.assertNotIn("primary-secret", result)
+            self.assertNotIn("fallback-secret", result)
+            self.assertEqual(attempted_profiles, [(primary["id"], 10.0)])
+            counters = handler.app.runtime_metrics.snapshot()["counters"]
+            self.assertEqual(counters.get("fallback_candidates_started"), 1)
+            self.assertEqual(counters.get("fallback_deadline_exhausted"), 1)
+        finally:
+            handler.close()
+
+    def test_failover_does_not_start_first_candidate_after_deadline(self):
+        handler, primary, _fallback = self._make_handler()
+        from runtime_metrics import RuntimeMetrics
+
+        handler.app.runtime_metrics = RuntimeMetrics()
+        try:
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+            clock = {"now": 1010.0}
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                result = handler._custom_ai_translate(
+                    "source",
+                    1000.0,
+                    timeout_seconds=10.0,
+                    request_snapshot={
+                        "profile": primary,
+                        "source_lang": "en",
+                        "target_lang": "zh-CN",
+                        "cache_params": {
+                            "context": (),
+                            "keep_linebreaks": False,
+                            "custom_prompt": "",
+                        },
+                        "latency_mode": "safe",
+                        "configured_latency_mode": "safe",
+                        "force_no_reasoning": False,
+                        "timeout_seconds": 10.0,
+                        "deadline_monotonic": 1010.0,
+                        "context_generation": 0,
+                    },
+                )
+
+            self.assertIsInstance(result, str)
+            self.assertIn("deadline", result.lower())
+            handler.custom_ai_provider.translate.assert_not_called()
+            counters = handler.app.runtime_metrics.snapshot()["counters"]
+            self.assertEqual(counters.get("fallback_candidates_started"), None)
+            self.assertEqual(counters.get("fallback_deadline_exhausted"), 1)
+        finally:
+            handler.close()
+
+    def test_failover_total_wait_stays_within_shared_deadline(self):
+        handler, primary, fallback = self._make_handler()
+        from runtime_metrics import RuntimeMetrics
+
+        handler.app.runtime_metrics = RuntimeMetrics()
+        try:
+            third = {
+                "id": "third",
+                "name": "Third relay",
+                "base_url": "https://third.example/v1",
+                "api_key": "third-secret",
+                "model": "grok",
+                "wire_api": "chat_completions",
+                "enabled": True,
+                "translation_failover_enabled": True,
+            }
+            primary_profile = primary
+            fallback_profile = fallback
+
+            class Profiles:
+                def get_active_profile(self, kind):
+                    return primary_profile
+
+                def list_profiles(self, kind=None, enabled_only=False):
+                    profiles = [primary_profile, fallback_profile, third]
+                    if enabled_only:
+                        return [profile for profile in profiles if profile["enabled"]]
+                    return profiles
+
+            handler.app.custom_ai_profiles = Profiles()
+            attempted = []
+            clock = {"now": 5000.0}
+
+            def translate(profile, *_args, **kwargs):
+                attempted.append((profile["id"], kwargs.get("timeout_seconds")))
+                clock["now"] += float(kwargs.get("timeout_seconds") or 0.0)
+                raise TimeoutError(f"{profile['id']} timed out")
+
+            handler.custom_ai_provider.translate = Mock(side_effect=translate)
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                start = clock["now"]
+                result = handler._custom_ai_translate(
+                    "source",
+                    start,
+                    timeout_seconds=10.0,
+                    request_snapshot={
+                        "profile": primary_profile,
+                        "source_lang": "en",
+                        "target_lang": "zh-CN",
+                        "cache_params": {
+                            "context": (),
+                            "keep_linebreaks": False,
+                            "custom_prompt": "",
+                        },
+                        "latency_mode": "safe",
+                        "configured_latency_mode": "safe",
+                        "force_no_reasoning": False,
+                        "timeout_seconds": 10.0,
+                        "deadline_monotonic": start + 10.0,
+                        "context_generation": 0,
+                    },
+                )
+                elapsed = clock["now"] - start
+
+            self.assertIsInstance(result, str)
+            self.assertIn("deadline", result.lower())
+            self.assertLessEqual(elapsed, 10.05)
+            self.assertEqual(
+                [profile_id for profile_id, _timeout in attempted],
+                [primary["id"]],
+            )
+            self.assertEqual(attempted[0][1], 10.0)
+        finally:
+            handler.close()
+
+    def test_request_snapshot_freezes_deadline_monotonic(self):
+        handler, primary, _fallback = self._make_handler()
+        try:
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                return_value=42.5,
+            ):
+                snapshot = handler.get_custom_ai_translation_request_snapshot(
+                    "deadline freeze source",
+                    commit=False,
+                )
+            self.assertIsNotNone(snapshot)
+            self.assertIn("deadline_monotonic", snapshot)
+            self.assertAlmostEqual(
+                snapshot["deadline_monotonic"],
+                42.5 + float(snapshot["timeout_seconds"]),
+                places=6,
+            )
+        finally:
+            handler.close()
+
     def test_custom_ai_translation_uses_fallback_cache_without_network_call(self):
         handler, _primary, fallback = self._make_handler()
         try:
