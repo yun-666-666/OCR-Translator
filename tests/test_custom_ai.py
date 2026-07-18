@@ -6975,6 +6975,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "base_url": "https://second.example/v1",
             "api_key": "second-super-secret",
             "model": "demo",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -8395,6 +8396,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 "api_key": "backup-secret",
                 "model": "shared-model",
                 "reasoning_effort": "medium",
+                "translation_failover_enabled": True,
             },
         ]
 
@@ -8447,6 +8449,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 "api_key": "backup-secret",
                 "model": "shared-model",
                 "reasoning_effort": "medium",
+                "translation_failover_enabled": True,
             },
         ]
 
@@ -9067,6 +9070,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "base_url": "https://fast.example/v1",
             "api_key": "fast-key",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
         other_model = {
             "id": "other",
@@ -9131,6 +9135,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "wire_api": "responses",
             "model_reasoning_effort": "high",
             "structured_output_mode": "auto",
+            "translation_failover_enabled": True,
         }
         different_wire = {
             "id": "different-wire",
@@ -9200,6 +9205,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "id": "healthy",
             "base_url": "https://healthy.example/v1",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -9248,6 +9254,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "base_url": "https://healthy.example/v1",
             "api_key": "healthy-key",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -9469,6 +9476,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "id": "alternate",
             "base_url": "https://other.example/v1",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -9552,6 +9560,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "id": "alternate",
             "base_url": "https://alternate.example/v1",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -9593,6 +9602,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "base_url": "https://slow.example/v1",
             "api_key": "slow-key",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -9684,6 +9694,7 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             "base_url": "https://second.example/v1",
             "api_key": "second-key",
             "model": "same-model",
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -10188,6 +10199,7 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
             "model": "grok",
             "wire_api": "chat_completions",
             "enabled": True,
+            "translation_failover_enabled": True,
         }
 
         class Profiles:
@@ -10378,3 +10390,415 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TranslationFailoverEligibilityAndRaceHealthTests(unittest.TestCase):
+    def _profiles(self, profiles, active=None):
+        active_profile = active or profiles[0]
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active_profile
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                items = list(profiles)
+                if enabled_only:
+                    return [p for p in items if p.get("enabled", True)]
+                return items
+
+        return Profiles()
+
+    def _handler(self, profiles, active=None, latency_mode="safe"):
+        app = types.SimpleNamespace(
+            custom_ai_profiles=self._profiles(profiles, active=active),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar(latency_mode),
+            translation_model_var=DummyVar("custom_ai"),
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            is_running=True,
+        )
+        return TranslationHandler(app)
+
+    def test_enabled_without_opt_in_is_excluded_from_failover_and_race(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": False,
+        }
+        enabled_no_opt_in = {
+            "id": "enabled-no-opt-in",
+            "name": "Enabled only",
+            "base_url": "https://no-opt-in.example/v1",
+            "api_key": "no-opt-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": False,
+        }
+        opted_in = {
+            "id": "opted-in",
+            "name": "Opted in",
+            "base_url": "https://opted-in.example/v1",
+            "api_key": "opt-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+        handler = self._handler([active, enabled_no_opt_in, opted_in], active=active)
+        try:
+            failover_ids = [
+                profile["id"]
+                for profile in handler._get_custom_ai_failover_profiles(active)
+            ]
+            race_ids = [
+                profile["id"]
+                for profile in handler._get_custom_ai_race_profiles(active)
+            ]
+            self.assertEqual(failover_ids, ["active", "opted-in"])
+            self.assertEqual(race_ids, ["active", "opted-in"])
+            self.assertNotIn("enabled-no-opt-in", failover_ids)
+            self.assertNotIn("enabled-no-opt-in", race_ids)
+        finally:
+            handler.close()
+
+    def test_active_translation_profile_participates_without_opt_in(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": False,
+        }
+        handler = self._handler([active], active=active)
+        try:
+            failover = handler._get_custom_ai_failover_profiles(active)
+            race = handler._get_custom_ai_race_profiles(active)
+            self.assertEqual([p["id"] for p in failover], ["active"])
+            self.assertEqual([p["id"] for p in race], ["active"])
+        finally:
+            handler.close()
+
+    def test_explicit_standby_participates_in_failover_and_race(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "enabled": True,
+        }
+        standby = {
+            "id": "standby",
+            "name": "Standby",
+            "base_url": "https://standby.example/v1",
+            "api_key": "standby-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+        handler = self._handler([active, standby], active=active)
+        try:
+            self.assertEqual(
+                [p["id"] for p in handler._get_custom_ai_failover_profiles(active)],
+                ["active", "standby"],
+            )
+            self.assertEqual(
+                [p["id"] for p in handler._get_custom_ai_race_profiles(active)],
+                ["active", "standby"],
+            )
+        finally:
+            handler.close()
+
+    def test_race_failure_marks_profile_cooldown(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+        }
+        standby = {
+            "id": "standby",
+            "name": "Standby",
+            "base_url": "https://standby.example/v1",
+            "api_key": "standby-key",
+            "model": "same-model",
+            "translation_failover_enabled": True,
+        }
+        handler = self._handler([active, standby], active=active, latency_mode="race")
+        try:
+            def translate(profile, *args, **kwargs):
+                if profile["id"] == "active":
+                    raise ValueError("Chat completions request failed (HTTP 502)")
+                return "ok", {}, 0.01
+
+            handler.custom_ai_provider.translate = Mock(side_effect=translate)
+            with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+                result = handler._custom_ai_translate_race(
+                    active,
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    [],
+                    False,
+                )
+            self.assertEqual(result[0], "ok")
+            # Allow race done-callbacks to settle health updates.
+            deadline = time.monotonic() + 1.0
+            remaining = 0.0
+            while time.monotonic() < deadline:
+                with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+                    remaining = handler.custom_ai_provider.get_cooldown_remaining(
+                        active,
+                        request_kind="translation",
+                    )
+                if remaining > 0.0:
+                    break
+                time.sleep(0.01)
+            self.assertGreater(remaining, 0.0)
+            with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+                self.assertEqual(
+                    handler.custom_ai_provider.get_cooldown_remaining(
+                        standby,
+                        request_kind="translation",
+                    ),
+                    0.0,
+                )
+        finally:
+            handler.close()
+
+    def test_race_success_clears_failure_streak(self):
+        profile = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+        }
+        handler = self._handler([profile], active=profile, latency_mode="race")
+        try:
+            provider = handler.custom_ai_provider
+            for now in (100.0, 101.0):
+                seq = provider.begin_profile_request(profile, request_kind="translation")
+                with patch("custom_ai_transport.time.monotonic", return_value=now):
+                    provider.mark_profile_unavailable(
+                        profile,
+                        "HTTP 502",
+                        seconds=15.0,
+                        request_kind="translation",
+                        request_sequence=seq,
+                        exponential_backoff=True,
+                    )
+            provider.translate = Mock(return_value=("ok", {}, 0.01))
+            with patch("custom_ai_transport.time.monotonic", return_value=102.0):
+                result = handler._custom_ai_translate_race(
+                    profile,
+                    "Hello",
+                    "en",
+                    "zh-CN",
+                    [],
+                    False,
+                )
+            self.assertEqual(result[0], "ok")
+            reset_seq = provider.begin_profile_request(
+                profile,
+                request_kind="translation",
+            )
+            with patch("custom_ai_transport.time.monotonic", return_value=103.0):
+                reset_cooldown = provider.mark_profile_unavailable(
+                    profile,
+                    "HTTP 502",
+                    seconds=15.0,
+                    request_kind="translation",
+                    request_sequence=reset_seq,
+                    exponential_backoff=True,
+                )
+            self.assertEqual(reset_cooldown, 15.0)
+        finally:
+            handler.close()
+
+    def test_stale_race_health_does_not_override_newer_state(self):
+        profile = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+        }
+        handler = self._handler([profile], active=profile)
+        try:
+            provider = handler.custom_ai_provider
+            old_seq = provider.begin_profile_request(profile, request_kind="translation")
+            new_seq = provider.begin_profile_request(profile, request_kind="translation")
+            provider.mark_profile_available(
+                profile,
+                request_kind="translation",
+                request_sequence=new_seq,
+            )
+            with patch("custom_ai_transport.time.monotonic", return_value=100.0):
+                provider.mark_profile_unavailable(
+                    profile,
+                    "HTTP 502",
+                    seconds=15.0,
+                    request_kind="translation",
+                    request_sequence=old_seq,
+                    exponential_backoff=True,
+                )
+            with patch("custom_ai_transport.time.monotonic", return_value=101.0):
+                self.assertEqual(
+                    provider.get_cooldown_remaining(
+                        profile,
+                        request_kind="translation",
+                    ),
+                    0.0,
+                )
+        finally:
+            handler.close()
+
+    def test_strict_transient_errors_use_exponential_backoff(self):
+        handler = TranslationHandler(object())
+        try:
+            for error_text in (
+                "Chat completions request failed (HTTP 502)",
+                "HTTPSConnectionPool read timed out",
+                "Connection refused by peer",
+            ):
+                with self.subTest(error_text=error_text):
+                    cooldown, exponential = handler._classify_custom_ai_profile_failure(
+                        error_text
+                    )
+                    self.assertEqual(cooldown, 15.0)
+                    self.assertTrue(exponential)
+                    self.assertTrue(
+                        handler._custom_ai_profile_failure_uses_exponential_backoff(
+                            error_text
+                        )
+                    )
+        finally:
+            handler.close()
+
+    def test_business_gateway_or_connection_text_does_not_use_exponential_backoff(self):
+        handler = TranslationHandler(object())
+        try:
+            cases = (
+                "business gateway mapping rejected by policy",
+                "connection policy denied by router config",
+                "unclassified provider failure",
+            )
+            for error_text in cases:
+                with self.subTest(error_text=error_text):
+                    cooldown, exponential = handler._classify_custom_ai_profile_failure(
+                        error_text
+                    )
+                    self.assertFalse(exponential)
+                    self.assertFalse(
+                        handler._custom_ai_profile_failure_uses_exponential_backoff(
+                            error_text
+                        )
+                    )
+                    self.assertEqual(cooldown, 30.0)
+        finally:
+            handler.close()
+
+    def test_profile_dedupe_and_cache_isolation_still_work_with_opt_in(self):
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://same.example/v1/",
+            "api_key": "active-key",
+            "model": "same-model",
+            "enabled": True,
+        }
+        duplicate = {
+            "id": "duplicate",
+            "name": "Duplicate",
+            "base_url": "https://same.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+        fallback = {
+            "id": "fallback",
+            "name": "Fallback",
+            "base_url": "https://fallback.example/v1",
+            "api_key": "fallback-key",
+            "model": "same-model",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+        handler = self._handler([active, duplicate, fallback], active=active)
+        try:
+            race_ids = [
+                profile["id"]
+                for profile in handler._get_custom_ai_race_profiles(active)
+            ]
+            self.assertEqual(race_ids, ["active", "fallback"])
+
+            cache_params = handler._cache_params_for_profile(
+                fallback,
+                custom_prompt="",
+                keep_linebreaks=False,
+                context=[],
+                latency_mode="safe",
+            )
+            handler.unified_cache.store(
+                "source",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                "cached fallback translation",
+                **cache_params,
+            )
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+            result = handler._custom_ai_translate("source", time.monotonic())
+            self.assertEqual(result, "cached fallback translation")
+            handler.custom_ai_provider.translate.assert_not_called()
+        finally:
+            handler.close()
+
+    def test_legacy_profiles_default_translation_failover_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "profiles.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "profiles": [
+                            {
+                                "id": "legacy",
+                                "name": "Legacy",
+                                "base_url": "https://legacy.example/v1",
+                                "model": "legacy-model",
+                                "api_key": "legacy-secret",
+                                "enabled": True,
+                            }
+                        ],
+                        "active_translation_profile_id": "legacy",
+                        "active_ocr_profile_id": "legacy",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = CustomAIProfileManager(
+                path=str(path),
+                credential_store=FakeCredentialStore(),
+            )
+            profile = manager.get_profile("legacy")
+            self.assertIsNotNone(profile)
+            self.assertFalse(profile.get("translation_failover_enabled", True))
+            serialized = manager.serialize_for_disk()
+            self.assertFalse(
+                serialized["profiles"][0]["translation_failover_enabled"]
+            )

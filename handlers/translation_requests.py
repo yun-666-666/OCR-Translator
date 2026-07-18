@@ -187,7 +187,13 @@ class TranslationRequestsMixin:
                 pass
         return error_text
 
-    def _custom_ai_profile_failure_cooldown_seconds(self, error_text):
+    def _classify_custom_ai_profile_failure(self, error_text):
+        """Return (cooldown_seconds, exponential_backoff) for a profile failure.
+
+        Cooldown duration and exponential-backoff decisions share this single
+        classification source so the two cannot drift. Bare substrings such as
+        "gateway" or "connection" are intentionally not treated as transient.
+        """
         lowered = str(error_text or "").strip().lower()
         permanent_markers = (
             "http 401",
@@ -200,32 +206,7 @@ class TranslationRequestsMixin:
             "余额不足",
         )
         if any(marker in lowered for marker in permanent_markers):
-            return 300.0
-
-        transient_markers = (
-            "timed out",
-            "timeout",
-            "connection",
-            "non-json",
-            "non json",
-            "bad gateway",
-            "gateway",
-            "http 500",
-            "http 502",
-            "http 503",
-            "http 504",
-        )
-        if any(marker in lowered for marker in transient_markers):
-            return 15.0
-
-        empty_markers = (
-            "did not contain message content",
-            "returned an invalid translation",
-            "empty response",
-            "empty content",
-        )
-        if any(marker in lowered for marker in empty_markers):
-            return 10.0
+            return 300.0, False
 
         deterministic_markers = (
             "http 404",
@@ -234,25 +215,54 @@ class TranslationRequestsMixin:
             "invalid endpoint",
         )
         if any(marker in lowered for marker in deterministic_markers):
-            return 300.0
-        return 30.0
+            return 300.0, False
 
-    def _custom_ai_profile_failure_uses_exponential_backoff(self, error_text):
-        lowered = str(error_text or "").strip().lower()
-        transient_markers = (
-            "timed out",
-            "timeout",
-            "connection",
-            "non-json",
-            "non json",
-            "bad gateway",
-            "gateway",
-            "http 500",
+        empty_markers = (
+            "did not contain message content",
+            "returned an invalid translation",
+            "empty response",
+            "empty content",
+        )
+        if any(marker in lowered for marker in empty_markers):
+            return 10.0, False
+
+        strict_transient_markers = (
             "http 502",
             "http 503",
             "http 504",
+            "bad gateway",
+            "read timed out",
+            "read timeout",
+            "connect timeout",
+            "connection timed out",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "remote end closed",
+            "failed to establish a new connection",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+            "getaddrinfo failed",
         )
-        return any(marker in lowered for marker in transient_markers)
+        if any(marker in lowered for marker in strict_transient_markers):
+            return 15.0, True
+
+        soft_transient_markers = (
+            "http 500",
+            "non-json",
+            "non json",
+        )
+        if any(marker in lowered for marker in soft_transient_markers):
+            return 15.0, False
+
+        return 30.0, False
+
+    def _custom_ai_profile_failure_cooldown_seconds(self, error_text):
+        return self._classify_custom_ai_profile_failure(error_text)[0]
+
+    def _custom_ai_profile_failure_uses_exponential_backoff(self, error_text):
+        return self._classify_custom_ai_profile_failure(error_text)[1]
 
     def _begin_custom_ai_profile_request(self, profile, request_kind):
         begin = getattr(
@@ -1127,26 +1137,60 @@ class TranslationRequestsMixin:
         )
         return self._format_dialog_text(translated_api_text)
 
-    def _get_custom_ai_failover_profiles(
+    def _is_custom_ai_translation_failover_eligible(
+        self,
+        profile,
+        active_profile,
+    ):
+        """Return whether a profile may join translation failover/race.
+
+        The active translation profile is always eligible. Other profiles must
+        be enabled and explicitly opt in via translation_failover_enabled.
+        """
+        if not isinstance(profile, dict) or not profile.get("enabled", True):
+            return False
+        active = active_profile if isinstance(active_profile, dict) else {}
+        profile_id = str(profile.get("id") or "").strip()
+        active_id = str(active.get("id") or "").strip()
+        if profile_id and active_id and profile_id == active_id:
+            return True
+        if not profile_id and not active_id and profile is active_profile:
+            return True
+        return bool(profile.get("translation_failover_enabled", False))
+
+    def _iter_custom_ai_translation_failover_source_profiles(
         self,
         active_profile,
-        force_no_reasoning=None,
     ):
-        profiles = [active_profile]
+        """Yield active profile first, then enabled profiles from storage."""
+        if isinstance(active_profile, dict):
+            yield active_profile
         try:
-            profiles.extend(
-                self.app.custom_ai_profiles.list_profiles(enabled_only=True)
-            )
+            listed = self.app.custom_ai_profiles.list_profiles(enabled_only=True)
         except Exception as error:
             _log_debug(
                 "Custom AI failover profile lookup failed: "
                 f"{type(error).__name__} - {error}"
             )
+            listed = []
+        for profile in listed:
+            if isinstance(profile, dict):
+                yield profile
 
+    def _get_custom_ai_failover_profiles(
+        self,
+        active_profile,
+        force_no_reasoning=None,
+    ):
         candidates = []
         seen = set()
-        for candidate in profiles:
-            if not isinstance(candidate, dict) or not candidate.get("enabled", True):
+        for candidate in self._iter_custom_ai_translation_failover_source_profiles(
+            active_profile
+        ):
+            if not self._is_custom_ai_translation_failover_eligible(
+                candidate,
+                active_profile,
+            ):
                 continue
             candidate = self._translation_request_profile(
                 candidate,
@@ -1419,6 +1463,50 @@ class TranslationRequestsMixin:
             "requests are paused until a profile cooldown expires."
         )
 
+    def _settle_custom_ai_race_health(
+        self,
+        future,
+        profile,
+        request_sequence,
+        identity=None,
+    ):
+        """Update profile health for a finished race candidate.
+
+        Losers cannot cancel already-issued HTTP requests; they only update
+        health after completion. Older request sequences cannot overwrite newer
+        health events because transport compares request_sequence.
+        """
+        if identity is not None:
+            self._release_custom_ai_race_profile(identity)
+        if future.cancelled():
+            return
+        try:
+            exc = future.exception()
+        except Exception:
+            return
+        if exc is not None:
+            if isinstance(exc, concurrent.futures.CancelledError):
+                return
+            error_text = self._sanitize_custom_ai_profile_error(exc, profile)
+            self._mark_custom_ai_profile_failure(
+                profile,
+                error_text,
+                request_kind="translation",
+                request_sequence=request_sequence,
+            )
+            return
+        available = getattr(
+            self.custom_ai_provider,
+            "mark_profile_available",
+            None,
+        )
+        if callable(available):
+            available(
+                profile,
+                request_kind="translation",
+                request_sequence=request_sequence,
+            )
+
     def _custom_ai_translate_race(
         self,
         active_profile,
@@ -1439,6 +1527,10 @@ class TranslationRequestsMixin:
         )
         if len(candidates) <= 1:
             candidate = candidates[0] if candidates else active_profile
+            request_sequence = self._begin_custom_ai_profile_request(
+                candidate,
+                "translation",
+            )
             try:
                 translated, usage, duration = (
                     self.custom_ai_provider.translate(
@@ -1458,10 +1550,27 @@ class TranslationRequestsMixin:
                     error,
                     candidate,
                 )
+                self._mark_custom_ai_profile_failure(
+                    candidate,
+                    error_text,
+                    request_kind="translation",
+                    request_sequence=request_sequence,
+                )
                 raise ValueError(
                     f"{candidate.get('name', 'Custom AI')}: "
                     f"{error_text}"
                 ) from None
+            available = getattr(
+                self.custom_ai_provider,
+                "mark_profile_available",
+                None,
+            )
+            if callable(available):
+                available(
+                    candidate,
+                    request_kind="translation",
+                    request_sequence=request_sequence,
+                )
             self._note_custom_ai_race_winner(candidate)
             return (
                 translated,
@@ -1487,6 +1596,10 @@ class TranslationRequestsMixin:
         try:
             for candidate in candidates:
                 identity = self._custom_ai_race_profile_identity(candidate)
+                request_sequence = self._begin_custom_ai_profile_request(
+                    candidate,
+                    "translation",
+                )
                 with self._custom_race_state_lock:
                     self._custom_race_inflight_profiles.add(identity)
                 try:
@@ -1505,15 +1618,23 @@ class TranslationRequestsMixin:
                 except Exception:
                     self._release_custom_ai_race_profile(identity)
                     raise
-                future_to_profile[future] = candidate
+                future_to_profile[future] = (candidate, request_sequence)
                 future.add_done_callback(
-                    lambda _future, race_identity=identity: (
-                        self._release_custom_ai_race_profile(race_identity)
+                    lambda settled_future,
+                    race_profile=candidate,
+                    race_sequence=request_sequence,
+                    race_identity=identity: (
+                        self._settle_custom_ai_race_health(
+                            settled_future,
+                            race_profile,
+                            race_sequence,
+                            identity=race_identity,
+                        )
                     )
                 )
 
             for future in concurrent.futures.as_completed(future_to_profile):
-                candidate = future_to_profile[future]
+                candidate, _request_sequence = future_to_profile[future]
                 try:
                     translated, usage, duration = future.result()
                 except Exception as e:
@@ -1532,9 +1653,6 @@ class TranslationRequestsMixin:
                     f"duration={duration:.3f}s candidates={len(candidates)}"
                 )
                 self._note_custom_ai_race_winner(candidate)
-                self._release_custom_ai_race_profile(
-                    self._custom_ai_race_profile_identity(candidate)
-                )
                 executor.shutdown(wait=False, cancel_futures=True)
                 shutdown_started = True
                 return (
@@ -1572,6 +1690,11 @@ class TranslationRequestsMixin:
         def add_candidate(profile):
             if not isinstance(profile, dict):
                 return
+            if not self._is_custom_ai_translation_failover_eligible(
+                profile,
+                active_profile,
+            ):
+                return
             profile = self._translation_request_profile(
                 profile,
                 force_no_reasoning=force_no_reasoning,
@@ -1584,28 +1707,20 @@ class TranslationRequestsMixin:
             seen.add(identity)
             candidates.append(profile)
 
-        add_candidate(active_profile)
-        try:
-            profiles = self.app.custom_ai_profiles.list_profiles("translation", enabled_only=True)
-        except TypeError:
-            profiles = self.app.custom_ai_profiles.list_profiles(enabled_only=True)
-        except Exception as e:
-            _log_debug(f"Custom AI race profile list failed: {e}")
-            profiles = []
-        for profile in profiles:
+        for profile in self._iter_custom_ai_translation_failover_source_profiles(
+            active_profile
+        ):
             add_candidate(profile)
 
-        cooldown_getter = getattr(
-            self.custom_ai_provider,
-            "get_cooldown_remaining",
-            None,
-        )
         eligible_candidates = candidates
-        if callable(cooldown_getter):
+        if candidates:
             healthy_candidates = []
             for candidate in candidates:
                 try:
-                    remaining = max(0.0, float(cooldown_getter(candidate)))
+                    remaining = self._custom_ai_profile_cooldown_seconds(
+                        candidate,
+                        request_kind="translation",
+                    )
                 except Exception as cooldown_error:
                     _log_debug(
                         "Custom AI race cooldown check failed: "

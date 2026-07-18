@@ -183,6 +183,9 @@ class CustomAIProfileManager:
                 "base_url": profile.get("base_url"),
                 "model": profile.get("model"),
                 "enabled": bool(profile.get("enabled", True)),
+                "translation_failover_enabled": bool(
+                    profile.get("translation_failover_enabled", False)
+                ),
                 "wire_api": normalize_custom_ai_wire_api(profile.get("wire_api")),
                 "structured_output_mode": normalize_custom_ai_structured_output_mode(
                     profile.get("structured_output_mode")
@@ -267,17 +270,27 @@ class CustomAIProfileManager:
             if profile_id in seen_ids:
                 profile_id = str(uuid.uuid4())
             seen_ids.add(profile_id)
+            translation_failover_enabled = bool(
+                profile.get("translation_failover_enabled", False)
+            )
             sanitized = {
                 "id": profile_id,
                 "name": str(profile.get("name") or "Custom AI").strip() or "Custom AI",
                 "base_url": str(profile.get("base_url") or "").strip(),
                 "model": str(profile.get("model") or "").strip(),
                 "enabled": bool(profile.get("enabled", True)),
+                "translation_failover_enabled": translation_failover_enabled,
                 "wire_api": normalize_custom_ai_wire_api(profile.get("wire_api")),
                 "structured_output_mode": normalize_custom_ai_structured_output_mode(
                     profile.get("structured_output_mode")
                 ),
             }
+            if (
+                "translation_failover_enabled" not in profile
+                or profile.get("translation_failover_enabled")
+                is not translation_failover_enabled
+            ):
+                should_save = True
             plaintext_key = str(profile.get("api_key") or "")
             credential_ref = str(profile.get("api_key_ref") or profile.get("credential_ref") or "").strip()
             if plaintext_key:
@@ -389,6 +402,7 @@ class CustomAIProfileManager:
         wire_api=CUSTOM_AI_WIRE_API_CHAT_COMPLETIONS,
         reasoning_effort=CUSTOM_AI_REASONING_EFFORT_LOW,
         structured_output_mode=CUSTOM_AI_STRUCTURED_OUTPUT_AUTO,
+        translation_failover_enabled=False,
     ):
         if kind is not None:
             self._validate_kind(kind)
@@ -401,6 +415,7 @@ class CustomAIProfileManager:
             "api_key": str(api_key),
             "model": str(model).strip(),
             "enabled": bool(enabled),
+            "translation_failover_enabled": bool(translation_failover_enabled),
             "wire_api": normalize_custom_ai_wire_api(wire_api),
             "structured_output_mode": normalize_custom_ai_structured_output_mode(
                 structured_output_mode
@@ -450,6 +465,7 @@ class CustomAIProfileManager:
                 "api_key",
                 "model",
                 "enabled",
+                "translation_failover_enabled",
                 "wire_api",
                 "reasoning_effort",
                 "model_reasoning_effort",
@@ -474,6 +490,9 @@ class CustomAIProfileManager:
             ).strip()
             staged_profile["enabled"] = bool(
                 staged_profile.get("enabled", True)
+            )
+            staged_profile["translation_failover_enabled"] = bool(
+                staged_profile.get("translation_failover_enabled", False)
             )
             staged_profile["wire_api"] = normalize_custom_ai_wire_api(
                 staged_profile.get("wire_api")
