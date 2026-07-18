@@ -125,6 +125,58 @@ def _disable_windows_native_border(window):
         return False
 
 
+def _qt_object_is_valid(obj):
+    """Best-effort check that a PySide/Qt wrapper still owns a live C++ object."""
+    try:
+        from shiboken6 import isValid as _shiboken_is_valid
+    except Exception:
+        _shiboken_is_valid = None
+    if _shiboken_is_valid is not None:
+        try:
+            if not bool(_shiboken_is_valid(obj)):
+                return False
+        except Exception:
+            return False
+    try:
+        # Touch a cheap QObject property; deleted C++ objects raise RuntimeError.
+        # Also fails closed for non-Qt proxies if shiboken is optimistic/unavailable.
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return False
+
+
+def _tk_compat_winfo_exists(obj):
+    """Tk-compatible exists check for Qt widgets (hide != destroy)."""
+    try:
+        if bool(getattr(obj, "_tk_compat_destroyed", False)):
+            return False
+    except Exception:
+        return False
+    return _qt_object_is_valid(obj)
+
+
+def _bind_tk_compat_destroyed(obj):
+    """Track Qt destruction for Tk winfo_exists compatibility."""
+    try:
+        obj._tk_compat_destroyed = False
+    except Exception:
+        return
+
+    def _mark_destroyed(*_args):
+        try:
+            obj._tk_compat_destroyed = True
+        except Exception:
+            pass
+
+    try:
+        obj.destroyed.connect(_mark_destroyed)
+    except Exception:
+        pass
+
+
 # -----------------------
 # PySide6-backed classes
 # -----------------------
@@ -152,6 +204,7 @@ if PYSIDE6_AVAILABLE:
             self._font_bold = False
             self._outline_color = "#000000"
             self._outline_width = 0.0
+            _bind_tk_compat_destroyed(self)
             self.setup_widget()
 
         def setup_widget(self):
@@ -415,10 +468,27 @@ if PYSIDE6_AVAILABLE:
 
         # Simple compatibility wrappers mimicking tkinter Text behavior
         def winfo_exists(self):
-            return True
+            return _tk_compat_winfo_exists(self)
 
         def winfo_viewable(self):
-            return self.isVisible()
+            if not self.winfo_exists():
+                return False
+            try:
+                return bool(self.isVisible())
+            except Exception:
+                return False
+
+        def destroy(self):
+            """Tk-compatible destroy: mark gone, then delete the Qt object."""
+            self._tk_compat_destroyed = True
+            try:
+                self.hide()
+            except Exception:
+                pass
+            try:
+                self.deleteLater()
+            except Exception:
+                pass
 
         def config(self, **kwargs):
             """Enhanced config method with full tkinter Text widget compatibility"""
@@ -647,6 +717,7 @@ if PYSIDE6_AVAILABLE:
             self._last_background_style = None
             self._last_top_bar_style = None
             self._last_text_bg_color = None
+            _bind_tk_compat_destroyed(self)
 
             # Native hit-test constants for Windows
             if sys.platform == "win32":
@@ -935,17 +1006,33 @@ if PYSIDE6_AVAILABLE:
                 self.show()
 
         def winfo_exists(self):
-            return True
+            return _tk_compat_winfo_exists(self)
 
         def winfo_viewable(self):
+            if not self.winfo_exists():
+                return False
             try:
-                return self.isVisible()
+                return bool(self.isVisible())
             except Exception:
                 return False
 
         def destroy(self):
+            """Tk-compatible destroy: mark gone, then close/delete the Qt window."""
+            self._tk_compat_destroyed = True
+            try:
+                if self.text_widget is not None:
+                    try:
+                        self.text_widget._tk_compat_destroyed = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             try:
                 self.close()
+            except Exception:
+                pass
+            try:
+                self.deleteLater()
             except Exception:
                 pass
 

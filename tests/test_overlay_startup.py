@@ -625,6 +625,54 @@ class PySideOverlayStartupTests(unittest.TestCase):
             calls,
         )
 
+    def test_rtl_text_display_winfo_exists_survives_hide_and_false_after_destroy(self):
+        widget = pyside_overlay.RTLTextDisplay()
+        try:
+            self.assertTrue(widget.winfo_exists())
+            widget.hide()
+            self.assertTrue(widget.winfo_exists())
+            self.assertFalse(widget.winfo_viewable())
+            widget.show()
+            self.assertTrue(widget.winfo_exists())
+        finally:
+            widget.destroy()
+            self.app.processEvents()
+            self.assertFalse(widget.winfo_exists())
+            self.assertFalse(widget.winfo_viewable())
+            # Post-destroy calls must not raise Qt RuntimeError.
+            self.assertFalse(widget.winfo_exists())
+
+    def test_translation_overlay_winfo_exists_survives_hide_and_false_after_destroy(self):
+        overlay = pyside_overlay.PySideTranslationOverlay(
+            [0, 0, 320, 120],
+            "#162c43",
+            "Translation",
+        )
+        try:
+            self.assertTrue(overlay.winfo_exists())
+            overlay.hide()
+            self.assertTrue(overlay.winfo_exists())
+            self.assertFalse(overlay.winfo_viewable())
+            overlay.show()
+            self.assertTrue(overlay.winfo_exists())
+            self.assertTrue(overlay.winfo_viewable())
+        finally:
+            overlay.destroy()
+            self.app.processEvents()
+            self.assertFalse(overlay.winfo_exists())
+            self.assertFalse(overlay.winfo_viewable())
+            # Post-destroy calls must not raise Qt RuntimeError.
+            self.assertFalse(overlay.winfo_exists())
+
+    def test_tk_compat_winfo_exists_helpers_reject_destroyed_and_invalid_objects(self):
+        class DeadProxy:
+            def objectName(self):
+                raise RuntimeError("Internal C++ object already deleted.")
+
+        destroyed = SimpleNamespace(_tk_compat_destroyed=True, objectName=lambda: "gone")
+        self.assertFalse(pyside_overlay._tk_compat_winfo_exists(destroyed))
+        self.assertFalse(pyside_overlay._qt_object_is_valid(DeadProxy()))
+
 
 if __name__ == "__main__":
     unittest.main()
