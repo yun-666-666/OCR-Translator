@@ -523,6 +523,20 @@ class AppLifecycleMixin:
             except Exception as e:
                 _log_debug(f"Error closing OCR Preview window: {e}")
 
+        shutdown_preview_ocr = getattr(
+            self,
+            "shutdown_preview_ocr_executor",
+            None,
+        )
+        if callable(shutdown_preview_ocr):
+            try:
+                shutdown_preview_ocr()
+            except Exception as error:
+                _log_debug(
+                    "Error shutting down Preview OCR executor: "
+                    f"{type(error).__name__} - {error}"
+                )
+
         self._stop_translation_for_app_exit()
 
         # # Force end any remaining sessions when application closes

@@ -371,6 +371,37 @@ class AppCaptureOcrMixin:
             _log_debug(f"Preview OCR generation advanced to {generation} ({reason})")
         return generation
 
+    def shutdown_preview_ocr_executor(self):
+        """Stop accepting Preview OCR work during application shutdown."""
+        executor = getattr(self, "_preview_ocr_executor", None)
+        if executor is None:
+            return False
+
+        self._bump_preview_ocr_generation("application closing")
+        lock = getattr(self, "_preview_ocr_lock", None)
+        if lock is not None:
+            with lock:
+                self._preview_ocr_pending_frame = None
+
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as error:
+            _log_debug(
+                "Preview OCR executor shutdown failed: "
+                f"{type(error).__name__} - {error}"
+            )
+            return False
+        return True
+
+    def _discard_preview_ocr_completion_from_worker(self, reason):
+        """Release worker state when Tk can no longer accept a completion."""
+        lock = getattr(self, "_preview_ocr_lock", None)
+        if lock is not None:
+            with lock:
+                self._preview_ocr_in_flight = False
+                self._preview_ocr_pending_frame = None
+        _log_debug(f"Preview OCR completion discarded: {reason}")
+
     def _preview_window_is_open(self):
         window = getattr(self, "ocr_preview_window", None)
         if window is None:
@@ -528,7 +559,9 @@ class AppCaptureOcrMixin:
                 error_text = f"{type(error).__name__}: {error}"
             root = getattr(self, "root", None)
             if root is None:
-                self._finish_preview_ocr_job(generation, None, error_text)
+                self._discard_preview_ocr_completion_from_worker(
+                    "root is unavailable"
+                )
                 return
             try:
                 root.after(
@@ -540,7 +573,9 @@ class AppCaptureOcrMixin:
                     ),
                 )
             except Exception:
-                self._finish_preview_ocr_job(generation, result, error_text)
+                self._discard_preview_ocr_completion_from_worker(
+                    "Tk callback scheduling failed"
+                )
 
         future.add_done_callback(_on_done)
         return True

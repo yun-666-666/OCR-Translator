@@ -194,6 +194,49 @@ class PreviewLatestOnlyOcrTests(unittest.TestCase):
         self.assertEqual(host.preview_text_widget.texts, [])
         self.assertIsNone(host.ocr_preview_window)
 
+    def test_worker_never_falls_back_to_tk_ui_when_after_fails(self):
+        host = _PreviewHost()
+        host._ensure_preview_ocr_runtime()
+        host.root = types.SimpleNamespace(
+            after=Mock(side_effect=RuntimeError("Tk is closing"))
+        )
+        host._run_preview_ocr_job = Mock(
+            return_value=(host.last_screenshot, "worker result")
+        )
+
+        with patch.object(host, "_finish_preview_ocr_job") as finish:
+            self.assertTrue(
+                host._schedule_preview_ocr(
+                    host.last_screenshot,
+                    PaddleOCRSettings(),
+                    False,
+                )
+            )
+            for _ in range(100):
+                with host._preview_ocr_lock:
+                    if not host._preview_ocr_in_flight:
+                        break
+                time.sleep(0.01)
+
+        finish.assert_not_called()
+        with host._preview_ocr_lock:
+            self.assertFalse(host._preview_ocr_in_flight)
+            self.assertIsNone(host._preview_ocr_pending_frame)
+        host.shutdown_preview_ocr_executor()
+
+    def test_shutdown_preview_executor_cancels_pending_work(self):
+        host = _PreviewHost()
+        host._ensure_preview_ocr_runtime()
+        executor = Mock()
+        host._preview_ocr_executor = executor
+        host._preview_ocr_pending_frame = {"frame": "pending"}
+        previous_generation = host._preview_ocr_generation
+
+        self.assertTrue(host.shutdown_preview_ocr_executor())
+        executor.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        self.assertEqual(host._preview_ocr_generation, previous_generation + 1)
+        self.assertIsNone(host._preview_ocr_pending_frame)
+
 
 if __name__ == "__main__":
     unittest.main()
