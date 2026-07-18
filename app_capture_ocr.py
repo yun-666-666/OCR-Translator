@@ -1,7 +1,9 @@
 """Capture, OCR adaptation, preview, and overlay responsibilities."""
 
+import concurrent.futures
 import math
 import sys
+import threading
 import time
 import tkinter as tk
 from dataclasses import replace
@@ -340,8 +342,267 @@ class AppCaptureOcrMixin:
         self.clear_timeout_timer_start = None
         _log_debug("Clear timeout timer reset - text detected")
 
+    def _ensure_preview_ocr_runtime(self):
+        """Initialize Preview OCR offload state on first use."""
+        if not hasattr(self, "_preview_ocr_lock"):
+            self._preview_ocr_lock = threading.Lock()
+        if not hasattr(self, "_preview_ocr_generation"):
+            self._preview_ocr_generation = 0
+        if not hasattr(self, "_preview_ocr_in_flight"):
+            self._preview_ocr_in_flight = False
+        if not hasattr(self, "_preview_ocr_pending_frame"):
+            self._preview_ocr_pending_frame = None
+        if not hasattr(self, "_preview_ocr_executor") or self._preview_ocr_executor is None:
+            self._preview_ocr_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="PreviewOCR",
+            )
+        if not hasattr(self, "_preview_last_ocr_text"):
+            self._preview_last_ocr_text = None
+
+    def _bump_preview_ocr_generation(self, reason=""):
+        """Invalidate in-flight Preview OCR completions."""
+        self._ensure_preview_ocr_runtime()
+        with self._preview_ocr_lock:
+            self._preview_ocr_generation = int(self._preview_ocr_generation or 0) + 1
+            self._preview_ocr_pending_frame = None
+            generation = self._preview_ocr_generation
+        if reason:
+            _log_debug(f"Preview OCR generation advanced to {generation} ({reason})")
+        return generation
+
+    def _preview_window_is_open(self):
+        window = getattr(self, "ocr_preview_window", None)
+        if window is None:
+            return False
+        try:
+            return bool(window.winfo_exists())
+        except tk.TclError:
+            self.ocr_preview_window = None
+            return False
+
+    def _capture_preview_screenshot(self):
+        """Capture the current source area for Preview without running OCR."""
+        screenshot_pil = None
+        source_overlay = getattr(self, "source_overlay", None)
+        if source_overlay is not None:
+            try:
+                if source_overlay.winfo_exists():
+                    area = source_overlay.get_geometry()
+                    if area:
+                        x1, y1, x2, y2 = map(int, area)
+                        width, height = x2 - x1, y2 - y1
+                        if width > 0 and height > 0:
+                            from ocr_utils import capture_screen_region
+
+                            screenshot_pil = capture_screen_region(
+                                (x1, y1, width, height)
+                            )
+            except Exception as error:
+                _log_debug(f"Error capturing for preview: {error}")
+                screenshot_pil = None
+
+        if screenshot_pil is None and getattr(self, "last_screenshot", None):
+            screenshot_pil = self.last_screenshot
+        return screenshot_pil
+
+    def _preview_placeholder_text(self):
+        latest_main = getattr(self, "last_processed_subtitle", None)
+        if isinstance(latest_main, str) and latest_main.strip():
+            return latest_main
+        cached = getattr(self, "_preview_last_ocr_text", None)
+        if isinstance(cached, str) and cached.strip():
+            return cached
+        return self.ui_lang.get_label(
+            "no_text_recognized",
+            "No text recognized",
+        )
+
+    def _apply_preview_image(self, processed_pil):
+        from PIL import ImageTk
+
+        processed_tk = ImageTk.PhotoImage(processed_pil)
+        self.preview_image_label.configure(image=processed_tk, text="")
+        self.preview_image_label.image = processed_tk
+        self.preview_image_label.update_idletasks()
+        image_width = processed_tk.width()
+        image_height = processed_tk.height()
+        canvas_height = min(image_height, 400)
+        self.preview_image_canvas.configure(height=canvas_height)
+        self.preview_image_canvas.itemconfig(
+            self.preview_image_canvas_item,
+            width=image_width,
+            height=image_height,
+        )
+        self.preview_image_canvas.configure(
+            scrollregion=(0, 0, image_width, image_height)
+        )
+
+    def _apply_preview_text(self, text):
+        display_text = text if text else self.ui_lang.get_label(
+            "no_text_recognized",
+            "No text recognized",
+        )
+        self.preview_text_widget.config(state=tk.NORMAL)
+        self.preview_text_widget.delete(1.0, tk.END)
+        self.preview_text_widget.insert(tk.END, display_text)
+        self.preview_text_widget.config(state=tk.DISABLED)
+
+    def _apply_preview_empty_state(self):
+        self.preview_image_label.configure(
+            image="",
+            text=self.ui_lang.get_label(
+                "no_image_captured",
+                "No image captured yet",
+            ),
+        )
+        self.preview_image_label.image = None
+        self.preview_image_canvas.configure(height=100)
+        self.preview_image_label.update_idletasks()
+        label_width = self.preview_image_label.winfo_reqwidth()
+        label_height = self.preview_image_label.winfo_reqheight()
+        self.preview_image_canvas.itemconfig(
+            self.preview_image_canvas_item,
+            width=label_width,
+            height=label_height,
+        )
+        self.preview_image_canvas.configure(
+            scrollregion=(0, 0, label_width, label_height)
+        )
+        self._apply_preview_text(
+            self.ui_lang.get_label(
+                "no_image_for_ocr",
+                "No image available for OCR",
+            )
+        )
+
+    def _run_preview_ocr_job(self, screenshot_pil, paddleocr_settings, keep_linebreaks):
+        """Background-only Preview OCR. Must not touch Tk widgets."""
+        processed_pil = prepare_paddleocr_image(screenshot_pil, paddleocr_settings)
+        ocr_cleaned_text, _lines = recognize_with_paddleocr(
+            screenshot_pil,
+            paddleocr_settings,
+            keep_linebreaks=keep_linebreaks,
+        )
+        return processed_pil, ocr_cleaned_text
+
+    def _schedule_preview_ocr(self, screenshot_pil, paddleocr_settings, keep_linebreaks):
+        """Keep at most one in-flight Preview OCR and one latest pending frame."""
+        self._ensure_preview_ocr_runtime()
+        job = {
+            "screenshot": screenshot_pil,
+            "settings": paddleocr_settings,
+            "keep_linebreaks": bool(keep_linebreaks),
+            "generation": int(self._preview_ocr_generation or 0),
+        }
+        with self._preview_ocr_lock:
+            if self._preview_ocr_in_flight:
+                # Replace any older pending frame; do not queue a backlog.
+                self._preview_ocr_pending_frame = job
+                return False
+            self._preview_ocr_in_flight = True
+            active_job = job
+
+        try:
+            future = self._preview_ocr_executor.submit(
+                self._run_preview_ocr_job,
+                active_job["screenshot"],
+                active_job["settings"],
+                active_job["keep_linebreaks"],
+            )
+        except Exception as error:
+            with self._preview_ocr_lock:
+                self._preview_ocr_in_flight = False
+            _log_debug(
+                "Preview OCR submit failed: "
+                f"{type(error).__name__} - {error}"
+            )
+            return False
+
+        def _on_done(done_future, generation=active_job["generation"]):
+            try:
+                result = done_future.result()
+                error_text = None
+            except Exception as error:
+                result = None
+                error_text = f"{type(error).__name__}: {error}"
+            root = getattr(self, "root", None)
+            if root is None:
+                self._finish_preview_ocr_job(generation, None, error_text)
+                return
+            try:
+                root.after(
+                    0,
+                    lambda: self._finish_preview_ocr_job(
+                        generation,
+                        result,
+                        error_text,
+                    ),
+                )
+            except Exception:
+                self._finish_preview_ocr_job(generation, result, error_text)
+
+        future.add_done_callback(_on_done)
+        return True
+
+    def _finish_preview_ocr_job(self, generation, result, error_text=None):
+        """UI-thread completion handler for Preview OCR futures."""
+        self._ensure_preview_ocr_runtime()
+        with self._preview_ocr_lock:
+            current_generation = int(self._preview_ocr_generation or 0)
+            pending = self._preview_ocr_pending_frame
+            self._preview_ocr_pending_frame = None
+            self._preview_ocr_in_flight = False
+
+        if int(generation or 0) != current_generation:
+            # Stale completion after close/settings change; ignore UI writes.
+            if pending and int(pending.get("generation") or 0) == current_generation:
+                self._schedule_preview_ocr(
+                    pending["screenshot"],
+                    pending["settings"],
+                    pending["keep_linebreaks"],
+                )
+            return
+
+        if not self._preview_window_is_open():
+            return
+
+        try:
+            if error_text:
+                self._apply_preview_text(f"Error: {error_text}")
+            elif result is not None:
+                processed_pil, ocr_cleaned_text = result
+                if processed_pil is not None:
+                    self._apply_preview_image(processed_pil)
+                if ocr_cleaned_text:
+                    self._preview_last_ocr_text = ocr_cleaned_text
+                self._apply_preview_text(
+                    ocr_cleaned_text
+                    if ocr_cleaned_text
+                    else self.ui_lang.get_label(
+                        "no_text_recognized",
+                        "No text recognized",
+                    )
+                )
+        except tk.TclError:
+            self.ocr_preview_window = None
+            return
+        except Exception as error:
+            _log_debug(
+                "Preview OCR UI apply failed: "
+                f"{type(error).__name__} - {error}"
+            )
+
+        if pending and int(pending.get("generation") or 0) == current_generation:
+            self._schedule_preview_ocr(
+                pending["screenshot"],
+                pending["settings"],
+                pending["keep_linebreaks"],
+            )
+
     def show_ocr_preview(self):
         """Show/create the OCR Preview window."""
+        self._ensure_preview_ocr_runtime()
         # Check if window already exists and is valid
         if self.ocr_preview_window is not None:
             try:
@@ -359,6 +620,7 @@ class AppCaptureOcrMixin:
         self.ocr_preview_window = tk.Toplevel(self.root)
         self.ocr_preview_window.title(self.ui_lang.get_label("ocr_preview_title", "OCR Preview"))
         self.ocr_preview_window.minsize(400, 500)
+        self._bump_preview_ocr_generation("preview opened")
 
         # Load window geometry from config
         load_ocr_preview_geometry(self.config, self.ocr_preview_window)
@@ -447,6 +709,8 @@ class AppCaptureOcrMixin:
 
     def close_ocr_preview(self):
         """Properly close the OCR Preview window."""
+        # Invalidate any in-flight Preview OCR before tearing down widgets.
+        self._bump_preview_ocr_generation("preview closed")
         if self.ocr_preview_window is not None:
             try:
                 # Save window geometry before closing
@@ -504,7 +768,7 @@ class AppCaptureOcrMixin:
         if self.ocr_preview_window is not None:
             try:
                 if self.ocr_preview_window.winfo_exists():
-                    # Refresh preview with current data (works both when translation is on/off)
+                    # Lightweight UI/schedule only; never run full OCR here.
                     self.refresh_ocr_preview()
                     # Schedule next update
                     self._preview_realtime_timer = self.root.after(500, self.preview_realtime_update)
@@ -514,123 +778,59 @@ class AppCaptureOcrMixin:
                 self.ocr_preview_window = None
 
     def refresh_ocr_preview(self):
-        """Refresh the OCR preview with current settings and captured image."""
+        """Refresh Preview image immediately and schedule at most one OCR job."""
         # Check if window still exists
-        if self.ocr_preview_window is None:
+        if not self._preview_window_is_open():
             return
 
         try:
-            if not self.ocr_preview_window.winfo_exists():
-                self.ocr_preview_window = None
+            screenshot_pil = self._capture_preview_screenshot()
+            if screenshot_pil is None:
+                self._apply_preview_empty_state()
                 return
-        except tk.TclError:
-            # Window was destroyed
-            self.ocr_preview_window = None
-            return
 
-        try:
-            # Always try to capture from source area for real-time preview (independent of translation state)
-            screenshot_pil = None
-            if self.source_overlay and self.source_overlay.winfo_exists():
+            current_ocr_model = self.get_ocr_model_setting()
+            if current_ocr_model == PADDLEOCR_MODEL_CODE:
+                from worker_threads import get_paddleocr_settings_from_app
+
+                paddleocr_settings = get_paddleocr_settings_from_app(self)
                 try:
-                    area = self.source_overlay.get_geometry()
-                    if area:
-                        x1, y1, x2, y2 = map(int, area)
-                        width, height = x2-x1, y2-y1
-                        if width > 0 and height > 0:
-                            from ocr_utils import capture_screen_region
+                    keep_linebreaks = bool(self.keep_linebreaks_var.get())
+                except Exception:
+                    keep_linebreaks = False
 
-                            screenshot_pil = capture_screen_region(
-                                (x1, y1, width, height)
-                            )
-                        else:
-                            screenshot_pil = None
-                    else:
-                        screenshot_pil = None
-                except Exception as e:
-                    _log_debug(f"Error capturing for preview: {e}")
-                    screenshot_pil = None
-
-            # Fallback to using last_screenshot only if direct capture failed
-            if screenshot_pil is None and hasattr(self, 'last_screenshot') and self.last_screenshot:
-                screenshot_pil = self.last_screenshot
-
-            if screenshot_pil:
-                from PIL import Image, ImageTk
-                current_ocr_model = self.get_ocr_model_setting()
-
-                if current_ocr_model == PADDLEOCR_MODEL_CODE:
-                    from worker_threads import get_paddleocr_settings_from_app
-
-                    paddleocr_settings = get_paddleocr_settings_from_app(self)
-                    processed_pil = prepare_paddleocr_image(screenshot_pil, paddleocr_settings)
-                    ocr_cleaned_text, _lines = recognize_with_paddleocr(
-                        screenshot_pil,
-                        paddleocr_settings,
-                        keep_linebreaks=bool(self.keep_linebreaks_var.get()),
-                    )
-                else:
-                    processed_pil = screenshot_pil.convert("RGB")
-                    ocr_cleaned_text = self.ui_lang.get_label(
+                # Show the latest captured frame immediately on the UI thread.
+                # Full PaddleOCR recognition always runs off-thread.
+                try:
+                    self._apply_preview_image(screenshot_pil.convert("RGB"))
+                except Exception:
+                    pass
+                self._apply_preview_text(self._preview_placeholder_text())
+                self._schedule_preview_ocr(
+                    screenshot_pil,
+                    paddleocr_settings,
+                    keep_linebreaks,
+                )
+            else:
+                processed_pil = screenshot_pil.convert("RGB")
+                self._apply_preview_image(processed_pil)
+                self._apply_preview_text(
+                    self.ui_lang.get_label(
                         "ocr_preview_local_only",
                         "OCR preview is available for PaddleOCR.",
                     )
-
-                # Convert processed image to PIL for display
-                processed_tk = ImageTk.PhotoImage(processed_pil)
-
-                # Update image display in canvas
-                self.preview_image_label.configure(image=processed_tk, text="")
-                self.preview_image_label.image = processed_tk  # Keep reference
-
-                # Update canvas scroll region to fit the image
-                self.preview_image_label.update_idletasks()  # Ensure label has correct size
-                image_width = processed_tk.width()
-                image_height = processed_tk.height()
-
-                # Adjust canvas height to fit image (with reasonable limits)
-                canvas_height = min(image_height, 400)  # Max height of 400 pixels
-                self.preview_image_canvas.configure(height=canvas_height)
-
-                # Update the canvas window size and scroll region
-                self.preview_image_canvas.itemconfig(self.preview_image_canvas_item, width=image_width, height=image_height)
-                self.preview_image_canvas.configure(scrollregion=(0, 0, image_width, image_height))
-
-                # Update text display
-                self.preview_text_widget.config(state=tk.NORMAL)
-                self.preview_text_widget.delete(1.0, tk.END)
-                self.preview_text_widget.insert(tk.END, ocr_cleaned_text if ocr_cleaned_text else self.ui_lang.get_label("no_text_recognized", "No text recognized"))
-                self.preview_text_widget.config(state=tk.DISABLED)
-
-            else:
-                # No image available
-                self.preview_image_label.configure(image="", text=self.ui_lang.get_label("no_image_captured", "No image captured yet"))
-                self.preview_image_label.image = None
-
-                # Reset canvas to default size for text display
-                self.preview_image_canvas.configure(height=100)  # Small height for text
-
-                # Reset canvas scroll region for text display
-                self.preview_image_label.update_idletasks()
-                label_width = self.preview_image_label.winfo_reqwidth()
-                label_height = self.preview_image_label.winfo_reqheight()
-
-                self.preview_image_canvas.itemconfig(self.preview_image_canvas_item, width=label_width, height=label_height)
-                self.preview_image_canvas.configure(scrollregion=(0, 0, label_width, label_height))
-
-                self.preview_text_widget.config(state=tk.NORMAL)
-                self.preview_text_widget.delete(1.0, tk.END)
-                self.preview_text_widget.insert(tk.END, self.ui_lang.get_label("no_image_for_ocr", "No image available for OCR"))
-                self.preview_text_widget.config(state=tk.DISABLED)
-
+                )
+        except tk.TclError:
+            self.ocr_preview_window = None
         except Exception as e:
             _log_debug(f"Error refreshing OCR preview: {e}")
             # Show error in preview
-            if hasattr(self, 'preview_text_widget') and self.preview_text_widget.winfo_exists():
-                self.preview_text_widget.config(state=tk.NORMAL)
-                self.preview_text_widget.delete(1.0, tk.END)
-                self.preview_text_widget.insert(tk.END, f"Error: {str(e)}")
-                self.preview_text_widget.config(state=tk.DISABLED)
+            if hasattr(self, 'preview_text_widget'):
+                try:
+                    if self.preview_text_widget.winfo_exists():
+                        self._apply_preview_text(f"Error: {str(e)}")
+                except tk.TclError:
+                    pass
 
     def load_initial_overlay_areas(self):
         load_areas_from_config_om(self)

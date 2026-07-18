@@ -886,6 +886,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         if self.ocr_preview_window is not None:
             try:
                 if self.ocr_preview_window.winfo_exists():
+                    # Invalidate any older Preview OCR result before re-scheduling.
+                    if hasattr(self, "_bump_preview_ocr_generation"):
+                        self._bump_preview_ocr_generation("OCR parameter changed")
                     # Delay the refresh slightly to avoid too frequent updates
                     if hasattr(self, '_preview_refresh_timer'):
                         self.root.after_cancel(self._preview_refresh_timer)
@@ -921,6 +924,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             if self.ocr_preview_window is not None:
                 try:
                     if self.ocr_preview_window.winfo_exists():
+                        if hasattr(self, "_bump_preview_ocr_generation"):
+                            self._bump_preview_ocr_generation("OCR model changed")
                         if hasattr(self, '_preview_refresh_timer'):
                             self.root.after_cancel(self._preview_refresh_timer)
                         self._preview_refresh_timer = self.root.after(200, self.refresh_ocr_preview)
