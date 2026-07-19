@@ -3627,6 +3627,32 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             1,
         )
 
+    def test_final_response_started_before_newer_request_is_not_displayed(self):
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        display = Mock()
+        app = types.SimpleNamespace(
+            latest_translation_sequence_started=6,
+            last_displayed_translation_sequence=4,
+            update_translation_text=display,
+            runtime_metrics=metrics,
+        )
+
+        worker_threads.process_translation_response(
+            app,
+            "Old final result",
+            5,
+            "source",
+            3,
+        )
+
+        display.assert_not_called()
+        self.assertEqual(app.last_displayed_translation_sequence, 4)
+        self.assertEqual(
+            metrics.snapshot()["counters"]["stale_response_discarded"],
+            1,
+        )
+
     def test_streaming_partial_display_increments_runtime_metric(self):
         worker_threads = import_worker_threads_for_tests()
         metrics = RuntimeMetrics(clock=lambda: 200.0)
@@ -5119,12 +5145,33 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         image = Image.new("RGB", (16, 10), "white")
         metrics = RuntimeMetrics()
+        from worker_capture import CaptureUISnapshot
+
+        snapshot = CaptureUISnapshot(
+            generation=1,
+            source_geometry=None,
+            ocr_model="paddleocr",
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=False,
+        )
+        image._gct_capture_snapshot = snapshot
         app = types.SimpleNamespace(
             is_running=True,
             ocr_queue=queue.Queue(),
-            get_ocr_model_setting=lambda: "paddleocr",
-            is_api_based_ocr_model=lambda _model: False,
-            ocr_debugging_var=types.SimpleNamespace(get=lambda: False),
+            capture_ui_snapshot=snapshot,
+            get_ocr_model_setting=Mock(
+                side_effect=AssertionError("OCR worker touched live model setting")
+            ),
+            is_api_based_ocr_model=Mock(
+                side_effect=AssertionError("OCR worker touched live model setting")
+            ),
+            ocr_debugging_var=types.SimpleNamespace(
+                get=Mock(
+                    side_effect=AssertionError("OCR worker touched live debug setting")
+                )
+            ),
             previous_text="",
             text_stability_counter=0,
             stable_threshold=2,
@@ -5147,7 +5194,10 @@ class AdaptiveScanLoggingTests(unittest.TestCase):
             patch.object(
                 worker_threads,
                 "process_local_ocr_frame",
-                return_value=("Clear subtitle text.", None, "PaddleOCR"),
+                side_effect=lambda *_args, **kwargs: (
+                    self.assertIs(kwargs["capture_snapshot"], snapshot)
+                    or ("Clear subtitle text.", None, "PaddleOCR")
+                ),
             ),
             patch.object(
                 worker_threads,

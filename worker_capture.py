@@ -38,6 +38,8 @@ class CaptureUISnapshot:
     keep_linebreaks: bool
     is_api_based: bool
     paddleocr_settings: Optional[PaddleOCRSettings] = None
+    source_lang: str = "en"
+    ocr_debugging: bool = False
 
 
 def _next_local_capture_interval(
@@ -465,9 +467,18 @@ def build_capture_ui_snapshot(
     else:
         is_api_based = ocr_model != PADDLEOCR_MODEL_CODE
 
-    paddleocr_settings = None
-    if not is_api_based and ocr_model == PADDLEOCR_MODEL_CODE:
-        paddleocr_settings = get_paddleocr_settings_from_app(app)
+    # Keep local settings available even while Custom AI OCR is selected: a
+    # request-scoped cooldown may route this captured frame through PaddleOCR.
+    paddleocr_settings = get_paddleocr_settings_from_app(app)
+    source_lang = str(
+        getattr(app, "custom_source_lang", None)
+        or _read_app_var(app, "source_lang_var", "en")
+        or "en"
+    )
+    ocr_debugging = _coerce_bool(
+        _read_app_var(app, "ocr_debugging_var", False),
+        False,
+    )
 
     return CaptureUISnapshot(
         generation=int(generation),
@@ -478,6 +489,8 @@ def build_capture_ui_snapshot(
         keep_linebreaks=keep_linebreaks,
         is_api_based=is_api_based,
         paddleocr_settings=paddleocr_settings,
+        source_lang=source_lang,
+        ocr_debugging=ocr_debugging,
     )
 
 
@@ -536,6 +549,17 @@ def get_paddleocr_ocr_cache_mode_key(app):
         _read_app_var(app, "keep_linebreaks_var", False),
         False,
     )
+    return get_paddleocr_ocr_cache_mode_key_from_settings(
+        settings,
+        keep_linebreaks,
+    )
+
+
+def get_paddleocr_ocr_cache_mode_key_from_settings(
+    settings,
+    keep_linebreaks,
+):
+    """Build a cache mode key from the immutable settings for one frame."""
     return (
         f"paddleocr|version={settings.ocr_version}"
         f"|size={settings.model_size}"
@@ -790,6 +814,7 @@ def run_capture_thread(app):
                 screenshot._gct_capture_monotonic = capture_moment
                 screenshot._gct_capture_duration = capture_duration
                 screenshot._gct_capture_generation = snapshot.generation
+                screenshot._gct_capture_snapshot = snapshot
             except Exception:
                 pass
 

@@ -45,6 +45,7 @@ OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
 API_OCR_REPEAT_BACKOFF_SECONDS = 0.75
 from worker_capture import (
+    CaptureUISnapshot,
     run_capture_thread,
     _api_ocr_capture_is_saturated,
     _log_hot_path_timing,
@@ -60,12 +61,11 @@ from worker_capture import (
     _get_screenshot_frame_hash,
     _advance_local_capture_signature,
     _get_api_ocr_cache_model_key,
-    _read_app_var,
     _coerce_float,
     _coerce_int,
     _coerce_bool,
-    get_paddleocr_settings_from_app,
-    get_paddleocr_ocr_cache_mode_key,
+    get_paddleocr_ocr_cache_mode_key_from_settings,
+    get_capture_ui_snapshot,
     _pil_to_debug_bgr,
     process_local_ocr_frame,
 )
@@ -187,7 +187,6 @@ def _api_ocr_concurrency_limit(app, provider_name):
 
 def run_ocr_thread(app):
     log_debug("WT: OCR thread started.")
-    log_debug(f"WT: OCR using {app.get_ocr_model_setting()}")
 
     last_lang_check = time.monotonic()
     last_ocr_proc_time = 0
@@ -198,14 +197,24 @@ def run_ocr_thread(app):
     while app.is_running:
         now = time.monotonic()
         try:
+            worker_snapshot = get_capture_ui_snapshot(
+                app,
+                allow_unpublished_build=False,
+            )
+            if not isinstance(worker_snapshot, CaptureUISnapshot):
+                time.sleep(0.05)
+                continue
             if now - last_lang_check > 5.0:
                 last_lang_check = now
 
-            selected_ocr_model = app.get_ocr_model_setting()
+            selected_ocr_model = worker_snapshot.ocr_model
             ocr_model = _effective_ocr_model_for_frame(app, selected_ocr_model)
 
             # No artificial delay for API-based OCR
-            if not app.is_api_based_ocr_model(ocr_model):
+            if not (
+                worker_snapshot.is_api_based
+                and ocr_model == selected_ocr_model
+            ):
                 q_sz = app.ocr_queue.qsize()
                 ocr_q_max = app.ocr_queue.maxsize or 1
                 adaptive_ocr_interval = min_ocr_interval * (0.8 if q_sz <=1 else (1.0 + (q_sz / ocr_q_max)))
@@ -227,6 +236,20 @@ def run_ocr_thread(app):
                 time.sleep(0.05)
                 continue
 
+            frame_snapshot = getattr(
+                screenshot_pil,
+                "_gct_capture_snapshot",
+                worker_snapshot,
+            )
+            if not isinstance(frame_snapshot, CaptureUISnapshot):
+                frame_snapshot = worker_snapshot
+            selected_ocr_model = frame_snapshot.ocr_model
+            ocr_model = _effective_ocr_model_for_frame(app, selected_ocr_model)
+            is_api_ocr = (
+                frame_snapshot.is_api_based
+                and ocr_model == selected_ocr_model
+            )
+
             ocr_proc_start_time = time.monotonic()
             last_ocr_proc_time = ocr_proc_start_time
             app.last_screenshot = screenshot_pil
@@ -236,14 +259,34 @@ def run_ocr_thread(app):
 
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
             ocr_cache_key = None
-            if hasattr(app, 'ocr_frame_cache') and not app.is_api_based_ocr_model(ocr_model):
+            if hasattr(app, 'ocr_frame_cache') and not is_api_ocr:
                 if ocr_model == PADDLEOCR_MODEL_CODE:
-                    cache_lang = _read_app_var(app, "paddleocr_lang_var", "en")
-                    cache_mode_key = get_paddleocr_ocr_cache_mode_key(app)
+                    settings = frame_snapshot.paddleocr_settings
+                    if settings is None:
+                        raise RuntimeError(
+                            "Captured frame is missing PaddleOCR settings"
+                        )
+                    cache_lang = settings.lang
+                    cache_mode_key = (
+                        get_paddleocr_ocr_cache_mode_key_from_settings(
+                            settings,
+                            frame_snapshot.keep_linebreaks,
+                        )
+                    )
                 else:
                     ocr_model = PADDLEOCR_MODEL_CODE
-                    cache_lang = _read_app_var(app, "paddleocr_lang_var", "en")
-                    cache_mode_key = get_paddleocr_ocr_cache_mode_key(app)
+                    settings = frame_snapshot.paddleocr_settings
+                    if settings is None:
+                        raise RuntimeError(
+                            "Captured frame is missing PaddleOCR settings"
+                        )
+                    cache_lang = settings.lang
+                    cache_mode_key = (
+                        get_paddleocr_ocr_cache_mode_key_from_settings(
+                            settings,
+                            frame_snapshot.keep_linebreaks,
+                        )
+                    )
                 ocr_cache_key = build_ocr_frame_cache_key(
                     frame_hash,
                     ocr_model,
@@ -265,7 +308,7 @@ def run_ocr_thread(app):
                     )
                     _increment_metric(app, "ocr_frame_cache_hit")
                     _record_metric_timing(app, "ocr_duration", ocr_duration)
-                    if app.ocr_debugging_var.get() and app.last_processed_image is not None:
+                    if frame_snapshot.ocr_debugging and app.last_processed_image is not None:
                         _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, app.last_processed_image, ocr_cleaned_text)
                     # Jump to shared post-OCR routing below.
                     goto_post_ocr = True
@@ -277,8 +320,12 @@ def run_ocr_thread(app):
             if goto_post_ocr:
                 pass
             # ==================== OCR MODEL ROUTING ====================
-            elif app.is_api_based_ocr_model(ocr_model):
-                run_api_ocr(app, screenshot_pil)
+            elif is_api_ocr:
+                run_api_ocr(
+                    app,
+                    screenshot_pil,
+                    capture_snapshot=frame_snapshot,
+                )
                 continue # Skip to the next loop iteration
 
             elif ocr_model == PADDLEOCR_MODEL_CODE:
@@ -290,13 +337,14 @@ def run_ocr_thread(app):
 
             if not goto_post_ocr:
                 # ==================== LOCAL OCR PROCESSING ====================
-                if app.ocr_debugging_var.get():
+                if frame_snapshot.ocr_debugging:
                     _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, _pil_to_debug_bgr(screenshot_pil), "Processing...")
 
                 ocr_cleaned_text, processed_cv_img, engine_label = process_local_ocr_frame(
                     app,
                     screenshot_pil,
                     ocr_model,
+                    capture_snapshot=frame_snapshot,
                 )
                 app.last_processed_image = processed_cv_img
 
@@ -317,7 +365,7 @@ def run_ocr_thread(app):
                 )
 
 
-            if app.ocr_debugging_var.get() and processed_cv_img is not None:
+            if frame_snapshot.ocr_debugging and processed_cv_img is not None:
                 _schedule_ui_callback(app, app.update_debug_display, screenshot_pil, processed_cv_img, ocr_cleaned_text)
 
             if not ocr_cleaned_text or app.is_placeholder_text(ocr_cleaned_text):
@@ -462,16 +510,25 @@ def run_translation_thread(app):
 
 # ==================== GENERIC ASYNC API OCR WORKFLOW ====================
 
-def run_api_ocr(app, screenshot_pil):
+def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
         ocr_start_time = time.monotonic()
-        provider_name = app.get_ocr_model_setting()
+        if isinstance(capture_snapshot, CaptureUISnapshot):
+            provider_name = capture_snapshot.ocr_model
+            source_lang = capture_snapshot.source_lang
+        else:
+            # Compatibility for direct callers outside the OCR worker.  The
+            # production worker always supplies the immutable frame snapshot.
+            provider_name = app.get_ocr_model_setting()
+            source_lang = None
 
         if not hasattr(app, 'batch_sequence_counter'):
             app.batch_sequence_counter = 0
 
-        if provider_name == 'custom_ai':
+        if source_lang:
+            pass
+        elif provider_name == 'custom_ai':
             source_lang = getattr(app, 'custom_source_lang', None) or app.source_lang_var.get()
         else:
             active_translation_model = app.translation_model_var.get()
@@ -1111,6 +1168,19 @@ def process_translation_response(app, translation_result, translation_sequence, 
 
         if not hasattr(app, 'last_displayed_translation_sequence'):
             app.last_displayed_translation_sequence = 0
+
+        latest_started_sequence = getattr(
+            app,
+            "latest_translation_sequence_started",
+            translation_sequence,
+        )
+        if translation_sequence < latest_started_sequence:
+            _increment_metric(app, "stale_response_discarded")
+            log_debug(
+                f"Translation {translation_sequence}: newer request "
+                f"{latest_started_sequence} has already started; discarding"
+            )
+            return
 
         if translation_sequence <= app.last_displayed_translation_sequence:
             _increment_metric(app, "stale_response_discarded")

@@ -17,6 +17,7 @@ from gui_builder import (
     resolve_ocr_model_display_selection,
     run_profile_network_task_async,
 )
+from gui_profile_controls import persist_translation_failover_choice
 from logger import log_debug
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 from ui_elements import create_scrollable_tab
@@ -290,6 +291,13 @@ def create_settings_tab(app):
                 )
             )
             app.ai_profile_translation_failover_var.set(False)
+            failover_checkbox = getattr(
+                app,
+                "ai_profile_translation_failover_checkbox",
+                None,
+            )
+            if failover_checkbox is not None:
+                failover_checkbox.state(["disabled"])
             return
         app.ai_profile_selected_id = profile["id"]
         app.ai_profile_name_var.set(profile.get("name", ""))
@@ -314,6 +322,13 @@ def create_settings_tab(app):
         app.ai_profile_translation_failover_var.set(
             bool(profile.get("translation_failover_enabled", False))
         )
+        failover_checkbox = getattr(
+            app,
+            "ai_profile_translation_failover_checkbox",
+            None,
+        )
+        if failover_checkbox is not None:
+            failover_checkbox.state(["!disabled"])
 
     def on_profile_name_selected(event=None):
         load_profile(get_profile_by_name(app.ai_profile_name_var.get()))
@@ -492,23 +507,6 @@ def create_settings_tab(app):
         sticky="w",
     )
 
-    app.ai_profile_translation_failover_checkbox = ttk.Checkbutton(
-        app.ai_profiles_frame,
-        text=app.ui_lang.get_label(
-            "ai_profile_translation_failover_label",
-            "Allow as translation failover",
-        ),
-        variable=app.ai_profile_translation_failover_var,
-    )
-    app.ai_profile_translation_failover_checkbox.grid(
-        row=6,
-        column=0,
-        columnspan=2,
-        padx=5,
-        pady=3,
-        sticky="w",
-    )
-
     profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
     profile_buttons.grid(row=0, column=2, rowspan=7, padx=(10, 8), pady=6, sticky="nsew")
     ttk.Button(
@@ -600,17 +598,51 @@ def create_settings_tab(app):
         ),
         variable=app.custom_ai_log_content_enabled_var,
     )
-    app.custom_ai_log_content_checkbox.pack(side=tk.TOP, anchor="w")
-    app.custom_ai_log_content_warning = ttk.Label(
+    app.custom_ai_log_content_checkbox.pack(side=tk.LEFT, anchor="w")
+    app.custom_ai_log_content_warning_hint = ttk.Label(
         app.custom_ai_log_content_frame,
-        text=app.ui_lang.get_label(
-            "custom_ai_log_content_warning",
-            "Warning: enabling stores OCR/translation text on disk.",
-        ),
-        wraplength=320,
+        text="!",
         foreground="#8a5a00",
+        cursor="question_arrow",
     )
-    app.custom_ai_log_content_warning.pack(side=tk.TOP, anchor="w", pady=(2, 0))
+    app.custom_ai_log_content_warning_hint.pack(
+        side=tk.LEFT,
+        padx=(5, 0),
+    )
+
+    def show_custom_ai_log_content_warning(event):
+        if getattr(app, "custom_ai_log_content_warning_tooltip", None):
+            return
+        tooltip = tk.Toplevel(app.root)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_geometry(
+            f"+{event.widget.winfo_rootx() + 16}+{event.widget.winfo_rooty() + 20}"
+        )
+        ttk.Label(
+            tooltip,
+            text=app.ui_lang.get_label(
+                "custom_ai_log_content_warning",
+                "Warning: enabling stores OCR/translation text on disk.",
+            ),
+            wraplength=320,
+            padding=6,
+        ).pack()
+        app.custom_ai_log_content_warning_tooltip = tooltip
+
+    def hide_custom_ai_log_content_warning(_event=None):
+        tooltip = getattr(app, "custom_ai_log_content_warning_tooltip", None)
+        if tooltip is not None:
+            tooltip.destroy()
+        app.custom_ai_log_content_warning_tooltip = None
+
+    app.custom_ai_log_content_warning_hint.bind(
+        "<Enter>",
+        show_custom_ai_log_content_warning,
+    )
+    app.custom_ai_log_content_warning_hint.bind(
+        "<Leave>",
+        hide_custom_ai_log_content_warning,
+    )
 
     app.ai_optimization_mode_label = ttk.Label(
         frame,
@@ -1026,6 +1058,30 @@ def create_settings_tab(app):
         variable=app.translation_horizontal_centered_var,
     )
     app.translation_horizontal_centered_checkbox.pack(side=tk.LEFT)
+
+    def save_translation_failover_choice():
+        try:
+            if not persist_translation_failover_choice(app):
+                app.ai_profile_translation_failover_var.set(False)
+        except Exception as error:
+            messagebox.showerror(
+                app.ui_lang.get_label("profile_error_title", "Profile Error"),
+                str(error),
+                parent=app.root,
+            )
+
+    app.ai_profile_translation_failover_checkbox = ttk.Checkbutton(
+        app.translation_text_style_frame,
+        text=app.ui_lang.get_label(
+            "ai_profile_translation_failover_label",
+            "Allow as translation failover",
+        ),
+        variable=app.ai_profile_translation_failover_var,
+        command=save_translation_failover_choice,
+    )
+    app.ai_profile_translation_failover_checkbox.pack(side=tk.LEFT, padx=(18, 0))
+    if not app.ai_profile_selected_id:
+        app.ai_profile_translation_failover_checkbox.state(["disabled"])
     current_row += 1
 
     # Opacity controls

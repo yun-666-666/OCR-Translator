@@ -235,6 +235,22 @@ class SettingsSaveDebounceTests(unittest.TestCase):
             "        app.translation_text_style_frame,",
             source,
         )
+        self.assertIn(
+            "app.ai_profile_translation_failover_checkbox = ttk.Checkbutton(\n"
+            "        app.translation_text_style_frame,",
+            source,
+        )
+
+    def test_short_log_warning_is_hover_only(self):
+        source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
+
+        self.assertIn('text="!"', source)
+        self.assertIn('"<Enter>"', source)
+        self.assertIn('"<Leave>"', source)
+        self.assertNotIn(
+            'app.custom_ai_log_content_warning = ttk.Label(',
+            source,
+        )
 
 
 class ScrollableTabInputGuardTests(unittest.TestCase):

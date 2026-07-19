@@ -1300,15 +1300,26 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
 
     def test_paddleocr_first_clear_text_submits_without_legacy_stability_threshold(self):
         import worker_threads
+        from paddle_ocr_backend import PaddleOCRSettings
+        from worker_capture import CaptureUISnapshot
 
         submitted = []
         image = Image.new("RGB", (16, 10), "white")
+        snapshot = CaptureUISnapshot(
+            generation=1,
+            source_geometry=None,
+            ocr_model="paddleocr",
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=False,
+            paddleocr_settings=PaddleOCRSettings(),
+        )
+        image._gct_capture_snapshot = snapshot
         app = types.SimpleNamespace(
             is_running=True,
             ocr_queue=queue.Queue(),
-            get_ocr_model_setting=lambda: "paddleocr",
-            is_api_based_ocr_model=lambda _model: False,
-            ocr_debugging_var=self._var(False),
+            capture_ui_snapshot=snapshot,
             previous_text="",
             text_stability_counter=0,
             stable_threshold=2,

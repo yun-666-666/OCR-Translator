@@ -623,6 +623,14 @@ class RuntimeContentFreeHandlerLogTests(unittest.TestCase):
             coalesced_log.call_args.args[1],
         )
 
+    def test_dialog_exclamation_before_en_dash_keeps_exclamation(self):
+        handler = TranslationHandler(object())
+
+        self.assertEqual(
+            handler._format_dialog_text("- A! – B."),
+            "- A!\n– B.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

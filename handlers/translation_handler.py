@@ -185,7 +185,7 @@ class TranslationHandler(TranslationContextMixin, TranslationRequestsMixin, Tran
         
         # Replace "! -" with "!\n-" (exclamation mark + space + hyphen)
         formatted_text = formatted_text.replace("! -", "!\n-")
-        formatted_text = formatted_text.replace("! –", "?\n–")
+        formatted_text = formatted_text.replace("! –", "!\n–")
         formatted_text = formatted_text.replace("! —", "!\n—")
         
         if formatted_text != text:

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gui_builder
+from gui_profile_controls import persist_translation_failover_choice
 import custom_ai as custom_ai_module
 from credential_store import CredentialStoreError
 from custom_ai import CustomAIProfileManager, CustomAIProvider
@@ -867,6 +868,29 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             final = CustomAIProfileManager(path, credential_store=store)
             self.assertFalse(
                 final.get_profile(profile["id"])["translation_failover_enabled"]
+            )
+
+    def test_failover_checkbox_persists_only_its_selected_profile_setting(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+            manager = CustomAIProfileManager(path, credential_store=store)
+            profile = manager.add_profile(
+                name="Failover Relay",
+                base_url="https://relay.example/v1",
+                api_key="secret",
+                model="gpt-5.5",
+            )
+            app = types.SimpleNamespace(
+                custom_ai_profiles=manager,
+                ai_profile_selected_id=profile["id"],
+                ai_profile_translation_failover_var=DummyVar(True),
+            )
+
+            self.assertTrue(persist_translation_failover_choice(app))
+            reloaded = CustomAIProfileManager(path, credential_store=store)
+            self.assertTrue(
+                reloaded.get_profile(profile["id"])["translation_failover_enabled"]
             )
 
     def test_profile_manager_normalizes_invalid_reasoning_effort_to_low(self):

@@ -162,6 +162,34 @@ def build_custom_ai_profile_values_from_form(app):
     return values
 
 
+def persist_translation_failover_choice(app):
+    """Persist only the selected profile's failover opt-in checkbox.
+
+    This setting is intentionally stored with the profile rather than the
+    application-wide INI file, so toggling it must not depend on saving any
+    unrelated profile form fields.
+    """
+    profile_id = getattr(app, "ai_profile_selected_id", None)
+    profiles = getattr(app, "custom_ai_profiles", None)
+    failover_var = getattr(app, "ai_profile_translation_failover_var", None)
+    if not profile_id or profiles is None or failover_var is None:
+        return False
+
+    profile = profiles.get_profile(profile_id)
+    if not profile:
+        return False
+
+    enabled = bool(failover_var.get())
+    if bool(profile.get("translation_failover_enabled", False)) == enabled:
+        return True
+
+    profiles.update_profile(
+        profile_id,
+        translation_failover_enabled=enabled,
+    )
+    return True
+
+
 def _apply_custom_ai_profile_model_selection(app):
     profile_id = getattr(app, "ai_profile_selected_id", None)
     profiles = getattr(app, "custom_ai_profiles", None)
@@ -202,4 +230,3 @@ def _apply_custom_ai_profile_model_selection(app):
         f"model={model}"
     )
     return True
-
