@@ -5180,6 +5180,30 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         self.assertEqual(submitted, [])
         self.assertIsNone(app.ocr_stability_gate.pending_text)
 
+    def test_ocr_stability_flush_schedule_uses_ui_callback_guards(self):
+        worker_threads = import_worker_threads_for_tests()
+        after = Mock()
+        app = self._make_app([])
+        app.root = types.SimpleNamespace(
+            winfo_exists=lambda: True,
+            after=after,
+        )
+        app._app_is_closing = True
+        gate = worker_threads._get_ocr_stability_gate(app)
+        gate.pending_text = "The treas"
+        gate.pending_requested_at = 400.0
+        gate.flush_scheduled = False
+        gate.flush_deadline_monotonic = 0.0
+        previous_generation = int(getattr(gate, "generation", 0) or 0)
+
+        worker_threads._schedule_ocr_stability_flush(app, gate, 0.2)
+
+        self.assertEqual(gate.generation, previous_generation + 1)
+        self.assertFalse(gate.flush_scheduled)
+        self.assertEqual(gate.flush_deadline_monotonic, 0.0)
+        self.assertEqual(gate.pending_text, "The treas")
+        after.assert_not_called()
+
     def test_instant_cache_hit_clears_older_pending_gate(self):
         worker_threads = import_worker_threads_for_tests()
         scheduled = []

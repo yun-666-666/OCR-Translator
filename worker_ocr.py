@@ -806,13 +806,22 @@ def _schedule_ocr_stability_flush(app, gate, delay_seconds):
     gate.flush_deadline_monotonic = desired_deadline
     remaining_seconds = max(0.0, desired_deadline - time.monotonic())
     delay_ms = max(1, int(remaining_seconds * 1000))
-    try:
-        app.root.after(delay_ms, _flush_ocr_stability_candidate, app, generation)
-    except Exception:
+    scheduled = _schedule_ui_callback(
+        app,
+        _flush_ocr_stability_candidate,
+        app,
+        generation,
+        delay_ms=delay_ms,
+    )
+    if not scheduled:
         if int(getattr(gate, "generation", 0) or 0) == generation:
             gate.flush_scheduled = False
             gate.flush_deadline_monotonic = 0.0
-        raise
+        _log_debug(
+            "LATENCY: failed to schedule OCR stability flush: "
+            f"generation={generation}"
+        )
+        return
 
 
 def _flush_ocr_stability_candidate(app, generation=None):
