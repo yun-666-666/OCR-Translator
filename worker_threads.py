@@ -476,9 +476,18 @@ def run_translation_thread(app):
                 thread_local_last_translation_display_time,
                 thread_local_last_displayed_sequence,
             )
-            ocr_model = app.get_ocr_model_setting()
+            # Use the published capture snapshot only. Live OCR model Tk vars
+            # must stay on the UI thread; missing snapshots simply skip clear.
+            worker_snapshot = get_capture_ui_snapshot(
+                app,
+                allow_unpublished_build=False,
+            )
+            is_api_based_ocr = (
+                isinstance(worker_snapshot, CaptureUISnapshot)
+                and bool(worker_snapshot.is_api_based)
+            )
 
-            if not app.is_api_based_ocr_model(ocr_model):
+            if not is_api_based_ocr and isinstance(worker_snapshot, CaptureUISnapshot):
                 inactive_duration = now - thread_local_last_translation_display_time
                 if app.clear_translation_timeout > 0 and inactive_duration > app.clear_translation_timeout:
                     _schedule_inactive_translation_clear(

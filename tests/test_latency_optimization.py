@@ -1483,6 +1483,181 @@ class TranslationInactivityClearTests(unittest.TestCase):
             0,
         )
 
+    def test_translation_thread_uses_published_snapshot_for_local_clear_gate(self):
+        worker_threads = import_worker_threads_for_tests()
+        from worker_capture import CaptureUISnapshot, publish_capture_ui_snapshot
+
+        scheduled = []
+        metrics = RuntimeMetrics(clock=lambda: 100.0)
+
+        def forbidden_get_ocr_model():
+            raise AssertionError("translation thread must not read live OCR model Tk state")
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            previous_text="",
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            translation_queue=queue.Queue(),
+            ocr_stability_gate=types.SimpleNamespace(has_pending=lambda: False),
+            last_successful_translation_time=90.0,
+            last_displayed_translation_sequence=3,
+            clear_translation_timeout=2.0,
+            get_ocr_model_setting=forbidden_get_ocr_model,
+            is_api_based_ocr_model=lambda model=None: (_ for _ in ()).throw(
+                AssertionError("live OCR model classification must not be used")
+            ),
+            is_placeholder_text=lambda text: False,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+            ),
+            display_manager=types.SimpleNamespace(
+                _update_translation_text_on_main_thread=lambda text: None,
+            ),
+            update_translation_text=lambda text: None,
+            runtime_metrics=metrics,
+            current_scan_interval=100,
+            base_scan_interval=100,
+            source_area=[0, 0, 10, 10],
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+        )
+        publish_capture_ui_snapshot(
+            app,
+            reason="translation-thread-local-clear",
+        )
+        # Force local OCR classification via published snapshot fields.
+        app.capture_ui_snapshot = CaptureUISnapshot(
+            generation=1,
+            source_geometry=(0, 0, 10, 10),
+            ocr_model="paddleocr",
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=False,
+            source_lang="en",
+        )
+
+        monotonic_values = iter([90.0, 100.0, 100.05])
+
+        def fake_monotonic():
+            try:
+                return next(monotonic_values)
+            except StopIteration:
+                app.is_running = False
+                return 100.1
+
+        with patch.object(worker_threads.time, "monotonic", side_effect=fake_monotonic):
+            with patch.object(worker_threads.time, "sleep", side_effect=lambda _s: setattr(app, "is_running", False)):
+                worker_threads.run_translation_thread(app)
+
+        self.assertGreaterEqual(len(scheduled), 1)
+        clear_callbacks = [
+            item for item in scheduled
+            if item[1] is worker_threads._apply_inactive_translation_clear
+        ]
+        self.assertEqual(len(clear_callbacks), 1)
+
+    def test_translation_thread_skips_clear_gate_for_api_ocr_snapshot(self):
+        worker_threads = import_worker_threads_for_tests()
+        from worker_capture import CaptureUISnapshot
+
+        scheduled = []
+        app = types.SimpleNamespace(
+            is_running=True,
+            previous_text="",
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            translation_queue=queue.Queue(),
+            ocr_stability_gate=types.SimpleNamespace(has_pending=lambda: False),
+            last_successful_translation_time=90.0,
+            last_displayed_translation_sequence=3,
+            clear_translation_timeout=2.0,
+            get_ocr_model_setting=Mock(
+                side_effect=AssertionError("API OCR path must not read live OCR model")
+            ),
+            is_api_based_ocr_model=Mock(
+                side_effect=AssertionError("API OCR path must not classify live OCR model")
+            ),
+            is_placeholder_text=lambda text: False,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+            ),
+            display_manager=types.SimpleNamespace(
+                _update_translation_text_on_main_thread=lambda text: None,
+            ),
+            update_translation_text=lambda text: None,
+            runtime_metrics=RuntimeMetrics(clock=lambda: 100.0),
+            capture_ui_snapshot=CaptureUISnapshot(
+                generation=2,
+                source_geometry=(0, 0, 10, 10),
+                ocr_model="custom_ai",
+                scan_interval_ms=100,
+                base_scan_interval_ms=100,
+                keep_linebreaks=False,
+                is_api_based=True,
+                source_lang="en",
+            ),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            with patch.object(worker_threads.time, "sleep", side_effect=lambda _s: setattr(app, "is_running", False)):
+                worker_threads.run_translation_thread(app)
+
+        self.assertEqual(scheduled, [])
+        app.get_ocr_model_setting.assert_not_called()
+        app.is_api_based_ocr_model.assert_not_called()
+
+    def test_translation_thread_skips_clear_when_snapshot_unpublished(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        app = types.SimpleNamespace(
+            is_running=True,
+            previous_text="",
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            translation_queue=queue.Queue(),
+            ocr_stability_gate=types.SimpleNamespace(has_pending=lambda: False),
+            last_successful_translation_time=90.0,
+            last_displayed_translation_sequence=3,
+            clear_translation_timeout=2.0,
+            get_ocr_model_setting=Mock(
+                side_effect=AssertionError("missing snapshot must not fall back to Tk")
+            ),
+            is_api_based_ocr_model=Mock(
+                side_effect=AssertionError("missing snapshot must not fall back to Tk")
+            ),
+            is_placeholder_text=lambda text: False,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+            ),
+            display_manager=types.SimpleNamespace(
+                _update_translation_text_on_main_thread=lambda text: None,
+            ),
+            update_translation_text=lambda text: None,
+            runtime_metrics=RuntimeMetrics(clock=lambda: 100.0),
+            capture_ui_snapshot=None,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            with patch.object(worker_threads.time, "sleep", side_effect=lambda _s: setattr(app, "is_running", False)):
+                worker_threads.run_translation_thread(app)
+
+        self.assertEqual(scheduled, [])
+        app.get_ocr_model_setting.assert_not_called()
+        app.is_api_based_ocr_model.assert_not_called()
+
 
 class LatencyTranslationCacheTests(unittest.TestCase):
     def test_api_ocr_cache_hit_reuses_cached_text_without_webp_or_submit(self):
