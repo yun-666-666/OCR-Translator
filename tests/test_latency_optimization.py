@@ -835,6 +835,29 @@ class LatencyShutdownTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             worker_threads._schedule_ui_callback(app, Mock())
 
+    def test_worker_ui_callback_supports_delayed_schedule(self):
+        worker_threads = import_worker_threads_for_tests()
+        after = Mock(return_value="timer-1")
+        callback = Mock()
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                winfo_exists=lambda: True,
+                after=after,
+            ),
+            is_running=True,
+            _app_is_closing=False,
+        )
+
+        scheduled = worker_threads._schedule_ui_callback(
+            app,
+            callback,
+            "payload",
+            delay_ms=250,
+        )
+
+        self.assertTrue(scheduled)
+        after.assert_called_once_with(250, callback, "payload")
+
     def test_on_closing_stops_running_app_without_user_stop_poll(self):
         import app_logic
 
@@ -3629,6 +3652,46 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(app.pending_translation_request["text"], "Latest")
         self.assertEqual(app.pending_translation_flush_generation, 2)
         self.assertEqual(app.pending_translation_flush_deadline_monotonic, 102.0)
+
+    def test_pending_translation_flush_schedule_uses_ui_callback_guards(self):
+        worker_threads = import_worker_threads_for_tests()
+        after = Mock()
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                winfo_exists=lambda: True,
+                after=after,
+            ),
+            is_running=True,
+            _app_is_closing=True,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads._queue_pending_translation_request(
+                app,
+                "Latest",
+                2,
+                0.5,
+                "submit interval",
+                requested_at_monotonic=99.75,
+            )
+
+        self.assertEqual(
+            app.pending_translation_request,
+            {
+                "text": "Latest",
+                "ocr_sequence_number": 2,
+                "requested_at_monotonic": 99.75,
+                "configuration_refresh": False,
+            },
+        )
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_deadline_monotonic, 0.0)
+        self.assertEqual(app.pending_translation_flush_generation, 1)
+        after.assert_not_called()
 
     def test_matching_pending_translation_is_coalesced_before_cache_lookup(self):
         worker_threads = import_worker_threads_for_tests()

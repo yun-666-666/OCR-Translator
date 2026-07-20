@@ -44,8 +44,8 @@ def _process_translation_async(*args, **kwargs):
     return _facade().process_translation_async(*args, **kwargs)
 
 
-def _schedule_ui_callback(app, callback, *args):
-    """Schedule a worker result only while the Tk root is still usable."""
+def _schedule_ui_callback(app, callback, *args, delay_ms=0):
+    """Schedule a worker UI callback only while the Tk root is still usable."""
     if getattr(app, "_app_is_closing", False):
         return False
     if hasattr(app, "is_running") and not bool(app.is_running):
@@ -57,7 +57,7 @@ def _schedule_ui_callback(app, callback, *args):
     try:
         if callable(exists) and not bool(exists()):
             return False
-        root.after(0, callback, *args)
+        root.after(max(0, int(delay_ms or 0)), callback, *args)
         return True
     except (RuntimeError, tk.TclError) as schedule_error:
         _log_debug(
@@ -707,18 +707,22 @@ def _queue_pending_translation_request(
     app.pending_translation_flush_scheduled = True
     remaining_seconds = max(0.0, desired_deadline - time.monotonic())
     delay_ms = max(1, int(remaining_seconds * 1000))
-    try:
-        app.root.after(
-            delay_ms,
-            _flush_pending_translation_request,
-            app,
-            generation,
-        )
-    except Exception:
+    scheduled = _schedule_ui_callback(
+        app,
+        _flush_pending_translation_request,
+        app,
+        generation,
+        delay_ms=delay_ms,
+    )
+    if not scheduled:
         if int(getattr(app, 'pending_translation_flush_generation', 0) or 0) == generation:
             app.pending_translation_flush_scheduled = False
             app.pending_translation_flush_deadline_monotonic = 0.0
-        raise
+        _log_debug(
+            "LATENCY: failed to schedule pending translation flush: "
+            f"generation={generation} reason={reason}"
+        )
+        return
 
 
 def _expedite_pending_translation_request(app):
