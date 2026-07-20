@@ -1,5 +1,6 @@
 import atexit
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -19,41 +20,72 @@ CUSTOM_AI_SHORT_LOG_FILENAMES = (
     CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME,
 )
 
+_AUTH_HEADER_RE = re.compile(
+    r"authorization\s*:\s*(?:bearer|basic)?\s*[^\s,;]+",
+    re.IGNORECASE,
+)
+_BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_COMMON_SECRET_RE = re.compile(
+    r"\b(?:sk|rk|pk|api|key|token)-[A-Za-z0-9._-]{6,}\b",
+    re.IGNORECASE,
+)
+_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+_QUERY_SECRET_RE = re.compile(
+    r"([?&](?:api[_-]?key|access[_-]?token|token|key|secret|password|auth)=)[^&\s#]+",
+    re.IGNORECASE,
+)
+_HEADER_SECRET_RE = re.compile(
+    r"((?:x-api-key|api-key|x-auth-token)\s*[:=]\s*)[^\s,;]+",
+    re.IGNORECASE,
+)
+
 _debug_logging_enabled = True
 _writer_registry = {}
 _writer_registry_lock = threading.RLock()
 
 
 class _LogCoalescingGate:
-    """Prepare first-and-periodic messages without retaining message content."""
+    """Prepare first-and-periodic messages without retaining message content.
+
+    Optional status forces an immediate emit when the status class changes,
+    even inside the interval window, so transitions stay observable.
+    """
 
     def __init__(self, clock=None):
         self._clock = clock or time.monotonic
         self._lock = threading.RLock()
         self._states = {}
 
-    def prepare(self, event_key, message, interval_seconds=5.0):
+    def prepare(self, event_key, message, interval_seconds=5.0, status=None):
         try:
             interval_seconds = max(0.0, float(interval_seconds))
         except (TypeError, ValueError):
             interval_seconds = 5.0
         now = float(self._clock())
+        status_token = None if status is None else str(status)
 
         with self._lock:
             state = self._states.get(event_key)
             if state is None:
-                self._states[event_key] = (now, 0)
+                self._states[event_key] = (now, 0, status_token)
                 return str(message)
 
-            last_logged, suppressed_count = state
-            if now - last_logged < interval_seconds:
+            last_logged, suppressed_count, last_status = state
+            status_changed = (
+                status_token is not None and status_token != last_status
+            )
+            if (not status_changed) and now - last_logged < interval_seconds:
                 self._states[event_key] = (
                     last_logged,
                     suppressed_count + 1,
+                    last_status if status_token is None else status_token,
                 )
                 return None
 
-            self._states[event_key] = (now, 0)
+            next_status = (
+                last_status if status_token is None else status_token
+            )
+            self._states[event_key] = (now, 0, next_status)
 
         message = str(message)
         if not suppressed_count:
@@ -70,6 +102,117 @@ class _LogCoalescingGate:
 
 
 _debug_log_coalescer = _LogCoalescingGate()
+
+
+def sanitize_log_message(message, api_key=None, max_length=0):
+    """Return a diagnostics-safe string with secrets and tokens redacted."""
+    try:
+        if message is None:
+            text = ""
+        else:
+            text = str(message)
+    except Exception:
+        return ""
+
+    if api_key:
+        key_text = str(api_key)
+        if key_text:
+            text = text.replace(key_text, "[redacted]")
+
+    text = _AUTH_HEADER_RE.sub("[redacted-auth]", text)
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _HEADER_SECRET_RE.sub(r"\1[redacted]", text)
+    text = _QUERY_SECRET_RE.sub(r"\1[redacted]", text)
+    text = _COMMON_SECRET_RE.sub("[redacted]", text)
+    text = _LONG_TOKEN_RE.sub("[redacted]", text)
+    text = re.sub(r"\s+", " ", text.replace("\r", " ").replace("\n", " ")).strip()
+
+    try:
+        limit = int(max_length)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit > 0 and len(text) > limit:
+        text = text[: max(0, limit - 1)].rstrip() + "..."
+    return text
+
+
+def classify_log_error_class(error_text):
+    """Classify an error string into a short stable diagnostic class."""
+    lowered = str(error_text or "").strip().lower()
+    if not lowered:
+        return "other"
+
+    rate_markers = (
+        "http 429",
+        "rate limit",
+        "too many requests",
+        "retry-after",
+        "retry after",
+        "quota exceeded",
+    )
+    if any(marker in lowered for marker in rate_markers):
+        return "rate_limit"
+
+    auth_markers = (
+        "http 401",
+        "http 402",
+        "http 403",
+        "unauthorized",
+        "forbidden",
+        "invalid api key",
+        "insufficient_balance",
+        "insufficient balance",
+        "预扣费",
+        "余额不足",
+    )
+    if any(marker in lowered for marker in auth_markers):
+        return "auth"
+
+    server_markers = (
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+        "bad gateway",
+        "gateway timeout",
+        "service unavailable",
+        "internal server error",
+    )
+    if any(marker in lowered for marker in server_markers):
+        return "server_error"
+
+    parse_markers = (
+        "non-json",
+        "non json",
+        "json decode",
+        "jsondecode",
+        "expecting value",
+        "did not contain message content",
+        "invalid translation",
+        "empty response",
+        "empty content",
+        "parse",
+    )
+    if any(marker in lowered for marker in parse_markers):
+        return "parse"
+
+    transport_markers = (
+        "ssl",
+        "tls",
+        "unexpected_eof",
+        "eof occurred",
+        "connection reset",
+        "connection refused",
+        "remote end closed",
+        "timed out",
+        "timeout",
+        "protocol violation",
+        "broken pipe",
+    )
+    if any(marker in lowered for marker in transport_markers):
+        return "transport"
+
+    return "other"
 
 
 class _RotatingTextWriter:
@@ -352,9 +495,10 @@ def log_debug(message):
         return
 
     try:
+        safe_message = sanitize_log_message(message)
         append_rotating_text(
             DEBUG_LOG_FILENAME,
-            f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {message}\n",
+            f"{time.strftime('%Y-%m-%d %H:%M:%S')}: {safe_message}\n",
             max_bytes=DEBUG_LOG_MAX_BYTES,
             backup_count=DEBUG_LOG_BACKUP_COUNT,
         )
@@ -362,8 +506,12 @@ def log_debug(message):
         print(f"Error writing to log file: {e}")
 
 
-def log_debug_coalesced(event_key, message, interval_seconds=5.0):
-    """Log the first event immediately and summarize repetitions periodically."""
+def log_debug_coalesced(event_key, message, interval_seconds=5.0, status=None):
+    """Log the first event immediately and summarize repetitions periodically.
+
+    When status is provided and changes between calls with the same event_key,
+    the new message is emitted immediately (status-transition flush).
+    """
     if not _debug_logging_enabled:
         return False
     try:
@@ -371,6 +519,7 @@ def log_debug_coalesced(event_key, message, interval_seconds=5.0):
             event_key,
             message,
             interval_seconds=interval_seconds,
+            status=status,
         )
     except Exception:
         log_debug(message)

@@ -75,6 +75,55 @@ class LogCoalescingGateTests(unittest.TestCase):
             "periodic (suppressed 19 similar events since previous log)",
         )
 
+    def test_status_change_forces_log_inside_interval_with_suppressed_count(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=1 translation=0",
+                interval_seconds=5.0,
+                status="1:0",
+            ),
+            "waiting ocr=1 translation=0",
+        )
+        now[0] = 101.0
+        self.assertIsNone(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=1 translation=0",
+                interval_seconds=5.0,
+                status="1:0",
+            )
+        )
+        now[0] = 102.0
+        self.assertEqual(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=0 translation=1",
+                interval_seconds=5.0,
+                status="0:1",
+            ),
+            "waiting ocr=0 translation=1 "
+            "(suppressed 1 similar event since previous log)",
+        )
+
+    def test_status_none_keeps_interval_coalescing_behavior(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(
+            gate.prepare("plain", "a", interval_seconds=5.0),
+            "a",
+        )
+        now[0] = 101.0
+        self.assertIsNone(gate.prepare("plain", "b", interval_seconds=5.0))
+        now[0] = 102.0
+        self.assertIsNone(
+            gate.prepare("plain", "c", interval_seconds=5.0, status=None)
+        )
+
     def test_wrapper_falls_back_to_direct_log_when_coalescing_fails(self):
         with patch.object(
             logger._debug_log_coalescer,
@@ -90,6 +139,113 @@ class LogCoalescingGateTests(unittest.TestCase):
 
         self.assertTrue(result)
         direct_log.assert_called_once_with("current diagnostic remains visible")
+
+    def test_wrapper_forwards_status_to_coalescer(self):
+        with patch.object(
+            logger._debug_log_coalescer,
+            "prepare",
+            return_value="emitted",
+        ) as prepare:
+            with patch.object(logger, "log_debug") as direct_log:
+                result = logger.log_debug_coalesced(
+                    "route-retry",
+                    "retry class=rate_limit",
+                    interval_seconds=2.0,
+                    status="rate_limit",
+                )
+
+        self.assertTrue(result)
+        prepare.assert_called_once_with(
+            "route-retry",
+            "retry class=rate_limit",
+            interval_seconds=2.0,
+            status="rate_limit",
+        )
+        direct_log.assert_called_once_with("emitted")
+
+
+class DiagnosticSanitizerTests(unittest.TestCase):
+    def test_sanitize_redacts_auth_bearer_and_common_api_keys(self):
+        raw = (
+            "Authorization: Bearer sk-live-secretTOKEN123 "
+            "and sk-test-abcdef and key-zzzzzzzz"
+        )
+        cleaned = logger.sanitize_log_message(raw)
+
+        self.assertNotIn("sk-live-secretTOKEN123", cleaned)
+        self.assertNotIn("sk-test-abcdef", cleaned)
+        self.assertNotIn("Bearer sk-live", cleaned)
+        self.assertIn("[redacted]", cleaned.lower().replace(" ", "") or cleaned)
+        self.assertTrue(
+            "Bearer [redacted]" in cleaned or "[redacted-auth]" in cleaned
+        )
+
+    def test_sanitize_redacts_explicit_api_key_and_query_tokens(self):
+        api_key = "super-secret-user-key-value"
+        raw = (
+            f"failed for key={api_key} at "
+            "https://api.example.com/v1/models?api_key=abc123XYZ&x=1"
+        )
+        cleaned = logger.sanitize_log_message(raw, api_key=api_key)
+
+        self.assertNotIn(api_key, cleaned)
+        self.assertNotIn("api_key=abc123XYZ", cleaned)
+        self.assertIn("https://api.example.com/v1/models", cleaned)
+
+    def test_sanitize_redacts_long_opaque_tokens_without_raising(self):
+        token = "a" * 40
+        cleaned = logger.sanitize_log_message(f"token={token}")
+        self.assertNotIn(token, cleaned)
+        self.assertEqual(logger.sanitize_log_message(None), "")
+
+        class Hostile:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        self.assertEqual(logger.sanitize_log_message(Hostile()), "")
+
+    def test_classify_log_error_class_covers_rate_auth_server_parse(self):
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 429 rate limit"),
+            "rate_limit",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 401 unauthorized"),
+            "auth",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 503 unavailable"),
+            "server_error",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("response was non-JSON or empty"),
+            "parse",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("SSL EOF unexpected"),
+            "transport",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("something mild"),
+            "other",
+        )
+
+    def test_log_debug_sanitizes_message_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"OCR_TRANSLATOR_LOG_DIR": tmp_dir}):
+                logger.log_debug(
+                    "Authorization: Bearer supersecretvalue123456789012345"
+                )
+                logger.close_log_writers()
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+
+        self.assertNotIn("supersecretvalue123456789012345", content)
+        self.assertTrue(
+            "Bearer [redacted]" in content or "[redacted-auth]" in content,
+            msg=content,
+        )
 
 
 class RuntimeTextSummaryTests(unittest.TestCase):

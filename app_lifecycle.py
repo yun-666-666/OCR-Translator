@@ -17,6 +17,23 @@ def _log_debug(message):
         return facade.log_debug(message)
 
 
+def _log_debug_coalesced(event_key, message, interval_seconds=5.0, status=None):
+    facade = sys.modules.get("app_logic")
+    if facade is not None:
+        coalesced = getattr(facade, "log_debug_coalesced", None)
+        if callable(coalesced):
+            return coalesced(
+                event_key,
+                message,
+                interval_seconds=interval_seconds,
+                status=status,
+            )
+        direct = getattr(facade, "log_debug", None)
+        if callable(direct):
+            return direct(message)
+    return None
+
+
 class AppLifecycleMixin:
     def initialize_async_translation_infrastructure(self):
         """Initialize async translation infrastructure if not already present."""
@@ -265,21 +282,20 @@ class AppLifecycleMixin:
             else:
                 _log_debug("All pending API calls have completed.")
 
-            self._shutdown_wait_log_next_at = 0.0
             _log_debug(f"Graceful shutdown for thread pools completed in {elapsed:.2f}s.")
             self._finalize_shutdown() # Proceed to the final steps
             return
 
         # If not done, poll again shortly
-        next_wait_log_at = float(
-            getattr(self, "_shutdown_wait_log_next_at", 0.0) or 0.0
-        )
-        if now >= next_wait_log_at:
-            _log_debug(
+        _log_debug_coalesced(
+            "graceful-shutdown-wait",
+            (
                 "Waiting for pending API calls to complete... "
                 f"OCR: {pending_ocr}, Translation: {pending_translation}"
-            )
-            self._shutdown_wait_log_next_at = now + 1.0
+            ),
+            interval_seconds=1.0,
+            status=f"{pending_ocr}:{pending_translation}",
+        )
         if self._root_window_alive() and not getattr(self, '_app_is_closing', False):
             self.root.after(100, self._graceful_shutdown_poll)
 

@@ -1,33 +1,14 @@
 import math
-import re
 import threading
 import time
 from collections import defaultdict, deque
 
-
-_AUTH_HEADER_RE = re.compile(
-    r"authorization\s*:\s*(?:bearer|basic)?\s*[^\s,;]+",
-    re.IGNORECASE,
-)
-_BEARER_RE = re.compile(r"\bbearer\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
-_COMMON_SECRET_RE = re.compile(
-    r"\b(?:sk|rk|pk|api|key|token)-[A-Za-z0-9._-]{6,}\b",
-    re.IGNORECASE,
-)
-_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+from logger import sanitize_log_message
 
 
 def sanitize_metric_label(value, max_length=96):
     """Return a short, display-safe label for diagnostics UI."""
-    text = str(value or "").replace("\r", " ").replace("\n", " ").strip()
-    text = _AUTH_HEADER_RE.sub("[redacted-auth]", text)
-    text = _BEARER_RE.sub("Bearer [redacted]", text)
-    text = _COMMON_SECRET_RE.sub("[redacted]", text)
-    text = _LONG_TOKEN_RE.sub("[redacted]", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > max_length:
-        text = text[: max(0, max_length - 1)].rstrip() + "..."
-    return text
+    return sanitize_log_message(value, max_length=max_length)
 
 
 class RuntimeMetrics:

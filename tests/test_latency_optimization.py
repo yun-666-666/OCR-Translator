@@ -1029,6 +1029,7 @@ class LatencyShutdownTests(unittest.TestCase):
 
     def test_graceful_shutdown_wait_log_is_coalesced_to_one_second(self):
         import app_logic
+        import logger
 
         app = object.__new__(app_logic.GameChangingTranslator)
         app.translation_handler = types.SimpleNamespace(
@@ -1041,10 +1042,18 @@ class LatencyShutdownTests(unittest.TestCase):
         app.root = types.SimpleNamespace(after=Mock())
         app._finalize_shutdown = Mock()
 
-        with patch.object(app_logic, "log_debug") as log_debug:
-            for now in (105.0, 105.2, 106.0):
-                with patch.object(app_logic.time, "monotonic", return_value=now):
-                    app._graceful_shutdown_poll()
+        now = [105.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+        with patch.object(logger, "_debug_log_coalescer", gate):
+            with patch.object(logger, "log_debug") as log_debug:
+                for value in (105.0, 105.2, 106.0):
+                    now[0] = value
+                    with patch.object(
+                        app_logic.time,
+                        "monotonic",
+                        return_value=value,
+                    ):
+                        app._graceful_shutdown_poll()
 
         wait_logs = [
             call.args[0]

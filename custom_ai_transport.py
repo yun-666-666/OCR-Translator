@@ -873,7 +873,17 @@ class CustomAITransportMixin:
                 if self._discard_owned_http_client_for_transport_error(e):
                     http_client = self._get_http_client(latency_mode)
                 if attempt == 0:
-                    _log_debug(f"LATENCY: custom_ai models GET retry for transient error at {url}: {type(e).__name__}")
+                    error_class = "transport"
+                    try:
+                        from logger import classify_log_error_class
+
+                        error_class = classify_log_error_class(e)
+                    except Exception:
+                        pass
+                    _log_debug(
+                        "LATENCY: custom_ai models GET retry for transient error "
+                        f"class={error_class} error={type(e).__name__}"
+                    )
         raise last_error
 
     def _post(
@@ -1481,9 +1491,14 @@ class CustomAITransportMixin:
         return f"Chat completions response from {url} was non-JSON or empty."
 
     def _sanitize_error(self, message, api_key):
-        message = str(message)
-        if api_key:
-            message = message.replace(str(api_key), "[redacted]")
+        try:
+            from logger import sanitize_log_message
+
+            message = sanitize_log_message(message, api_key=api_key)
+        except Exception:
+            message = str(message)
+            if api_key:
+                message = message.replace(str(api_key), "[redacted]")
         if self._is_tls_eof_error(message):
             return (
                 "TLS/SSL connection was closed by the server or proxy before a response was received. "

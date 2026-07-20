@@ -18,7 +18,12 @@ from ai_optimization import (
     AiOcrImageCapabilityMemory,
     normalize_ai_optimization_mode,
 )
-from logger import log_debug, set_debug_logging_enabled, is_debug_logging_enabled
+from logger import (
+    log_debug,
+    log_debug_coalesced,
+    set_debug_logging_enabled,
+    is_debug_logging_enabled,
+)
 from resource_handler import get_resource_path
 from config_manager import (
     load_app_config,
