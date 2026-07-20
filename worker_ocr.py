@@ -681,16 +681,15 @@ def _schedule_inactive_translation_clear(
         return False
 
     app.translation_inactivity_clear_scheduled_epoch = expected_epoch
-    try:
-        app.root.after(
-            0,
-            _apply_inactive_translation_clear,
-            app,
-            expected_epoch,
-            float(inactive_duration),
-            float(timeout_seconds),
-        )
-    except Exception as schedule_error:
+    scheduled = _schedule_ui_callback(
+        app,
+        _apply_inactive_translation_clear,
+        app,
+        expected_epoch,
+        float(inactive_duration),
+        float(timeout_seconds),
+    )
+    if not scheduled:
         if (
             getattr(
                 app,
@@ -702,7 +701,7 @@ def _schedule_inactive_translation_clear(
             app.translation_inactivity_clear_scheduled_epoch = None
         _log_debug(
             "LATENCY: failed to schedule translation inactivity clear: "
-            f"{type(schedule_error).__name__} - {schedule_error}"
+            "UI callback could not be scheduled"
         )
         return False
     return True

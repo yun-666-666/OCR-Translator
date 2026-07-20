@@ -1483,6 +1483,67 @@ class TranslationInactivityClearTests(unittest.TestCase):
             0,
         )
 
+    def test_inactivity_clear_schedule_uses_ui_callback_guards(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        cases = {
+            "closing app": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: True,
+                    after=Mock(),
+                ),
+                "attrs": {"_app_is_closing": True},
+            },
+            "destroyed root": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: False,
+                    after=Mock(),
+                ),
+                "attrs": {},
+            },
+            "destroyed tk runtime": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: True,
+                    after=Mock(
+                        side_effect=RuntimeError(
+                            "main thread is not in main loop"
+                        )
+                    ),
+                ),
+                "attrs": {},
+            },
+        }
+
+        for name, case in cases.items():
+            with self.subTest(name=name):
+                app, scheduled, displayed, _metrics = self._make_app()
+                app.root = case["root"]
+                for key, value in case["attrs"].items():
+                    setattr(app, key, value)
+
+                result = worker_threads._schedule_inactive_translation_clear(
+                    app,
+                    inactive_duration=5.0,
+                    timeout_seconds=2.0,
+                )
+
+                self.assertFalse(result)
+                self.assertEqual(scheduled, [])
+                self.assertEqual(displayed, [])
+                self.assertIsNone(
+                    getattr(
+                        app,
+                        "translation_inactivity_clear_scheduled_epoch",
+                        None,
+                    )
+                )
+                after = getattr(app.root, "after", None)
+                if isinstance(after, Mock):
+                    if name == "destroyed root":
+                        after.assert_not_called()
+                    elif name == "closing app":
+                        after.assert_not_called()
+
     def test_translation_thread_uses_published_snapshot_for_local_clear_gate(self):
         worker_threads = import_worker_threads_for_tests()
         from worker_capture import CaptureUISnapshot, publish_capture_ui_snapshot
