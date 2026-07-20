@@ -6220,21 +6220,88 @@ class LiveCustomAIModelSwitchTests(unittest.TestCase):
         app = types.SimpleNamespace(
             is_running=True,
             root=types.SimpleNamespace(
-                after=Mock(side_effect=RuntimeError("Tk closing"))
+                winfo_exists=lambda: True,
+                after=Mock(side_effect=RuntimeError("Tk closing")),
             ),
             pending_translation_request=pending,
             pending_translation_flush_scheduled=True,
             pending_translation_flush_deadline_monotonic=160.0,
             pending_translation_flush_generation=4,
+            translation_profile_refresh_generation=0,
         )
 
-        with self.assertRaisesRegex(RuntimeError, "Tk closing"):
-            worker_threads.refresh_translation_after_profile_change(app)
+        refreshed = worker_threads.refresh_translation_after_profile_change(app)
 
+        self.assertFalse(refreshed)
         self.assertIs(app.pending_translation_request, pending)
         self.assertTrue(app.pending_translation_flush_scheduled)
         self.assertEqual(app.pending_translation_flush_deadline_monotonic, 160.0)
         self.assertEqual(app.pending_translation_flush_generation, 4)
+        self.assertEqual(app.translation_profile_refresh_generation, 0)
+
+    def test_profile_refresh_schedule_uses_ui_callback_guards(self):
+        worker_threads = import_worker_threads_for_tests()
+        pending = {
+            "text": "latest subtitle",
+            "ocr_sequence_number": 8,
+            "requested_at_monotonic": 99.0,
+        }
+
+        cases = {
+            "closing app": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: True,
+                    after=Mock(),
+                ),
+                "attrs": {"_app_is_closing": True},
+            },
+            "destroyed root": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: False,
+                    after=Mock(),
+                ),
+                "attrs": {},
+            },
+            "stopped app": {
+                "root": types.SimpleNamespace(
+                    winfo_exists=lambda: True,
+                    after=Mock(),
+                ),
+                "attrs": {"is_running": False},
+            },
+        }
+
+        for name, case in cases.items():
+            with self.subTest(name=name):
+                app = types.SimpleNamespace(
+                    is_running=True,
+                    root=case["root"],
+                    pending_translation_request=dict(pending),
+                    pending_translation_flush_scheduled=True,
+                    pending_translation_flush_deadline_monotonic=160.0,
+                    pending_translation_flush_generation=4,
+                    translation_profile_refresh_generation=2,
+                )
+                for key, value in case["attrs"].items():
+                    setattr(app, key, value)
+
+                refreshed = worker_threads.refresh_translation_after_profile_change(
+                    app,
+                    reason="active profile model changed",
+                )
+
+                self.assertFalse(refreshed)
+                self.assertEqual(app.pending_translation_request, pending)
+                self.assertTrue(app.pending_translation_flush_scheduled)
+                self.assertEqual(
+                    app.pending_translation_flush_deadline_monotonic,
+                    160.0,
+                )
+                self.assertEqual(app.pending_translation_flush_generation, 4)
+                self.assertEqual(app.translation_profile_refresh_generation, 2)
+                after = getattr(app.root, "after", None)
+                if isinstance(after, Mock):
+                    after.assert_not_called()
 
     def test_profile_refresh_callback_uses_newer_translation_candidate(self):
         worker_threads = import_worker_threads_for_tests()

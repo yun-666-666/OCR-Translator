@@ -815,18 +815,21 @@ def refresh_translation_after_profile_change(app, reason="profile changed"):
         clear_status=True,
         reason=reason,
     )
-    try:
-        app.root.after(
-            0,
-            _apply_translation_profile_refresh,
-            app,
-            refresh_generation,
-            dict(candidate),
-            reason,
-        )
-    except Exception:
+    scheduled = _schedule_ui_callback(
+        app,
+        _apply_translation_profile_refresh,
+        app,
+        refresh_generation,
+        dict(candidate),
+        reason,
+    )
+    if not scheduled:
         app.translation_profile_refresh_generation = previous_generation
-        raise
+        _log_debug(
+            "LATENCY: failed to schedule translation profile refresh: "
+            f"reason={reason}"
+        )
+        return False
 
     _invalidate_pending_translation_request(app, reason)
     _log_debug(
