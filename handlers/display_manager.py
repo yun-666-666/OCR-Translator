@@ -39,14 +39,37 @@ class DisplayManager:
         Args:
             text_to_display: Text content to display in the overlay
         """
-        # Check if the target overlay and text widget references are valid
-        if not self.app.target_overlay or not hasattr(self.app.target_overlay, 'winfo_exists') or not self.app.target_overlay.winfo_exists() or \
-           not self.app.translation_text or not hasattr(self.app.translation_text, 'winfo_exists') or not self.app.translation_text.winfo_exists():
-            # log_debug("Update translation skipped: Target overlay or text widget invalid/destroyed.") # Can be verbose
+        if getattr(self.app, "_app_is_closing", False):
+            return
+        if hasattr(self.app, "is_running") and not bool(self.app.is_running):
             return
 
-        # Schedule the actual update via the main thread's event loop
-        self.app.root.after(0, self._update_translation_text_on_main_thread, text_to_display)
+        root = getattr(self.app, "root", None)
+        if root is None:
+            return
+
+        try:
+            root_exists = getattr(root, "winfo_exists", None)
+            if callable(root_exists) and not bool(root_exists()):
+                return
+
+            target_overlay = getattr(self.app, "target_overlay", None)
+            translation_text = getattr(self.app, "translation_text", None)
+            if (
+                not target_overlay
+                or not hasattr(target_overlay, "winfo_exists")
+                or not target_overlay.winfo_exists()
+                or not translation_text
+                or not hasattr(translation_text, "winfo_exists")
+                or not translation_text.winfo_exists()
+            ):
+                return
+
+            # Keep asynchronous main-thread display semantics for the healthy path.
+            root.after(0, self._update_translation_text_on_main_thread, text_to_display)
+        except (RuntimeError, tk.TclError):
+            # Closing / destroyed Tk trees must drop display updates silently.
+            return
 
     def _apply_tkinter_text_alignment(self, widget, justify):
         widget.tag_configure("translation_alignment", justify=justify)

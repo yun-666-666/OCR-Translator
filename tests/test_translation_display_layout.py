@@ -138,6 +138,102 @@ class TranslationDisplayLayoutForwardingTests(unittest.TestCase):
             horizontal_centered=True,
         )
 
+    def _make_schedule_app(self, **overrides):
+        root = Mock()
+        root.winfo_exists.return_value = True
+        root.after = Mock()
+        app = SimpleNamespace(
+            root=root,
+            target_overlay=_VisibleOverlay(),
+            translation_text=_VisibleOverlay(),
+            is_running=True,
+            _app_is_closing=False,
+        )
+        for key, value in overrides.items():
+            setattr(app, key, value)
+        return app
+
+    def test_update_translation_text_schedules_main_thread_callback(self):
+        app = self._make_schedule_app()
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("hello display")
+
+        app.root.after.assert_called_once_with(
+            0,
+            manager._update_translation_text_on_main_thread,
+            "hello display",
+        )
+
+    def test_update_translation_text_skips_when_app_is_closing(self):
+        app = self._make_schedule_app(_app_is_closing=True)
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("closing")
+
+        app.root.after.assert_not_called()
+
+    def test_update_translation_text_skips_when_root_missing(self):
+        app = self._make_schedule_app(root=None)
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("no root")
+
+    def test_update_translation_text_skips_when_root_destroyed(self):
+        root = Mock()
+        root.winfo_exists.return_value = False
+        root.after = Mock()
+        app = self._make_schedule_app(root=root)
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("destroyed root")
+
+        root.after.assert_not_called()
+
+    def test_update_translation_text_swallows_after_tclerror(self):
+        import tkinter as tk
+
+        root = Mock()
+        root.winfo_exists.return_value = True
+        root.after.side_effect = tk.TclError("application has been destroyed")
+        app = self._make_schedule_app(root=root)
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("after fails")
+
+        root.after.assert_called_once()
+
+    def test_update_translation_text_swallows_after_runtimeerror(self):
+        root = Mock()
+        root.winfo_exists.return_value = True
+        root.after.side_effect = RuntimeError("main thread is not in main loop")
+        app = self._make_schedule_app(root=root)
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("after runtime fails")
+
+        root.after.assert_called_once()
+
+    def test_update_translation_text_skips_when_widget_winfo_raises(self):
+        import tkinter as tk
+
+        class _RaisingWidget:
+            def winfo_exists(self):
+                raise tk.TclError("invalid command name")
+
+        root = Mock()
+        root.winfo_exists.return_value = True
+        root.after = Mock()
+        app = self._make_schedule_app(
+            root=root,
+            translation_text=_RaisingWidget(),
+        )
+        manager = DisplayManager(app)
+
+        manager.update_translation_text("widget dying")
+
+        root.after.assert_not_called()
+
     def test_tk_fallback_flattens_compact_text_and_centers_horizontally(self):
         translation_text = _TkFallbackText()
         app = SimpleNamespace(
