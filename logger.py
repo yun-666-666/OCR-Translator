@@ -30,13 +30,26 @@ _COMMON_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
-_QUERY_SECRET_RE = re.compile(
-    r"([?&](?:api[_-]?key|access[_-]?token|token|key|secret|password|auth)=)[^&\s#]+",
-    re.IGNORECASE,
+# Sensitive field names only — never bare "key" or diagnostic labels like status/class.
+# Require a non-identifier boundary so INVALID_API_KEY: ... is not treated as api_key=.
+_SECRET_FIELD_NAME = (
+    r"(?:api[_-]?key|access[_-]?token|x-api-key|x-auth-token|"
+    r"authorization|password|secret|token)"
 )
-_HEADER_SECRET_RE = re.compile(
-    r"((?:x-api-key|api-key|x-auth-token)\s*[:=]\s*)[^\s,;]+",
-    re.IGNORECASE,
+# Covers plain key=value / key: value, URL query, headers, and JSON-ish quoted forms.
+_SECRET_FIELD_ASSIGNMENT_RE = re.compile(
+    rf"""(?ix)
+    (?<![A-Za-z0-9_])
+    (
+      ["']?{_SECRET_FIELD_NAME}["']?
+      \s*[:=]\s*
+    )
+    (?:
+      (["']) (?:\\.|(?!\2).)* \2
+      |
+      [^\s,;&#"'}}{{]+
+    )
+    """,
 )
 
 _debug_logging_enabled = True
@@ -121,8 +134,7 @@ def sanitize_log_message(message, api_key=None, max_length=0):
 
     text = _AUTH_HEADER_RE.sub("[redacted-auth]", text)
     text = _BEARER_RE.sub("Bearer [redacted]", text)
-    text = _HEADER_SECRET_RE.sub(r"\1[redacted]", text)
-    text = _QUERY_SECRET_RE.sub(r"\1[redacted]", text)
+    text = _SECRET_FIELD_ASSIGNMENT_RE.sub(r"\1[redacted]", text)
     text = _COMMON_SECRET_RE.sub("[redacted]", text)
     text = _LONG_TOKEN_RE.sub("[redacted]", text)
     text = re.sub(r"\s+", " ", text.replace("\r", " ").replace("\n", " ")).strip()

@@ -204,6 +204,126 @@ class DiagnosticSanitizerTests(unittest.TestCase):
 
         self.assertEqual(logger.sanitize_log_message(Hostile()), "")
 
+    def test_sanitize_redacts_short_and_structured_secret_fields(self):
+        cases = (
+            (
+                "plain-short-api-key",
+                "provider failed api_key=short",
+                ("short",),
+                ("api_key=",),
+            ),
+            (
+                "plain-short-token-password-secret",
+                "token=ab password=cd secret=ef",
+                ("ab", "cd", "ef"),
+                ("token=", "password=", "secret="),
+            ),
+            (
+                "colon-header-forms",
+                "x-api-key: shortkey; x-auth-token: tok1; api-key: ak1",
+                ("shortkey", "tok1", "ak1"),
+                ("x-api-key:", "x-auth-token:", "api-key:"),
+            ),
+            (
+                "json-quoted-values",
+                '{"api_key":"jsonShort","token":"t1","password":"p1","secret":"s1"}',
+                ("jsonShort", "t1", "p1", "s1"),
+                ('"api_key":', '"token":', '"password":', '"secret":'),
+            ),
+            (
+                "access-token-and-authorization-assignment",
+                "access_token=at1 authorization=authval access-token=at2",
+                ("at1", "authval", "at2"),
+                ("access_token=", "authorization=", "access-token="),
+            ),
+            (
+                "url-query-short-and-long",
+                "https://api.example.com/v1?api_key=qShort&token=qTok&x=1",
+                ("qShort", "qTok"),
+                ("api_key=", "token=", "https://api.example.com/v1"),
+            ),
+            (
+                "bearer-and-nested-text",
+                "detail=Authorization: Bearer nestSecret99 and api_key=nestKey",
+                ("nestSecret99", "nestKey"),
+                ("api_key=",),
+            ),
+            (
+                "long-token-field-value",
+                "token=" + ("L" * 40),
+                ("L" * 40,),
+                ("token=",),
+            ),
+        )
+        for name, raw, sentinels, keep_markers in cases:
+            with self.subTest(case=name):
+                cleaned = logger.sanitize_log_message(raw)
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel, cleaned)
+                for marker in keep_markers:
+                    self.assertIn(marker, cleaned)
+                self.assertIn("[redacted]", cleaned)
+
+    def test_sanitize_preserves_ordinary_diagnostic_fields(self):
+        raw = (
+            "retry status=timeout class=transport duration_ms=123 "
+            "model=gpt-test scope=ocr event=cache-miss"
+        )
+        cleaned = logger.sanitize_log_message(raw)
+
+        self.assertEqual(cleaned, raw)
+        self.assertIn("status=timeout", cleaned)
+        self.assertIn("class=transport", cleaned)
+        self.assertIn("duration_ms=123", cleaned)
+
+        # Error codes that embed api_key as a substring must not be redacted.
+        error_code = "INVALID_API_KEY: Invalid API key"
+        self.assertEqual(
+            logger.sanitize_log_message(error_code),
+            error_code,
+        )
+        nested = f"{error_code}; api_key=shortSecret"
+        nested_cleaned = logger.sanitize_log_message(nested)
+        self.assertIn("INVALID_API_KEY: Invalid API key", nested_cleaned)
+        self.assertNotIn("shortSecret", nested_cleaned)
+        self.assertIn("api_key=[redacted]", nested_cleaned)
+
+    def test_log_debug_never_persists_short_secret_field_sentinels(self):
+        sentinels = (
+            "SENTINEL_API_KEY_SHORT",
+            "SENTINEL_TOKEN_SHORT",
+            "SENTINEL_PASSWORD_SHORT",
+            "SENTINEL_SECRET_SHORT",
+        )
+        message = (
+            f"api_key={sentinels[0]} token={sentinels[1]} "
+            f"password={sentinels[2]} secret={sentinels[3]} "
+            'json={"api_key":"SENTINEL_JSON_KEY","token":"SENTINEL_JSON_TOKEN"} '
+            "url=https://ex.test/v1?api_key=SENTINEL_QUERY_KEY&token=SENTINEL_QUERY_TOKEN "
+            "Authorization: Bearer SENTINEL_BEARER_VALUE "
+            "status=timeout class=transport duration_ms=9"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"OCR_TRANSLATOR_LOG_DIR": tmp_dir}):
+                logger.close_log_writers()
+                logger.log_debug(message)
+                logger.close_log_writers()
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+
+        for sentinel in sentinels + (
+            "SENTINEL_JSON_KEY",
+            "SENTINEL_JSON_TOKEN",
+            "SENTINEL_QUERY_KEY",
+            "SENTINEL_QUERY_TOKEN",
+            "SENTINEL_BEARER_VALUE",
+        ):
+            self.assertNotIn(sentinel, content)
+        self.assertIn("status=timeout", content)
+        self.assertIn("class=transport", content)
+        self.assertIn("duration_ms=9", content)
+
     def test_classify_log_error_class_covers_rate_auth_server_parse(self):
         self.assertEqual(
             logger.classify_log_error_class("HTTP 429 rate limit"),
