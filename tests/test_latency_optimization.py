@@ -1495,6 +1495,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         convert_calls = []
         translation_calls = []
+        scheduled = []
 
         cache = ocr_utils.OCRFrameCache(max_size=4)
         cache_key = ocr_utils.build_ocr_frame_cache_key(
@@ -1526,10 +1527,18 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             last_displayed_batch_sequence=0,
             last_processed_subtitle=None,
             reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
         )
 
         with patch.object(worker_threads, "start_async_translation", side_effect=lambda *args: translation_calls.append(args)):
             worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(app.last_displayed_batch_sequence, 0)
+            _delay, callback, args = scheduled[0]
+            callback(*args)
 
         self.assertEqual(convert_calls, [])
         self.assertEqual(translation_calls, [(app, "Cached OCR text", 1)])
@@ -1670,6 +1679,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 raise AssertionError("API OCR should not be submitted for cached frames")
 
         translation_calls = []
+        scheduled = []
         cache = ocr_utils.OCRFrameCache(max_size=4)
         cache_key = ocr_utils.build_ocr_frame_cache_key(
             "repeat-hash",
@@ -1702,10 +1712,18 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             last_displayed_batch_sequence=0,
             last_processed_subtitle=None,
             reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
         )
 
         with patch.object(worker_threads, "start_async_translation", side_effect=lambda *args: translation_calls.append(args)):
             worker_threads.run_api_ocr(app, screenshot)
+            self.assertEqual(app.last_displayed_batch_sequence, 0)
+            _delay, callback, args = scheduled[0]
+            callback(*args)
 
         self.assertEqual(translation_calls, [(app, "Cached OCR text under load", 1)])
         self.assertEqual(app.active_ocr_calls, {99})
@@ -1915,6 +1933,155 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             "image_contract=png|lossless_webp|100|high",
             cache_mode_key,
         )
+
+    def test_api_ocr_cache_mode_key_uses_explicit_keep_linebreaks_over_live_var(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        def forbidden_get():
+            raise AssertionError("live keep_linebreaks_var must not be read")
+
+        app = types.SimpleNamespace(
+            keep_linebreaks_var=types.SimpleNamespace(get=forbidden_get),
+        )
+
+        cache_mode_key = worker_threads._get_api_ocr_cache_mode_key(
+            app,
+            keep_linebreaks=False,
+        )
+
+        self.assertIn("keep_linebreaks=False", cache_mode_key)
+        self.assertNotIn("keep_linebreaks=True", cache_mode_key)
+
+    def test_api_ocr_uses_frame_snapshot_keep_linebreaks_for_cache_and_provider(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+        from worker_capture import CaptureUISnapshot
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        def forbidden_get():
+            raise AssertionError("live keep_linebreaks_var must not be read for frozen frames")
+
+        snapshot = CaptureUISnapshot(
+            generation=1,
+            source_geometry=(0, 0, 10, 10),
+            ocr_model="custom_ai",
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=True,
+            source_lang="en",
+        )
+        screenshot = Image.new("RGB", (320, 120), (1, 2, 3))
+        screenshot._gct_frame_hash = "snapshot-hash"
+        screenshot._gct_region_origin = (10, 20)
+        screenshot._gct_capture_snapshot = snapshot
+
+        cache = ocr_utils.OCRFrameCache(max_size=4)
+        scheduled = []
+        pool = Pool()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: (_ for _ in ()).throw(
+                AssertionError("snapshot keep_linebreaks cache hit must not re-encode")
+            ),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            keep_linebreaks_var=types.SimpleNamespace(get=forbidden_get),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=cache,
+            last_displayed_batch_sequence=0,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+                winfo_exists=lambda: True,
+            ),
+            is_running=True,
+            _app_is_closing=False,
+            custom_ai_profiles=types.SimpleNamespace(get_active_profile=lambda kind: None),
+        )
+        expected_mode_key = worker_threads._get_api_ocr_cache_mode_key(
+            app,
+            "custom_ai",
+            keep_linebreaks=False,
+        )
+        expected_key = ocr_utils.build_ocr_frame_cache_key(
+            "snapshot-hash",
+            worker_threads._get_api_ocr_cache_model_key(app, "custom_ai"),
+            "en",
+            expected_mode_key,
+            screenshot.size,
+            region_origin=(10, 20),
+        )
+        cache.put(expected_key, "Frozen-frame OCR")
+
+        worker_threads.run_api_ocr(app, screenshot, capture_snapshot=snapshot)
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][2][1:3], ("Frozen-frame OCR", 1))
+
+        # Miss path: freeze keep_linebreaks=False while live var claims True.
+        cache_miss_pool = Pool()
+        app.ocr_frame_cache = ocr_utils.OCRFrameCache(max_size=4)
+        app.ocr_thread_pool = cache_miss_pool
+        app.batch_sequence_counter = 0
+        app.active_ocr_calls = set()
+        app.convert_to_webp_for_api = lambda _image: b"frozen-webp"
+        app.keep_linebreaks_var = types.SimpleNamespace(get=lambda: True)
+
+        worker_threads.run_api_ocr(app, screenshot, capture_snapshot=snapshot)
+
+        self.assertEqual(len(cache_miss_pool.submissions), 1)
+        submit_fn, submit_args = cache_miss_pool.submissions[0]
+        self.assertIs(submit_fn, worker_threads.process_api_ocr_async)
+        # keep_linebreaks is the final positional arg after route_metric_name
+        self.assertIs(submit_args[-1], False)
+        submitted_cache_key = submit_args[5]
+        self.assertIn("keep_linebreaks=false", submitted_cache_key[3])
+        self.assertNotIn("keep_linebreaks=true", submitted_cache_key[3])
+
+        perform_calls = []
+
+        class Handler:
+            def perform_ocr(self, image_data, source_lang, **kwargs):
+                perform_calls.append((image_data, source_lang, kwargs))
+                return "provider text"
+
+        app.translation_handler = Handler()
+        app.batch_sequence_counter = 1
+        app.active_ocr_calls = {1}
+        app.root = types.SimpleNamespace(
+            after=lambda delay, callback, *args: scheduled.append(
+                (delay, callback, args)
+            ),
+            winfo_exists=lambda: True,
+        )
+        # Flip live var after submit to prove async path uses frozen value.
+        app.keep_linebreaks_var = types.SimpleNamespace(get=lambda: True)
+        worker_threads.process_api_ocr_async(
+            app,
+            b"frozen-webp",
+            "en",
+            1,
+            "custom_ai",
+            ocr_cache_key=submitted_cache_key,
+            keep_linebreaks=False,
+        )
+        self.assertEqual(len(perform_calls), 1)
+        self.assertEqual(perform_calls[0][2].get("keep_linebreaks"), False)
 
     def test_api_ocr_reuses_one_image_decision_for_cache_and_encoding(self):
         worker_threads = import_worker_threads_for_tests()
@@ -3687,6 +3854,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads = import_worker_threads_for_tests()
         ocr_utils = import_ocr_utils_for_tests()
         metrics = RuntimeMetrics(clock=lambda: 200.0)
+        scheduled = []
         screenshot = Image.new("RGB", (8, 8), (1, 2, 3))
         screenshot._gct_frame_hash = "frame-hash"
         screenshot._gct_region_origin = (10, 20)
@@ -3723,6 +3891,11 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             last_processed_subtitle="Cached OCR",
             reset_clear_timeout=Mock(),
             runtime_metrics=metrics,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
         )
 
         worker_threads.run_api_ocr(app, screenshot)
@@ -3731,6 +3904,12 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             metrics.snapshot()["counters"]["ocr_frame_cache_hit"],
             1,
         )
+        self.assertEqual(app.last_displayed_batch_sequence, 0)
+        self.assertEqual(len(scheduled), 1)
+        delay, callback, args = scheduled[0]
+        self.assertEqual(delay, 0)
+        self.assertIs(callback, worker_threads.process_api_ocr_response)
+        self.assertEqual(args[1:6], ("Cached OCR", 1, "en", "custom_ai", key))
 
     def test_custom_ai_race_winner_runtime_label_is_redacted(self):
         TranslationHandler = import_translation_handler_for_tests()
@@ -4589,10 +4768,14 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
                 "The treasure door is open.",
                 now=200.0,
             )
+            self.assertEqual(result, "submitted")
+            self.assertEqual(submitted, [])
+            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(scheduled[0][0], 0)
+            for _delay, callback, args in list(scheduled):
+                callback(*args)
 
-        self.assertEqual(result, "submitted")
         self.assertEqual(submitted, ["The treasure door is open."])
-        self.assertEqual(scheduled, [])
 
     def test_pending_local_ocr_candidate_does_not_probe_translation_cache(self):
         worker_threads = import_worker_threads_for_tests()
@@ -4669,6 +4852,8 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
 
             with patch.object(worker_threads.time, "monotonic", return_value=300.3):
                 scheduled[0][1](*scheduled[0][2])
+            for _delay, callback, args in list(scheduled[1:]):
+                callback(*args)
 
         self.assertEqual(submitted, ["The treas"])
         self.assertIsNone(app.ocr_stability_gate.pending_text)
@@ -4786,13 +4971,180 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
             "The treasure door is open.",
             now=700.0,
         )
-
         self.assertEqual(result, "submitted")
+        for _delay, callback, args in list(scheduled):
+            callback(*args)
+
         self.assertEqual(pool.submissions, [])
         self.assertEqual(
             app.active_translation_inflight_keys,
             {("custom_ai", "The treasure door is open.", "same-context")},
         )
+
+    def test_local_ocr_submit_schedules_translation_on_ui_thread(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        translation_calls = []
+        display_calls = []
+
+        def forbidden_get(name):
+            def _get():
+                raise AssertionError(f"Tk/UI accessed before UI callback: {name}")
+
+            return _get
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return "Cached translation"
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+                winfo_exists=lambda: True,
+            ),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=forbidden_get("enable_instant_cache_display_var")
+            ),
+            keep_linebreaks_var=types.SimpleNamespace(
+                get=forbidden_get("keep_linebreaks_var")
+            ),
+            reset_clear_timeout=Mock(),
+            is_running=True,
+            _app_is_closing=False,
+            update_translation_text=lambda text: display_calls.append(text),
+            translation_sequence_counter=0,
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            initialize_async_translation_infrastructure=lambda: None,
+        )
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda *args, **kwargs: translation_calls.append(
+                (args, kwargs)
+            ),
+        ):
+            result = worker_threads._submit_final_local_ocr_text(
+                app,
+                "The treasure door is open.",
+                3,
+                requested_at_monotonic=123.5,
+            )
+
+            self.assertEqual(result, "submitted")
+            self.assertEqual(translation_calls, [])
+            self.assertEqual(display_calls, [])
+            self.assertEqual(app.translation_sequence_counter, 0)
+            self.assertEqual(app.last_displayed_translation_sequence, 0)
+            self.assertEqual(len(scheduled), 1)
+            delay, callback, args = scheduled[0]
+            self.assertEqual(delay, 0)
+            self.assertEqual(args[1:], ("The treasure door is open.", 3, 123.5))
+            callback(*args)
+            self.assertEqual(len(translation_calls), 1)
+            self.assertEqual(display_calls, [])
+
+    def test_local_ocr_submit_does_not_forge_submitted_when_ui_schedule_fails(self):
+        worker_threads = import_worker_threads_for_tests()
+        translation_calls = []
+        app = types.SimpleNamespace(
+            root=None,
+            is_running=True,
+            _app_is_closing=False,
+            reset_clear_timeout=Mock(),
+            translation_sequence_counter=0,
+            last_displayed_translation_sequence=0,
+        )
+
+        with patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=lambda *args, **kwargs: translation_calls.append(args),
+        ):
+            result = worker_threads._submit_final_local_ocr_text(
+                app,
+                "The treasure door is open.",
+                4,
+                requested_at_monotonic=10.0,
+            )
+
+        self.assertEqual(result, "dropped")
+        self.assertEqual(translation_calls, [])
+        self.assertEqual(app.translation_sequence_counter, 0)
+        self.assertEqual(app.last_displayed_translation_sequence, 0)
+
+    def test_local_ocr_route_does_not_touch_tk_or_advance_sequence_before_ui_callback(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+        display_calls = []
+
+        def forbidden_get(name):
+            def _get():
+                raise AssertionError(f"Tk/UI accessed before UI callback: {name}")
+
+            return _get
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return "Cached translation"
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+        app = types.SimpleNamespace(
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+                winfo_exists=lambda: True,
+            ),
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(
+                get=forbidden_get("enable_instant_cache_display_var")
+            ),
+            keep_linebreaks_var=types.SimpleNamespace(
+                get=forbidden_get("keep_linebreaks_var")
+            ),
+            reset_clear_timeout=Mock(),
+            is_running=True,
+            _app_is_closing=False,
+            update_translation_text=lambda text: display_calls.append(text),
+            translation_sequence_counter=0,
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            last_successful_translation_time=0.0,
+            initialize_async_translation_infrastructure=lambda: None,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            max_concurrent_translation_calls=6,
+            translation_thread_pool=types.SimpleNamespace(submit=Mock()),
+        )
+
+        result = worker_threads._route_local_ocr_candidate_for_translation(
+            app,
+            "The treasure door is open.",
+            now=800.0,
+        )
+
+        self.assertEqual(result, "submitted")
+        self.assertEqual(display_calls, [])
+        self.assertEqual(app.translation_sequence_counter, 0)
+        self.assertEqual(app.last_displayed_translation_sequence, 0)
+        self.assertEqual(len(scheduled), 1)
+
+        app.enable_instant_cache_display_var = types.SimpleNamespace(get=lambda: True)
+        delay, callback, args = scheduled[0]
+        self.assertEqual(delay, 0)
+        callback(*args)
+
+        self.assertEqual(display_calls, ["Cached translation"])
+        self.assertEqual(app.translation_sequence_counter, 1)
+        self.assertEqual(app.last_displayed_translation_sequence, 1)
 
     def test_ocr_model_change_clears_stability_gate(self):
         import app_logic

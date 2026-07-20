@@ -8379,7 +8379,10 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                 ),
                 ("precharge failed because balance is insufficient", 300.0),
                 ("API response did not contain message content", 10.0),
-                ("HTTPSConnectionPool read timed out", 15.0),
+                ("HTTPSConnectionPool read timed out", 5.0),
+                ("Connection aborted: ConnectionResetError(10054)", 2.0),
+                ("TLS/SSL connection was closed by the server", 2.0),
+                ("rate limit response; retry after 15 seconds", 0.0),
                 ("Chat completions request failed (HTTP 503)", 15.0),
                 ("unclassified provider failure", 30.0),
             )
@@ -8392,6 +8395,23 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                         ),
                         expected_seconds,
                     )
+        finally:
+            handler.close()
+
+    def test_rate_limit_failure_does_not_add_profile_unavailable_cooldown(self):
+        handler = TranslationHandler(object())
+        try:
+            profile = {"id": "profile-1", "name": "xAI"}
+            handler.custom_ai_provider.mark_profile_unavailable = Mock()
+
+            handler._mark_custom_ai_profile_failure(
+                profile,
+                "xAI is in cooldown after a rate limit response. Retry in 15.0s.",
+                request_kind="translation",
+                request_sequence=3,
+            )
+
+            handler.custom_ai_provider.mark_profile_unavailable.assert_not_called()
         finally:
             handler.close()
 
@@ -11448,16 +11468,17 @@ class TranslationFailoverEligibilityAndRaceHealthTests(unittest.TestCase):
     def test_strict_transient_errors_use_exponential_backoff(self):
         handler = TranslationHandler(object())
         try:
-            for error_text in (
-                "Chat completions request failed (HTTP 502)",
-                "HTTPSConnectionPool read timed out",
-                "Connection refused by peer",
-            ):
+            cases = (
+                ("Chat completions request failed (HTTP 502)", 15.0),
+                ("HTTPSConnectionPool read timed out", 5.0),
+                ("Connection refused by peer", 2.0),
+            )
+            for error_text, expected_cooldown in cases:
                 with self.subTest(error_text=error_text):
                     cooldown, exponential = handler._classify_custom_ai_profile_failure(
                         error_text
                     )
-                    self.assertEqual(cooldown, 15.0)
+                    self.assertEqual(cooldown, expected_cooldown)
                     self.assertTrue(exponential)
                     self.assertTrue(
                         handler._custom_ai_profile_failure_uses_exponential_backoff(

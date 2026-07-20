@@ -1304,6 +1304,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         from worker_capture import CaptureUISnapshot
 
         submitted = []
+        scheduled = []
         image = Image.new("RGB", (16, 10), "white")
         snapshot = CaptureUISnapshot(
             generation=1,
@@ -1326,6 +1327,13 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             is_placeholder_text=lambda _text: False,
             calculate_text_similarity=lambda _current, _previous: 0.0,
             reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+                winfo_exists=lambda: True,
+            ),
+            _app_is_closing=False,
         )
         app.ocr_queue.put_nowait(image)
 
@@ -1345,8 +1353,12 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             ):
                 with patch.object(worker_threads.time, "sleep", side_effect=lambda _seconds: setattr(app, "is_running", False)):
                     worker_threads.run_ocr_thread(app)
+                for _delay, callback, args in list(scheduled):
+                    callback(*args)
 
         self.assertEqual(submitted, ["Clear subtitle text."])
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], 0)
 
     def test_process_local_ocr_frame_routes_paddleocr(self):
         import worker_threads

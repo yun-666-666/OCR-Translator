@@ -36,6 +36,10 @@ def _start_async_translation(*args, **kwargs):
     return _facade().start_async_translation(*args, **kwargs)
 
 
+def _schedule_ui_callback(*args, **kwargs):
+    return _facade()._schedule_ui_callback(*args, **kwargs)
+
+
 def _normalize_custom_ai_ocr_reasoning_contract(value):
     normalized = str(value or 'low').strip().lower().replace('-', '_')
     if normalized in {'low', 'medium', 'high', 'ultra', 'none'}:
@@ -767,12 +771,23 @@ def _submit_final_local_ocr_text(
         )
         return "skipped"
 
-    _start_async_translation(
+    scheduled = _schedule_ui_callback(
+        app,
+        _start_async_translation,
         app,
         text_to_translate,
         ocr_sequence_number,
-        requested_at_monotonic=requested_at_monotonic,
+        requested_at_monotonic,
     )
+    if not scheduled:
+        _log_debug_coalesced(
+            "local-ocr-ui-schedule-drop",
+            "LATENCY: dropped local OCR translation submit because UI callback "
+            f"could not be scheduled for OCR batch {ocr_sequence_number}",
+            interval_seconds=5.0,
+        )
+        return "dropped"
+
     return "submitted"
 
 
@@ -891,16 +906,19 @@ def _get_api_ocr_cache_mode_key(
     provider_name=None,
     image_size=None,
     image_decision=None,
+    keep_linebreaks=None,
 ):
-    keep_linebreaks_var = getattr(app, 'keep_linebreaks_var', None)
     parts = ['api']
-    if keep_linebreaks_var is None:
-        keep_linebreaks = None
+    if keep_linebreaks is None:
+        keep_linebreaks_var = getattr(app, 'keep_linebreaks_var', None)
+        if keep_linebreaks_var is not None:
+            try:
+                keep_linebreaks = bool(keep_linebreaks_var.get())
+            except Exception:
+                keep_linebreaks = False
+            parts.append(f"keep_linebreaks={keep_linebreaks}")
     else:
-        try:
-            keep_linebreaks = bool(keep_linebreaks_var.get())
-        except Exception:
-            keep_linebreaks = False
+        keep_linebreaks = bool(keep_linebreaks)
         parts.append(f"keep_linebreaks={keep_linebreaks}")
 
     if image_decision is None:

@@ -64,6 +64,8 @@ from worker_capture import (
     _coerce_float,
     _coerce_int,
     _coerce_bool,
+    get_paddleocr_settings_from_app,
+    get_paddleocr_ocr_cache_mode_key,
     get_paddleocr_ocr_cache_mode_key_from_settings,
     get_capture_ui_snapshot,
     _pil_to_debug_bgr,
@@ -514,9 +516,11 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
         ocr_start_time = time.monotonic()
+        keep_linebreaks = None
         if isinstance(capture_snapshot, CaptureUISnapshot):
             provider_name = capture_snapshot.ocr_model
             source_lang = capture_snapshot.source_lang
+            keep_linebreaks = bool(capture_snapshot.keep_linebreaks)
         else:
             # Compatibility for direct callers outside the OCR worker.  The
             # production worker always supplies the immutable frame snapshot.
@@ -538,6 +542,18 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 source_lang = getattr(app, 'openai_source_lang', 'en')
             else:
                 source_lang = app.source_lang_var.get()
+
+        # Freeze keep_linebreaks once for cache identity and provider request.
+        # Snapshot frames always freeze. Compatibility callers without a snapshot
+        # freeze the current live var when present; if the var is missing, leave
+        # None so the mode key keeps the historical "api" shape.
+        if keep_linebreaks is None:
+            keep_linebreaks_var = getattr(app, "keep_linebreaks_var", None)
+            if keep_linebreaks_var is not None:
+                try:
+                    keep_linebreaks = bool(keep_linebreaks_var.get())
+                except Exception:
+                    keep_linebreaks = False
 
         ocr_cache_key = None
         image_decision = None
@@ -569,6 +585,7 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                     provider_name,
                     image_size=screenshot_pil.size,
                     image_decision=image_decision,
+                    keep_linebreaks=keep_linebreaks,
                 ),
                 screenshot_pil.size,
                 region_origin=region_origin,
@@ -580,7 +597,16 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 log_debug(f"LATENCY: API OCR cache hit for {provider_name} batch {sequence_number}")
                 _increment_metric(app, "ocr_frame_cache_hit")
                 _record_metric_timing(app, "ocr_duration", time.monotonic() - ocr_start_time)
-                process_api_ocr_response(app, cached_ocr_text, sequence_number, source_lang, provider_name, ocr_cache_key=ocr_cache_key)
+                _schedule_ui_callback(
+                    app,
+                    process_api_ocr_response,
+                    app,
+                    cached_ocr_text,
+                    sequence_number,
+                    source_lang,
+                    provider_name,
+                    ocr_cache_key,
+                )
                 return
 
         repeat_scope = tuple(ocr_cache_key[1:]) if ocr_cache_key else None
@@ -675,6 +701,7 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 image_detail,
                 image_format,
                 route_metric_name,
+                keep_linebreaks,
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
@@ -695,6 +722,7 @@ def process_api_ocr_async(
     image_detail="auto",
     image_format="webp",
     route_metric_name=None,
+    keep_linebreaks=None,
 ):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
@@ -715,6 +743,7 @@ def process_api_ocr_async(
             image_mime_type=image_mime_type,
             image_detail=image_detail,
             image_format=image_format,
+            keep_linebreaks=keep_linebreaks,
         )
         ocr_duration = time.monotonic() - ocr_start_time
         _record_metric_timing(app, "ocr_duration", ocr_duration)

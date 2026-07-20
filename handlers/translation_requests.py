@@ -227,6 +227,21 @@ class TranslationRequestsMixin:
         if any(marker in lowered for marker in deterministic_markers):
             return 300.0, False
 
+        # HTTP 429 and explicit rate-limit responses already have a dedicated
+        # transport-scoped cooldown, including Retry-After handling.  Do not
+        # add a second profile-unavailable cooldown on top of it: that used to
+        # turn xAI's 15-second rate-limit wait into a 30-second subtitle queue.
+        rate_limit_markers = (
+            "http 429",
+            "rate limit",
+            "too many requests",
+            "retry-after",
+            "retry after",
+            "quota exceeded",
+        )
+        if any(marker in lowered for marker in rate_limit_markers):
+            return 0.0, False
+
         empty_markers = (
             "did not contain message content",
             "returned an invalid translation",
@@ -236,24 +251,40 @@ class TranslationRequestsMixin:
         if any(marker in lowered for marker in empty_markers):
             return 10.0, False
 
-        strict_transient_markers = (
-            "http 502",
-            "http 503",
-            "http 504",
-            "bad gateway",
-            "read timed out",
-            "read timeout",
-            "connect timeout",
-            "connection timed out",
+        connection_reset_markers = (
+            "ssl",
+            "unexpected_eof",
+            "eof occurred",
             "connection refused",
             "connection reset",
             "connection aborted",
             "remote end closed",
             "failed to establish a new connection",
+        )
+        if any(marker in lowered for marker in connection_reset_markers):
+            # A dead keep-alive/TLS connection is frequently healthy again on
+            # a fresh session.  Probe quickly, then back off exponentially if
+            # the failure persists instead of freezing subtitle delivery.
+            return 2.0, True
+
+        timeout_markers = (
+            "read timed out",
+            "read timeout",
+            "connect timeout",
+            "connection timed out",
             "name or service not known",
             "nodename nor servname",
             "temporary failure in name resolution",
             "getaddrinfo failed",
+        )
+        if any(marker in lowered for marker in timeout_markers):
+            return 5.0, True
+
+        strict_transient_markers = (
+            "http 502",
+            "http 503",
+            "http 504",
+            "bad gateway",
         )
         if any(marker in lowered for marker in strict_transient_markers):
             return 15.0, True
@@ -273,6 +304,12 @@ class TranslationRequestsMixin:
 
     def _custom_ai_profile_failure_uses_exponential_backoff(self, error_text):
         return self._classify_custom_ai_profile_failure(error_text)[1]
+
+    def _custom_ai_profile_failure_is_rate_limited(self, error_text):
+        cooldown_seconds, _ = self._classify_custom_ai_profile_failure(
+            error_text
+        )
+        return cooldown_seconds == 0.0
 
     def _begin_custom_ai_profile_request(self, profile, request_kind):
         begin = getattr(
@@ -298,6 +335,13 @@ class TranslationRequestsMixin:
         request_kind="translation",
         request_sequence=None,
     ):
+        if self._custom_ai_profile_failure_is_rate_limited(error_text):
+            _log_debug(
+                "LATENCY: retained Custom AI rate-limit cooldown without "
+                "additional profile-unavailable backoff "
+                f"request_kind={request_kind or 'shared'}"
+            )
+            return
         marker = getattr(
             self.custom_ai_provider,
             "mark_profile_unavailable",
@@ -322,6 +366,7 @@ class TranslationRequestsMixin:
         image_mime_type="image/webp",
         image_detail="auto",
         image_format="webp",
+        keep_linebreaks=None,
     ):
         """Main public method for performing OCR. Delegates to the currently selected API provider."""
         profile = self.app.custom_ai_profiles.get_active_profile("ocr")
@@ -336,11 +381,23 @@ class TranslationRequestsMixin:
             latency_mode = self._get_custom_ai_latency_mode()
             if latency_mode == CUSTOM_AI_LATENCY_MODE_ADAPTIVE:
                 latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+            if keep_linebreaks is None:
+                keep_linebreaks_var = getattr(self.app, "keep_linebreaks_var", None)
+                try:
+                    keep_linebreaks = (
+                        bool(keep_linebreaks_var.get())
+                        if keep_linebreaks_var is not None
+                        else False
+                    )
+                except Exception:
+                    keep_linebreaks = False
+            else:
+                keep_linebreaks = bool(keep_linebreaks)
             result, usage, duration = self.custom_ai_provider.recognize(
                 profile,
                 image_data,
                 source_lang,
-                keep_linebreaks=self.app.keep_linebreaks_var.get(),
+                keep_linebreaks=keep_linebreaks,
                 latency_mode=latency_mode,
                 image_detail=image_detail,
                 image_mime_type=image_mime_type,
