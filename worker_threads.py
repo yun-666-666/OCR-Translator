@@ -1072,6 +1072,47 @@ def start_async_translation(
         log_debug(f"Error starting async translation: {type(e).__name__} - {e}")
 
 
+def _translation_request_is_obsolete(app, translation_sequence):
+    """Return whether a translation sequence is obsolete before remote spend.
+
+    Prefer the shared handler predicate so worker and failover stay aligned.
+    latest_started uses strict `<` so the current request is never self-killed.
+    """
+    handler = getattr(app, "translation_handler", None)
+    predicate = getattr(handler, "_custom_ai_translation_is_obsolete", None)
+    if callable(predicate):
+        try:
+            return bool(predicate(translation_sequence))
+        except Exception:
+            pass
+    try:
+        request_sequence = int(translation_sequence)
+    except (TypeError, ValueError):
+        return False
+    try:
+        latest_started_sequence = int(
+            getattr(app, "latest_translation_sequence_started", 0) or 0
+        )
+    except (TypeError, ValueError):
+        latest_started_sequence = 0
+    try:
+        displayed_sequence = int(
+            getattr(app, "last_displayed_translation_sequence", 0) or 0
+        )
+    except (TypeError, ValueError):
+        displayed_sequence = 0
+    return request_sequence > 0 and (
+        (
+            latest_started_sequence > 0
+            and request_sequence < latest_started_sequence
+        )
+        or (
+            displayed_sequence > 0
+            and request_sequence <= displayed_sequence
+        )
+    )
+
+
 def process_translation_async(
     app,
     text_to_translate,
@@ -1089,6 +1130,17 @@ def process_translation_async(
 
     try:
         log_debug(f"Processing async translation {translation_sequence}")
+
+        if _translation_request_is_obsolete(app, translation_sequence):
+            log_debug(
+                f"Translation {translation_sequence} is obsolete "
+                "(latest started: "
+                f"{getattr(app, 'latest_translation_sequence_started', 0)}; "
+                "last displayed: "
+                f"{getattr(app, 'last_displayed_translation_sequence', 0)}); "
+                "skipping provider call"
+            )
+            return
 
         stream_callback = None
         if latency_mode is None:

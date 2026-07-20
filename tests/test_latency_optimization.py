@@ -3190,6 +3190,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 )
             ),
             translation_handler=Handler(),
+            latest_translation_sequence_started=1,
+            last_displayed_translation_sequence=0,
             active_translation_calls={1},
             active_translation_inflight_keys={("request",)},
             active_translation_started_monotonic={1: time.monotonic()},
@@ -3208,6 +3210,259 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(received_timeouts, [4.0])
         self.assertEqual(len(scheduled), 1)
+
+    def test_stale_translation_request_skips_provider_call_when_newer_started(self):
+        worker_threads = import_worker_threads_for_tests()
+        translate_calls = []
+        scheduled = []
+        expedited = []
+
+        class Handler:
+            def translate_text_with_timeout(self, *args, **kwargs):
+                translate_calls.append((args, kwargs))
+                return "should-not-run"
+
+            def _custom_ai_translation_is_obsolete(self, translation_sequence):
+                return int(translation_sequence) < 5
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            latest_translation_sequence_started=5,
+            last_displayed_translation_sequence=0,
+            active_translation_calls={4},
+            active_translation_inflight_keys={("custom_ai", "older")},
+            active_translation_started_monotonic={4: time.monotonic()},
+            pending_translation_request=None,
+            runtime_metrics=RuntimeMetrics(clock=lambda: 1.0),
+        )
+
+        with patch.object(
+            worker_threads,
+            "_expedite_pending_translation_request",
+            side_effect=lambda current_app: expedited.append(current_app),
+        ):
+            worker_threads.process_translation_async(
+                app,
+                "older",
+                4,
+                10,
+                inflight_key=("custom_ai", "older"),
+                latency_mode="safe",
+            )
+
+        self.assertEqual(translate_calls, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.active_translation_calls, set())
+        self.assertEqual(app.active_translation_inflight_keys, set())
+        self.assertEqual(app.active_translation_started_monotonic, {})
+        self.assertEqual(expedited, [app])
+
+    def test_current_translation_request_still_calls_provider(self):
+        worker_threads = import_worker_threads_for_tests()
+        translate_calls = []
+        scheduled = []
+
+        class Handler:
+            def translate_text_with_timeout(self, text, **kwargs):
+                translate_calls.append((text, kwargs))
+                return "translated"
+
+            def _custom_ai_translation_is_obsolete(self, translation_sequence):
+                return False
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            latest_translation_sequence_started=7,
+            last_displayed_translation_sequence=6,
+            active_translation_calls={7},
+            active_translation_inflight_keys={("custom_ai", "latest")},
+            active_translation_started_monotonic={7: time.monotonic()},
+            pending_translation_request=None,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "latest",
+            7,
+            11,
+            inflight_key=("custom_ai", "latest"),
+            latency_mode="safe",
+        )
+
+        self.assertEqual(len(translate_calls), 1)
+        self.assertEqual(translate_calls[0][0], "latest")
+        self.assertEqual(translate_calls[0][1]["translation_sequence"], 7)
+        self.assertEqual(len(scheduled), 1)
+        self.assertIs(
+            scheduled[0][1],
+            worker_threads.process_translation_response,
+        )
+        self.assertEqual(app.active_translation_calls, set())
+        self.assertEqual(app.active_translation_inflight_keys, set())
+
+    def test_stale_translation_request_skips_when_already_displayed(self):
+        worker_threads = import_worker_threads_for_tests()
+        translate_calls = []
+        scheduled = []
+
+        class Handler:
+            def translate_text_with_timeout(self, *args, **kwargs):
+                translate_calls.append((args, kwargs))
+                return "should-not-run"
+
+            def _custom_ai_translation_is_obsolete(self, translation_sequence):
+                return int(translation_sequence) <= 3
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            latest_translation_sequence_started=3,
+            last_displayed_translation_sequence=3,
+            active_translation_calls={3},
+            active_translation_inflight_keys={("custom_ai", "shown")},
+            active_translation_started_monotonic={3: time.monotonic()},
+            pending_translation_request=None,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "shown",
+            3,
+            8,
+            inflight_key=("custom_ai", "shown"),
+            latency_mode="safe",
+        )
+
+        self.assertEqual(translate_calls, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.active_translation_calls, set())
+        self.assertEqual(app.active_translation_inflight_keys, set())
+        self.assertEqual(app.active_translation_started_monotonic, {})
+
+    def test_superseded_translation_skips_before_provider_when_not_started(self):
+        """Older supersede overflow worker must not spend remote quota."""
+        worker_threads = import_worker_threads_for_tests()
+        translate_calls = []
+        scheduled = []
+
+        class Handler:
+            def translate_text_with_timeout(self, *args, **kwargs):
+                translate_calls.append((args, kwargs))
+                return "should-not-run"
+
+            def _custom_ai_translation_is_obsolete(self, translation_sequence):
+                latest = 9
+                displayed = 0
+                seq = int(translation_sequence)
+                return seq > 0 and (
+                    (latest > 0 and seq < latest)
+                    or (displayed > 0 and seq <= displayed)
+                )
+
+        app = types.SimpleNamespace(
+            is_running=True,
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            translation_handler=Handler(),
+            latest_translation_sequence_started=9,
+            last_displayed_translation_sequence=0,
+            # Supersede allows two active sequences: older 8 and newer 9.
+            active_translation_calls={8, 9},
+            active_translation_inflight_keys={
+                ("custom_ai", "old"),
+                ("custom_ai", "new"),
+            },
+            active_translation_started_monotonic={
+                8: time.monotonic() - 2.0,
+                9: time.monotonic(),
+            },
+            pending_translation_request=None,
+        )
+
+        worker_threads.process_translation_async(
+            app,
+            "old",
+            8,
+            20,
+            inflight_key=("custom_ai", "old"),
+            latency_mode="safe",
+        )
+
+        self.assertEqual(translate_calls, [])
+        self.assertEqual(scheduled, [])
+        self.assertEqual(app.active_translation_calls, {9})
+        self.assertEqual(
+            app.active_translation_inflight_keys,
+            {("custom_ai", "new")},
+        )
+        self.assertIn(9, app.active_translation_started_monotonic)
+        self.assertNotIn(8, app.active_translation_started_monotonic)
+
+    def test_started_stale_translation_still_discarded_on_response_side(self):
+        """In-flight older request remains response-side discarded after spend."""
+        worker_threads = import_worker_threads_for_tests()
+        metrics = RuntimeMetrics(clock=lambda: 200.0)
+        display = Mock()
+        app = types.SimpleNamespace(
+            latest_translation_sequence_started=9,
+            last_displayed_translation_sequence=7,
+            update_translation_text=display,
+            runtime_metrics=metrics,
+        )
+
+        worker_threads.process_translation_response(
+            app,
+            "older supersede result",
+            8,
+            "old",
+            20,
+        )
+
+        display.assert_not_called()
+        self.assertEqual(app.last_displayed_translation_sequence, 7)
+        self.assertEqual(
+            metrics.snapshot()["counters"]["stale_response_discarded"],
+            1,
+        )
+
+    def test_translation_obsolete_helper_uses_strict_less_than_latest_started(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            latest_translation_sequence_started=5,
+            last_displayed_translation_sequence=0,
+            translation_handler=object(),
+        )
+
+        self.assertTrue(
+            worker_threads._translation_request_is_obsolete(app, 4)
+        )
+        self.assertFalse(
+            worker_threads._translation_request_is_obsolete(app, 5)
+        )
+        app.last_displayed_translation_sequence = 5
+        self.assertTrue(
+            worker_threads._translation_request_is_obsolete(app, 5)
+        )
 
     def test_start_async_translation_queues_latest_request_during_submit_cooldown(self):
         worker_threads = import_worker_threads_for_tests()
