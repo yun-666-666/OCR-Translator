@@ -16,6 +16,9 @@ from custom_ai_policy import (
     CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_TEXT,
     CUSTOM_AI_STRUCTURED_OUTPUT_OFF,
     CUSTOM_AI_WIRE_API_RESPONSES,
+    OCR_DEFAULT_OUTPUT_TOKENS,
+    OCR_KEEP_LINEBREAKS_OUTPUT_TOKENS,
+    OCR_MAX_OUTPUT_TOKENS,
     TRANSLATION_MAX_OUTPUT_TOKENS,
     TRANSLATION_MIN_OUTPUT_TOKENS,
     TRANSLATION_OUTPUT_TOKENS_PER_CHAR,
@@ -967,6 +970,11 @@ class CustomAICapabilitiesMixin:
             min(TRANSLATION_MAX_OUTPUT_TOKENS, estimated),
         )
 
+    def _ocr_max_tokens(self, keep_linebreaks=False):
+        if keep_linebreaks:
+            return min(OCR_MAX_OUTPUT_TOKENS, OCR_KEEP_LINEBREAKS_OUTPUT_TOKENS)
+        return min(OCR_MAX_OUTPUT_TOKENS, OCR_DEFAULT_OUTPUT_TOKENS)
+
     def build_translation_payload(
         self,
         profile,
@@ -1204,6 +1212,9 @@ class CustomAICapabilitiesMixin:
             ],
             "temperature": 0,
         }
+        max_tokens = self._ocr_max_tokens(keep_linebreaks=keep_linebreaks)
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         return self._apply_reasoning_effort_to_payload(
             profile,
             payload,

@@ -66,6 +66,11 @@ DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 15.0
 TRANSLATION_MIN_OUTPUT_TOKENS = 64
 TRANSLATION_MAX_OUTPUT_TOKENS = 2048
 TRANSLATION_OUTPUT_TOKENS_PER_CHAR = 4
+# OCR transcription of on-screen subtitles is short; bound completion tokens so
+# verbose / reasoning models cannot run away on every admitted OCR call.
+OCR_DEFAULT_OUTPUT_TOKENS = 512
+OCR_KEEP_LINEBREAKS_OUTPUT_TOKENS = 1024
+OCR_MAX_OUTPUT_TOKENS = OCR_KEEP_LINEBREAKS_OUTPUT_TOKENS
 TRANSLATION_OUTPUT_WRAPPER_LABELS = frozenset({
     "translation:",
     "translation：",

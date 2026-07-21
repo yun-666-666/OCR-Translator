@@ -4977,6 +4977,52 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(translation_payload["reasoning_effort"], "medium")
         self.assertEqual(ocr_payload["reasoning_effort"], "medium")
         self.assertEqual(translation_payload.get("max_tokens"), 64)
+        self.assertEqual(ocr_payload.get("max_tokens"), 512)
+
+    def test_ocr_payload_bounds_max_tokens_for_keep_linebreaks(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "demo",
+            "reasoning_effort": "none",
+        }
+
+        plain = provider.build_ocr_payload(
+            profile,
+            b"webp-bytes",
+            "en",
+            keep_linebreaks=False,
+        )
+        multi = provider.build_ocr_payload(
+            profile,
+            b"webp-bytes",
+            "en",
+            keep_linebreaks=True,
+        )
+
+        self.assertEqual(plain.get("max_tokens"), 512)
+        self.assertEqual(multi.get("max_tokens"), 1024)
+        self.assertLessEqual(plain["max_tokens"], multi["max_tokens"])
+
+    def test_responses_ocr_payload_maps_max_tokens_to_max_output_tokens(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "demo",
+            "wire_api": "responses",
+            "reasoning_effort": "none",
+        }
+
+        ocr_payload = provider.build_ocr_payload(
+            profile,
+            b"webp-bytes",
+            "en",
+        )
+        responses_ocr = provider.build_responses_payload_from_chat_payload(
+            profile,
+            ocr_payload,
+        )
+
+        self.assertEqual(ocr_payload.get("max_tokens"), 512)
+        self.assertEqual(responses_ocr.get("max_output_tokens"), 512)
 
     def test_grok_payloads_map_none_to_the_lowest_explicit_reasoning_effort(self):
         provider = CustomAIProvider()
