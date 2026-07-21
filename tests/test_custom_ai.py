@@ -9459,6 +9459,86 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         self.assertEqual(request_profile["reasoning_effort"], "none")
         handler.close()
 
+    def test_speed_optimization_disables_ocr_reasoning(self):
+        profile = {
+            "id": "ocr-profile",
+            "name": "OCR",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+            "reasoning_effort": "high",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, enabled_only=True):
+                return [profile]
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+            def get_ai_optimization_mode(self):
+                return "speed"
+
+        handler = TranslationHandler(App())
+        handler.custom_ai_provider.recognize = Mock(
+            return_value=("hello", {}, 0.01)
+        )
+
+        result = handler.perform_ocr(b"webp-bytes", "en")
+
+        self.assertEqual(result, "hello")
+        request_profile = handler.custom_ai_provider.recognize.call_args.args[0]
+        self.assertEqual(request_profile["reasoning_effort"], "none")
+        self.assertEqual(profile["reasoning_effort"], "high")
+        handler.close()
+
+    def test_non_speed_optimization_preserves_ocr_reasoning(self):
+        profile = {
+            "id": "ocr-profile",
+            "name": "OCR",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "vision-model",
+            "reasoning_effort": "medium",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+            def list_profiles(self, enabled_only=True):
+                return [profile]
+
+        class App:
+            custom_ai_profiles = Profiles()
+            keep_linebreaks_var = DummyVar(False)
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            custom_context_window_var = DummyVar(5)
+            custom_prompt_text = ""
+
+            def get_ai_optimization_mode(self):
+                return "auto"
+
+        handler = TranslationHandler(App())
+        handler.custom_ai_provider.recognize = Mock(
+            return_value=("hello", {}, 0.01)
+        )
+
+        handler.perform_ocr(b"webp-bytes", "en")
+
+        request_profile = handler.custom_ai_provider.recognize.call_args.args[0]
+        self.assertEqual(request_profile["reasoning_effort"], "medium")
+        handler.close()
+
     def test_speed_reasoning_policy_is_frozen_for_failover_and_race_candidates(self):
         profiles = [
             {

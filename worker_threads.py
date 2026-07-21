@@ -819,36 +819,8 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
             )
             return
 
-        encoded_image = None
-        metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
-        if callable(metadata_encoder):
-            if image_decision is not None:
-                encoded_image = metadata_encoder(
-                    screenshot_pil,
-                    decision=image_decision,
-                )
-            else:
-                encoded_image = metadata_encoder(screenshot_pil)
-        else:
-            legacy_bytes = app.convert_to_webp_for_api(screenshot_pil)
-            if legacy_bytes:
-                encoded_image = type(
-                    "EncodedApiOcrImageCompat",
-                    (),
-                    {
-                        "data": legacy_bytes,
-                        "mime_type": "image/webp",
-                        "image_format": "webp",
-                    },
-                )()
-
-        if not encoded_image or not getattr(encoded_image, 'data', None):
-            log_debug(f"Failed to convert image for {provider_name} OCR")
-            return
-        image_data = encoded_image.data
-        image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
-        image_format = getattr(encoded_image, 'image_format', 'webp')
-        image_detail = getattr(encoded_image, 'image_detail', 'auto')
+        # Defer WebP/JPEG encode until process_api_ocr_async after the sequence
+        # stale gate so superseded in-flight frames skip both encode and HTTP.
         route_metric_name = None
         if provider_name == "custom_ai":
             try:
@@ -873,16 +845,18 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
             app.ocr_thread_pool.submit(
                 process_api_ocr_async,
                 app,
-                image_data,
+                None,
                 source_lang,
                 sequence_number,
                 provider_name,
                 ocr_cache_key,
-                image_mime_type,
-                image_detail,
-                image_format,
+                "image/webp",
+                "auto",
+                "webp",
                 route_metric_name,
                 keep_linebreaks,
+                screenshot_pil,
+                image_decision,
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
@@ -906,11 +880,15 @@ def process_api_ocr_async(
     image_format="webp",
     route_metric_name=None,
     keep_linebreaks=None,
+    screenshot_pil=None,
+    image_decision=None,
 ):
     """Process an API OCR call asynchronously. This is the generic worker function."""
     try:
         latest_started_sequence = getattr(app, 'batch_sequence_counter', sequence_number)
         if sequence_number < latest_started_sequence:
+            if screenshot_pil is not None and image_data is None:
+                _increment_metric(app, "api_ocr_stale_encode_skip")
             log_debug(
                 f"{provider_name} OCR batch {sequence_number} is stale (latest started: {latest_started_sequence}); "
                 "skipping provider call"
@@ -918,6 +896,63 @@ def process_api_ocr_async(
             return
 
         log_debug(f"Processing {provider_name} OCR batch {sequence_number}")
+
+        if image_data is None and screenshot_pil is not None:
+            encode_start = time.monotonic()
+            encoded_image = None
+            metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
+            if callable(metadata_encoder):
+                if image_decision is not None:
+                    encoded_image = metadata_encoder(
+                        screenshot_pil,
+                        decision=image_decision,
+                    )
+                else:
+                    encoded_image = metadata_encoder(screenshot_pil)
+            else:
+                legacy_bytes = app.convert_to_webp_for_api(screenshot_pil)
+                if legacy_bytes:
+                    encoded_image = type(
+                        "EncodedApiOcrImageCompat",
+                        (),
+                        {
+                            "data": legacy_bytes,
+                            "mime_type": "image/webp",
+                            "image_format": "webp",
+                        },
+                    )()
+            if not encoded_image or not getattr(encoded_image, 'data', None):
+                log_debug(f"Failed to convert image for {provider_name} OCR")
+                error_msg = (
+                    f"<e>: OCR batch {sequence_number} error: "
+                    "failed to convert image for API OCR"
+                )
+                _schedule_ui_callback(
+                    app,
+                    process_api_ocr_response,
+                    app,
+                    error_msg,
+                    sequence_number,
+                    source_lang,
+                    provider_name,
+                    ocr_cache_key,
+                )
+                return
+            image_data = encoded_image.data
+            image_mime_type = getattr(encoded_image, 'mime_type', 'image/webp')
+            image_format = getattr(encoded_image, 'image_format', 'webp')
+            image_detail = getattr(encoded_image, 'image_detail', 'auto')
+            _record_metric_timing(
+                app,
+                "api_ocr_encode_duration",
+                time.monotonic() - encode_start,
+            )
+        elif not image_data:
+            log_debug(
+                f"{provider_name} OCR batch {sequence_number} missing image payload; "
+                "skipping provider call"
+            )
+            return
 
         ocr_start_time = time.monotonic()
         ocr_result = app.translation_handler.perform_ocr(

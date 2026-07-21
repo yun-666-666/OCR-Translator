@@ -59,21 +59,56 @@ def _get_custom_ai_ocr_reasoning_contract(app):
     if not profile:
         return 'none'
 
-    provider = getattr(
-        getattr(app, 'translation_handler', None),
-        'custom_ai_provider',
-        None,
-    )
+    # Align cache identity with perform_ocr speed force-none request profile so
+    # speed-mode OCR results never collide with non-speed reasoning contracts.
+    handler = getattr(app, 'translation_handler', None)
+    request_profile = profile
+    if handler is not None and hasattr(handler, '_translation_request_profile'):
+        try:
+            force_no_reasoning = None
+            if hasattr(handler, '_speed_translation_policy_enabled'):
+                try:
+                    force_no_reasoning = bool(handler._speed_translation_policy_enabled())
+                except Exception:
+                    force_no_reasoning = None
+            if force_no_reasoning is None:
+                optimization_getter = getattr(app, 'get_ai_optimization_mode', None)
+                try:
+                    optimization_mode = (
+                        optimization_getter()
+                        if callable(optimization_getter)
+                        else ""
+                    )
+                except Exception:
+                    optimization_mode = ""
+                force_no_reasoning = (
+                    str(optimization_mode or "").strip().lower() == "speed"
+                )
+            request_profile = handler._translation_request_profile(
+                profile,
+                force_no_reasoning=force_no_reasoning,
+            ) or profile
+        except Exception as e:
+            _log_debug(
+                f"Could not apply OCR speed reasoning policy to cache key: "
+                f"{type(e).__name__} - {e}"
+            )
+            request_profile = profile
+
+    provider = getattr(handler, 'custom_ai_provider', None) if handler is not None else None
     if provider is not None and hasattr(provider, 'reasoning_effort_request_contract'):
         try:
             return _normalize_custom_ai_ocr_reasoning_contract(
-                provider.reasoning_effort_request_contract(profile, "ocr")
+                provider.reasoning_effort_request_contract(request_profile, "ocr")
             )
         except Exception as e:
             _log_debug(f"Could not resolve Custom AI OCR reasoning contract: {type(e).__name__} - {e}")
 
     return _normalize_custom_ai_ocr_reasoning_contract(
-        profile.get("reasoning_effort") or profile.get("model_reasoning_effort")
+        request_profile.get("reasoning_effort")
+        or request_profile.get("model_reasoning_effort")
+        or profile.get("reasoning_effort")
+        or profile.get("model_reasoning_effort")
     )
 
 

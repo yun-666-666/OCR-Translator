@@ -376,6 +376,9 @@ class TranslationRequestsMixin:
         if not profile:
             _log_debug("No active custom AI model profile configured for OCR")
             return "<e>: AI model profile for OCR is missing"
+        # Mirror translation speed policy: force reasoning none for OCR requests
+        # under speed mode so remote token spend matches the user-facing policy.
+        profile = self._translation_request_profile(profile)
         request_sequence = self._begin_custom_ai_profile_request(
             profile,
             "ocr",

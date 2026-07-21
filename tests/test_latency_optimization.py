@@ -1851,7 +1851,8 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             worker_threads.run_api_ocr(app, screenshot)
 
         self.assertEqual(len(pool.submissions), 1)
-        self.assertEqual(convert_calls, ["encoded"])
+        # H4: encode is deferred until the async worker after the stale gate.
+        self.assertEqual(convert_calls, [])
         self.assertEqual(app.batch_sequence_counter, 1)
         self.assertEqual(app.active_ocr_calls, {1})
         self.assertEqual(len(app.active_ocr_inflight_keys), 1)
@@ -1866,6 +1867,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         )
         with patch.object(worker_threads, "_schedule_ui_callback"):
             fn(*args)
+        self.assertEqual(convert_calls, ["encoded"])
         self.assertEqual(app.active_ocr_inflight_keys, set())
         self.assertEqual(app.active_ocr_calls, set())
 
@@ -2577,9 +2579,17 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             worker_threads.run_api_ocr(app, screenshot)
 
         self.assertEqual(profiles.requested_kind, "ocr")
-        self.assertEqual(convert_calls, ["called"])
+        # H4: encode deferred; isolation is proven by cache miss + submit.
+        self.assertEqual(convert_calls, [])
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_ocr_calls, {1})
+        fn, args = pool.submissions[0]
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            app.translation_handler = types.SimpleNamespace(
+                perform_ocr=lambda *a, **k: "Profile B OCR"
+            )
+            fn(*args)
+        self.assertEqual(convert_calls, ["called"])
 
     def test_api_ocr_cache_does_not_cross_keep_linebreaks_mode(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2627,9 +2637,17 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         worker_threads.run_api_ocr(app, screenshot)
 
-        self.assertEqual(convert_calls, ["called"])
+        # H4: encode deferred; isolation is proven by cache miss + submit.
+        self.assertEqual(convert_calls, [])
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_ocr_calls, {1})
+        fn, args = pool.submissions[0]
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            app.translation_handler = types.SimpleNamespace(
+                perform_ocr=lambda *a, **k: "Linebreak OCR"
+            )
+            fn(*args)
+        self.assertEqual(convert_calls, ["called"])
 
     def test_api_ocr_cache_does_not_cross_image_payload_settings(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2681,9 +2699,17 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         with patch.object(worker_threads, "start_async_translation"):
             worker_threads.run_api_ocr(app, screenshot)
 
-        self.assertEqual(convert_calls, ["called"])
+        # H4: encode deferred; isolation is proven by cache miss + submit.
+        self.assertEqual(convert_calls, [])
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_ocr_calls, {1})
+        fn, args = pool.submissions[0]
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            app.translation_handler = types.SimpleNamespace(
+                perform_ocr=lambda *a, **k: "Balanced OCR"
+            )
+            fn(*args)
+        self.assertEqual(convert_calls, ["called"])
 
     def test_api_ocr_cache_mode_key_includes_image_payload_settings(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2818,8 +2844,9 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(len(cache_miss_pool.submissions), 1)
         submit_fn, submit_args = cache_miss_pool.submissions[0]
         self.assertIs(submit_fn, worker_threads.process_api_ocr_async)
-        # keep_linebreaks is the final positional arg after route_metric_name
-        self.assertIs(submit_args[-1], False)
+        # keep_linebreaks is frozen at submit; screenshot/image_decision trail it.
+        self.assertIs(submit_args[10], False)
+        self.assertIs(submit_args[11], screenshot)
         submitted_cache_key = submit_args[5]
         self.assertIn("keep_linebreaks=false", submitted_cache_key[3])
         self.assertNotIn("keep_linebreaks=true", submitted_cache_key[3])
@@ -2901,8 +2928,19 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         worker_threads.run_api_ocr(app, screenshot)
 
         self.assertEqual(decision_calls, [(320, 120)])
-        self.assertEqual(encoded_decisions, [decision])
+        # Encode is deferred into the async worker; decision is still frozen once
+        # for cache-key identity at submit time.
+        self.assertEqual(encoded_decisions, [])
         self.assertEqual(len(app.ocr_thread_pool.submissions), 1)
+        fn, args = app.ocr_thread_pool.submissions[0]
+        self.assertIs(args[-1], decision)
+        self.assertIs(args[-2], screenshot)
+        app.translation_handler = types.SimpleNamespace(
+            perform_ocr=lambda *a, **k: "OCR text"
+        )
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            fn(*args)
+        self.assertEqual(encoded_decisions, [decision])
 
     def test_api_ocr_cache_mode_key_includes_effective_reasoning_contract(self):
         worker_threads = import_worker_threads_for_tests()
@@ -2937,6 +2975,71 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertIn("reasoning_effort=none", none_key)
         self.assertNotEqual(low_key, none_key)
         self.assertEqual(provider.request_kind, "ocr")
+
+    def test_api_ocr_cache_mode_key_forces_none_under_speed_policy(self):
+        worker_threads = import_worker_threads_for_tests()
+        profile = {
+            "id": "ocr-profile",
+            "base_url": "https://provider.example/v1",
+            "model": "vision",
+            "reasoning_effort": "high",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class Provider:
+            def reasoning_effort_request_contract(self, active_profile, request_kind):
+                return active_profile.get("reasoning_effort") or "none"
+
+        class Handler:
+            def _translation_request_profile(self, active_profile, force_no_reasoning=None):
+                request_profile = dict(active_profile)
+                if force_no_reasoning is None:
+                    force_no_reasoning = True
+                if force_no_reasoning:
+                    request_profile["reasoning_effort"] = "none"
+                return request_profile
+
+            def _speed_translation_policy_enabled(self):
+                return True
+
+        provider = Provider()
+        handler = Handler()
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            translation_handler=types.SimpleNamespace(
+                custom_ai_provider=provider,
+                _translation_request_profile=handler._translation_request_profile,
+                _speed_translation_policy_enabled=handler._speed_translation_policy_enabled,
+            ),
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            get_ai_optimization_mode=lambda: "speed",
+        )
+
+        speed_key = worker_threads._get_api_ocr_cache_mode_key(app)
+        self.assertIn("reasoning_effort=none", speed_key)
+        self.assertNotIn("reasoning_effort=high", speed_key)
+
+        app.get_ai_optimization_mode = lambda: "quality"
+        # Without speed force, handler still may force if helper always True —
+        # production path uses app mode via handler; simulate non-speed profile path.
+        class QualityHandler:
+            def _translation_request_profile(self, active_profile, force_no_reasoning=None):
+                request_profile = dict(active_profile)
+                if force_no_reasoning:
+                    request_profile["reasoning_effort"] = "none"
+                return request_profile
+
+        quality_handler = QualityHandler()
+        app.translation_handler = types.SimpleNamespace(
+            custom_ai_provider=provider,
+            _translation_request_profile=quality_handler._translation_request_profile,
+        )
+        quality_key = worker_threads._get_api_ocr_cache_mode_key(app)
+        self.assertIn("reasoning_effort=high", quality_key)
+        self.assertNotEqual(speed_key, quality_key)
 
     def test_convert_to_webp_for_api_logs_payload_metadata_without_base64(self):
         import app_logic
@@ -3075,12 +3178,28 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             ocr_thread_pool=pool,
         )
 
-        worker_threads.run_api_ocr(app, Image.new("RGB", (24, 12), (1, 2, 3)))
+        screenshot = Image.new("RGB", (24, 12), (1, 2, 3))
+        worker_threads.run_api_ocr(app, screenshot)
 
         self.assertEqual(len(pool.submissions), 1)
-        _fn, args = pool.submissions[0]
-        self.assertEqual(args[1], b"png-bytes")
-        self.assertEqual(args[6], "image/png")
+        fn, args = pool.submissions[0]
+        # H4: bytes are produced after the stale gate in the async worker.
+        self.assertIsNone(args[1])
+        self.assertIs(args[-2], screenshot)
+        perform_kwargs = []
+
+        def capture_perform(image_data, source_lang, **kwargs):
+            perform_kwargs.append((image_data, kwargs))
+            return "OCR text"
+
+        app.translation_handler = types.SimpleNamespace(
+            perform_ocr=capture_perform
+        )
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            fn(*args)
+        self.assertEqual(len(perform_kwargs), 1)
+        self.assertEqual(perform_kwargs[0][0], b"png-bytes")
+        self.assertEqual(perform_kwargs[0][1].get("image_mime_type"), "image/png")
 
     def test_api_ocr_skips_webp_conversion_when_concurrency_limit_is_full(self):
         worker_threads = import_worker_threads_for_tests()
@@ -3288,6 +3407,179 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(perform_calls, [])
         self.assertEqual(scheduled, [])
         self.assertEqual(app.active_ocr_calls, set())
+
+    def test_stale_api_ocr_request_skips_deferred_encode(self):
+        worker_threads = import_worker_threads_for_tests()
+        perform_calls = []
+        convert_calls = []
+        metric_calls = []
+
+        class Handler:
+            def perform_ocr(self, image_data, source_lang, **kwargs):
+                perform_calls.append((image_data, source_lang, kwargs))
+                return "older text"
+
+        screenshot = Image.new("RGB", (48, 24), (9, 8, 7))
+        decision = types.SimpleNamespace(contract_key="webp|test|72|auto")
+        app = types.SimpleNamespace(
+            is_running=True,
+            batch_sequence_counter=5,
+            active_ocr_calls={4},
+            active_ocr_inflight_keys={"stale-key"},
+            translation_handler=Handler(),
+            convert_to_api_ocr_image=lambda _image, decision=None: (
+                convert_calls.append(decision) or types.SimpleNamespace(
+                    data=b"should-not-encode",
+                    mime_type="image/webp",
+                    image_format="webp",
+                    image_detail="auto",
+                )
+            ),
+        )
+
+        with patch.object(
+            worker_threads,
+            "_increment_metric",
+            side_effect=lambda _app, name, *a, **k: metric_calls.append(name),
+        ), patch.object(worker_threads, "_schedule_ui_callback") as schedule:
+            worker_threads.process_api_ocr_async(
+                app,
+                None,
+                "en",
+                4,
+                "custom_ai",
+                "stale-key",
+                screenshot_pil=screenshot,
+                image_decision=decision,
+            )
+
+        self.assertEqual(convert_calls, [])
+        self.assertEqual(perform_calls, [])
+        self.assertEqual(schedule.call_count, 0)
+        self.assertIn("api_ocr_stale_encode_skip", metric_calls)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.active_ocr_inflight_keys, set())
+
+    def test_fresh_api_ocr_request_encodes_after_stale_gate(self):
+        worker_threads = import_worker_threads_for_tests()
+        perform_calls = []
+        convert_calls = []
+        scheduled = []
+
+        class Handler:
+            def perform_ocr(self, image_data, source_lang, **kwargs):
+                perform_calls.append((image_data, kwargs))
+                return "Fresh OCR text"
+
+        screenshot = Image.new("RGB", (48, 24), (1, 2, 3))
+        decision = types.SimpleNamespace(contract_key="png|test|90|low")
+        encoded_image = types.SimpleNamespace(
+            data=b"png-payload",
+            mime_type="image/png",
+            image_format="png",
+            image_detail="low",
+        )
+        app = types.SimpleNamespace(
+            is_running=True,
+            batch_sequence_counter=7,
+            active_ocr_calls={7},
+            active_ocr_inflight_keys={"fresh-key"},
+            translation_handler=Handler(),
+            convert_to_api_ocr_image=lambda _image, decision=None: (
+                convert_calls.append(decision) or encoded_image
+            ),
+        )
+
+        def capture_schedule(_app, callback, *args, **kwargs):
+            scheduled.append((callback, args))
+
+        with patch.object(
+            worker_threads,
+            "_schedule_ui_callback",
+            side_effect=capture_schedule,
+        ), patch.object(worker_threads, "_record_metric_timing"):
+            worker_threads.process_api_ocr_async(
+                app,
+                None,
+                "en",
+                7,
+                "custom_ai",
+                "fresh-key",
+                screenshot_pil=screenshot,
+                image_decision=decision,
+            )
+
+        self.assertEqual(convert_calls, [decision])
+        self.assertEqual(len(perform_calls), 1)
+        self.assertEqual(perform_calls[0][0], b"png-payload")
+        self.assertEqual(perform_calls[0][1].get("image_mime_type"), "image/png")
+        self.assertEqual(perform_calls[0][1].get("image_detail"), "low")
+        self.assertEqual(perform_calls[0][1].get("image_format"), "png")
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(app.active_ocr_inflight_keys, set())
+
+    def test_run_api_ocr_defers_encode_until_async_worker(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        convert_calls = []
+        pool = Pool()
+        screenshot = Image.new("RGB", (32, 16), (4, 5, 6))
+        decision = types.SimpleNamespace(contract_key="webp|defer|72|auto")
+        encoded_image = types.SimpleNamespace(
+            data=b"deferred-webp",
+            mime_type="image/webp",
+            image_format="webp",
+            image_detail="auto",
+        )
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            get_ai_ocr_image_decision=lambda image_size=None: decision,
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            active_ocr_inflight_keys=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_api_ocr_image=lambda _image, decision=None: (
+                convert_calls.append(decision) or encoded_image
+            ),
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            custom_source_lang="en",
+            ocr_thread_pool=pool,
+        )
+
+        worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(convert_calls, [])
+        self.assertEqual(len(pool.submissions), 1)
+        fn, args = pool.submissions[0]
+        self.assertIsNone(args[1])
+        self.assertIs(args[-2], screenshot)
+        self.assertIs(args[-1], decision)
+
+        perform_calls = []
+        app.translation_handler = types.SimpleNamespace(
+            perform_ocr=lambda image_data, source_lang, **kwargs: (
+                perform_calls.append((image_data, kwargs)) or "OCR text"
+            )
+        )
+        with patch.object(worker_threads, "_schedule_ui_callback"), patch.object(
+            worker_threads,
+            "_record_metric_timing",
+        ):
+            fn(*args)
+        self.assertEqual(convert_calls, [decision])
+        self.assertEqual(perform_calls[0][0], b"deferred-webp")
 
     def test_successful_api_ocr_response_is_cached_for_frame_reuse(self):
         worker_threads = import_worker_threads_for_tests()
