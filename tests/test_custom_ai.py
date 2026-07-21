@@ -8209,12 +8209,664 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
         result = handler._custom_ai_translate("Bonjour", 0.0)
 
         self.assertEqual(result, "Hello")
+        stored_contracts = [
+            call.kwargs["structured_output_contract"]
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertIn("text", stored_contracts)
+        # H2-A dual-writes the peer display contract for mode-flip reuse.
+        self.assertIn("json_schema", stored_contracts)
+        handler.close()
+
+    def test_store_dual_writes_display_equivalent_structured_output_contracts(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("stream"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("你好", {}, 0.01)
+        )
+
+        self.assertEqual(handler._custom_ai_translate("Hello", 0.0), "你好")
+
+        stored_contracts = [
+            call.kwargs["structured_output_contract"]
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(stored_contracts.count("text"), 1)
+        self.assertEqual(stored_contracts.count("json_schema"), 1)
+        for call in handler.unified_cache.store.call_args_list:
+            self.assertEqual(call.args[0], "Hello")
+            self.assertEqual(call.args[4], "你好")
+            self.assertEqual(call.kwargs["custom_prompt"], "")
+            self.assertEqual(call.kwargs["context"], ())
+        handler.close()
+
+    def test_display_cache_reuses_peer_structured_output_contract(self):
+        profile = {
+            "id": "profile-1",
+            "name": "Translator",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            translation_model_var = DummyVar("custom_ai")
+            custom_ai_profiles = Profiles()
+            custom_source_lang = "en"
+            custom_target_lang = "zh-CN"
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            keep_linebreaks_var = DummyVar(False)
+            custom_context_window_var = DummyVar(0)
+            custom_prompt_text = ""
+            custom_ai_latency_mode_var = DummyVar("stream")
+
+        handler = TranslationHandler(App())
+        stream_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="stream",
+        )
+        self.assertEqual(stream_params["structured_output_contract"], "text")
+        handler.unified_cache.store(
+            "Hello",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "你好",
+            **stream_params,
+        )
+
+        # Only the stream/text entry exists; safe/json_schema should still hit
+        # via H2-B peer lookup (and H2-A dual-write on new stores).
+        safe_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="safe",
+        )
         self.assertEqual(
-            handler.unified_cache.store.call_args.kwargs[
-                "structured_output_contract"
-            ],
+            safe_params["structured_output_contract"],
+            "json_schema",
+        )
+        self.assertIsNone(
+            handler.unified_cache.get(
+                "Hello",
+                "en",
+                "zh-CN",
+                "custom_ai",
+                **safe_params,
+            )
+        )
+        self.assertEqual(
+            handler._get_custom_ai_cached_translation(
+                "Hello",
+                cache_params=safe_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            ),
+            "你好",
+        )
+
+        # Reverse direction: store under safe, read under stream.
+        handler.unified_cache = UnifiedTranslationCache(max_size=10)
+        handler._store_custom_ai_cached_translation(
+            "World",
+            "en",
+            "zh-CN",
+            "世界",
+            [safe_params],
+            profile=profile,
+        )
+        stream_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="stream",
+        )
+        self.assertEqual(
+            handler._get_custom_ai_cached_translation(
+                "World",
+                cache_params=stream_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            ),
+            "世界",
+        )
+        handler.close()
+
+    def test_display_cache_peer_reuse_keeps_non_contract_isolation(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        class App:
+            custom_ai_profiles = Profiles()
+            source_lang_var = DummyVar("en")
+            target_lang_var = DummyVar("zh-CN")
+            keep_linebreaks_var = DummyVar(False)
+            custom_context_window_var = DummyVar(0)
+            custom_prompt_text = "prompt-a"
+            custom_ai_latency_mode_var = DummyVar("safe")
+
+        handler = TranslationHandler(App())
+        safe_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="safe",
+        )
+        handler._store_custom_ai_cached_translation(
+            "Hello",
+            "en",
+            "zh-CN",
+            "你好",
+            [safe_params],
+            profile=profile,
+        )
+
+        other_prompt_params = dict(safe_params)
+        other_prompt_params["custom_prompt"] = "prompt-b"
+        other_prompt_params["structured_output_contract"] = "text"
+        self.assertIsNone(
+            handler._get_custom_ai_cached_translation(
+                "Hello",
+                cache_params=other_prompt_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            )
+        )
+
+        other_context_params = dict(safe_params)
+        other_context_params["context"] = (("prev", "前"),)
+        other_context_params["structured_output_contract"] = "text"
+        self.assertIsNone(
+            handler._get_custom_ai_cached_translation(
+                "Hello",
+                cache_params=other_context_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            )
+        )
+        handler.close()
+
+    def test_error_translation_is_not_dual_stored_across_contracts(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("fr"),
+            target_lang_var=DummyVar("en"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("Custom AI translation error: boom", {}, 0.01)
+        )
+
+        result = handler._custom_ai_translate("Bonjour", 0.0)
+        self.assertIn("Custom AI translation error", result)
+        handler.unified_cache.store.assert_not_called()
+        handler.close()
+
+    def test_display_cache_peer_disabled_when_structured_output_mode_off(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "off",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("stream"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("你好", {}, 0.01)
+        )
+
+        self.assertEqual(handler._custom_ai_translate("Hello", 0.0), "你好")
+
+        stored_contracts = [
+            call.kwargs["structured_output_contract"]
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(stored_contracts, ["text"])
+        self.assertFalse(
+            handler._custom_ai_display_cache_peer_allowed(profile)
+        )
+        text_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="stream",
+        )
+        variants = handler._custom_ai_display_cache_param_variants(
+            text_params,
+            profile=profile,
+        )
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(
+            variants[0]["structured_output_contract"],
             "text",
         )
+
+        # Historical peer entries must not be dual-read under off.
+        peer_params = dict(text_params)
+        peer_params["structured_output_contract"] = "json_schema"
+        handler.unified_cache = UnifiedTranslationCache(max_size=10)
+        handler.unified_cache.store(
+            "Hello",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "你好",
+            **peer_params,
+        )
+        self.assertIsNone(
+            handler._get_custom_ai_cached_translation(
+                "Hello",
+                cache_params=text_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            )
+        )
+        handler.close()
+
+    def test_display_cache_peer_disabled_when_structured_output_mode_strict(self):
+        profile = {
+            "id": "profile-1",
+            "base_url": "https://host.example/v1",
+            "api_key": "super-secret",
+            "model": "demo",
+            "structured_output_mode": "strict",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return profile
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("safe"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler.custom_ai_provider.translate = Mock(
+            return_value=("你好", {}, 0.01)
+        )
+
+        self.assertEqual(handler._custom_ai_translate("Hello", 0.0), "你好")
+
+        stored_contracts = [
+            call.kwargs["structured_output_contract"]
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(stored_contracts, ["json_schema"])
+        self.assertFalse(
+            handler._custom_ai_display_cache_peer_allowed(profile)
+        )
+        safe_params = handler._cache_params_for_profile(
+            profile,
+            latency_mode="safe",
+        )
+        variants = handler._custom_ai_display_cache_param_variants(
+            safe_params,
+            profile=profile,
+        )
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(
+            variants[0]["structured_output_contract"],
+            "json_schema",
+        )
+
+        peer_params = dict(safe_params)
+        peer_params["structured_output_contract"] = "text"
+        handler.unified_cache = UnifiedTranslationCache(max_size=10)
+        handler.unified_cache.store(
+            "Hello",
+            "en",
+            "zh-CN",
+            "custom_ai",
+            "你好",
+            **peer_params,
+        )
+        self.assertIsNone(
+            handler._get_custom_ai_cached_translation(
+                "Hello",
+                cache_params=safe_params,
+                source_lang="en",
+                target_lang="zh-CN",
+                profile=profile,
+            )
+        )
+        handler.close()
+
+    def test_race_store_applies_auto_peer_gate_per_target_profile(self):
+        """Winner AUTO + active non-AUTO must not peer dual-write the active key."""
+        winner = {
+            "id": "winner",
+            "name": "Winner",
+            "base_url": "https://winner.example/v1",
+            "api_key": "winner-key",
+            "model": "same-model",
+            "structured_output_mode": "auto",
+        }
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "structured_output_mode": "strict",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, winner]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("race"),
+        )
+        handler = TranslationHandler(app)
+        winner_params = handler._cache_params_for_profile(
+            winner,
+            latency_mode="race",
+        )
+        active_params = handler._cache_params_for_profile(
+            active,
+            latency_mode="race",
+        )
+        self.assertEqual(
+            winner_params["structured_output_contract"],
+            "json_schema",
+        )
+        self.assertEqual(
+            active_params["structured_output_contract"],
+            "json_schema",
+        )
+        handler.unified_cache.store = Mock()
+
+        handler._store_custom_ai_cached_translation(
+            "Hello",
+            "en",
+            "zh-CN",
+            "你好",
+            [
+                (winner_params, winner),
+                (active_params, active),
+            ],
+        )
+
+        stored = [
+            (
+                call.kwargs["profile_id"],
+                call.kwargs["structured_output_contract"],
+            )
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(
+            stored.count(("winner", "json_schema")),
+            1,
+        )
+        self.assertEqual(
+            stored.count(("winner", "text")),
+            1,
+        )
+        self.assertEqual(
+            stored.count(("active", "json_schema")),
+            1,
+        )
+        self.assertEqual(
+            stored.count(("active", "text")),
+            0,
+        )
+        handler.close()
+
+    def test_race_store_preserves_active_auto_peer_when_winner_is_non_auto(self):
+        """Active AUTO peer dual-write must not be gated by a non-AUTO winner."""
+        winner = {
+            "id": "winner",
+            "name": "Winner",
+            "base_url": "https://winner.example/v1",
+            "api_key": "winner-key",
+            "model": "same-model",
+            "structured_output_mode": "off",
+        }
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "structured_output_mode": "auto",
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, winner]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("race"),
+        )
+        handler = TranslationHandler(app)
+        # Force shared race primary contract so both targets are storeable as
+        # same-contract race dual-write pairs (mirrors the live race gate).
+        winner_params = handler._cache_params_for_profile(
+            winner,
+            latency_mode="race",
+        )
+        active_params = handler._cache_params_for_profile(
+            active,
+            latency_mode="race",
+        )
+        winner_params = dict(winner_params)
+        winner_params["structured_output_contract"] = "json_schema"
+        self.assertEqual(
+            active_params["structured_output_contract"],
+            "json_schema",
+        )
+        handler.unified_cache.store = Mock()
+
+        handler._store_custom_ai_cached_translation(
+            "Hello",
+            "en",
+            "zh-CN",
+            "你好",
+            [
+                (winner_params, winner),
+                (active_params, active),
+            ],
+        )
+
+        stored = [
+            (
+                call.kwargs["profile_id"],
+                call.kwargs["structured_output_contract"],
+            )
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(stored.count(("winner", "json_schema")), 1)
+        self.assertEqual(stored.count(("winner", "text")), 0)
+        self.assertEqual(stored.count(("active", "json_schema")), 1)
+        self.assertEqual(stored.count(("active", "text")), 1)
+        handler.close()
+
+    def test_race_success_path_attributes_auto_gate_to_each_target_profile(self):
+        """End-to-end race success must not apply winner AUTO to active strict."""
+        active = {
+            "id": "active",
+            "name": "Active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+            "model": "same-model",
+            "structured_output_mode": "strict",
+            "enabled": True,
+        }
+        winner = {
+            "id": "winner",
+            "name": "Winner",
+            "base_url": "https://winner.example/v1",
+            "api_key": "winner-key",
+            "model": "same-model",
+            "structured_output_mode": "auto",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return active
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                return [active, winner]
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("race"),
+        )
+        handler = TranslationHandler(app)
+        handler.unified_cache.get = Mock(return_value=None)
+        handler.unified_cache.store = Mock()
+        handler._custom_ai_failover_preflight = Mock(
+            return_value={
+                "action": "continue",
+                "timeout_seconds": 5.0,
+                "result": None,
+            }
+        )
+
+        winner_params = handler._cache_params_for_profile(
+            winner,
+            custom_prompt="",
+            keep_linebreaks=False,
+            context=(),
+            latency_mode="race",
+        )
+        active_params = handler._cache_params_for_profile(
+            active,
+            custom_prompt="",
+            keep_linebreaks=False,
+            context=(),
+            latency_mode="race",
+        )
+        # Simulate race returning a foreign winner with distinct params while
+        # keeping the same primary contract (live race append condition).
+        self.assertEqual(
+            winner_params["structured_output_contract"],
+            active_params["structured_output_contract"],
+        )
+        handler._custom_ai_translate_race = Mock(
+            return_value=(
+                "你好",
+                {},
+                0.01,
+                winner_params,
+                winner,
+            )
+        )
+
+        self.assertEqual(handler._custom_ai_translate("Hello", 0.0), "你好")
+
+        stored = [
+            (
+                call.kwargs["profile_id"],
+                call.kwargs["structured_output_contract"],
+            )
+            for call in handler.unified_cache.store.call_args_list
+        ]
+        self.assertEqual(stored.count(("winner", "json_schema")), 1)
+        self.assertEqual(stored.count(("winner", "text")), 1)
+        self.assertEqual(stored.count(("active", "json_schema")), 1)
+        self.assertEqual(stored.count(("active", "text")), 0)
         handler.close()
 
     def test_cache_params_share_equivalent_configured_endpoint_urls(self):
@@ -11184,6 +11836,190 @@ class CostProtectedProfileFailoverHandlerTests(unittest.TestCase):
                 handler.get_translation_provider_cooldown_seconds(),
                 15.0,
             )
+        finally:
+            handler.close()
+
+
+class CustomAIRacePreflightHandlerTests(unittest.TestCase):
+    """C1: race path must preflight stopped/obsolete/deadline before HTTP."""
+
+    def _make_race_handler(self):
+        primary = {
+            "id": "primary",
+            "name": "Primary relay",
+            "base_url": "https://primary.example/v1",
+            "api_key": "primary-secret",
+            "model": "same-model",
+            "wire_api": "chat_completions",
+            "enabled": True,
+        }
+        alternate = {
+            "id": "alternate",
+            "name": "Alternate relay",
+            "base_url": "https://alternate.example/v1",
+            "api_key": "alternate-secret",
+            "model": "same-model",
+            "wire_api": "chat_completions",
+            "enabled": True,
+            "translation_failover_enabled": True,
+        }
+
+        class Profiles:
+            def get_active_profile(self, kind):
+                return primary
+
+            def list_profiles(self, kind=None, enabled_only=False):
+                profiles = [primary, alternate]
+                if enabled_only:
+                    return [profile for profile in profiles if profile["enabled"]]
+                return profiles
+
+        app = types.SimpleNamespace(
+            custom_ai_profiles=Profiles(),
+            keep_linebreaks_var=DummyVar(False),
+            source_lang_var=DummyVar("en"),
+            target_lang_var=DummyVar("zh-CN"),
+            custom_context_window_var=DummyVar(0),
+            custom_prompt_text="",
+            custom_ai_latency_mode_var=DummyVar("race"),
+            translation_model_var=DummyVar("custom_ai"),
+            latest_translation_sequence_started=0,
+            last_displayed_translation_sequence=0,
+            is_running=True,
+        )
+        return TranslationHandler(app), primary, alternate
+
+    def _race_request_snapshot(self, primary, **overrides):
+        snapshot = {
+            "profile": primary,
+            "source_lang": "en",
+            "target_lang": "zh-CN",
+            "cache_params": {
+                "context": (),
+                "keep_linebreaks": False,
+                "custom_prompt": "",
+            },
+            "latency_mode": "race",
+            "configured_latency_mode": "race",
+            "force_no_reasoning": False,
+            "timeout_seconds": 10.0,
+            "deadline_monotonic": 1010.0,
+            "context_generation": 0,
+        }
+        snapshot.update(overrides)
+        return snapshot
+
+    def test_race_skips_provider_calls_when_sequence_is_obsolete(self):
+        handler, primary, _alternate = self._make_race_handler()
+        try:
+            handler.app.latest_translation_sequence_started = 8
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+
+            result = handler._custom_ai_translate(
+                "source",
+                time.monotonic(),
+                translation_sequence=7,
+                request_snapshot=self._race_request_snapshot(primary),
+            )
+
+            self.assertIsNone(result)
+            handler.custom_ai_provider.translate.assert_not_called()
+        finally:
+            handler.close()
+
+    def test_race_skips_provider_calls_when_deadline_is_exhausted(self):
+        handler, primary, _alternate = self._make_race_handler()
+        from runtime_metrics import RuntimeMetrics
+
+        handler.app.runtime_metrics = RuntimeMetrics()
+        try:
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+            clock = {"now": 1010.0}
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                result = handler._custom_ai_translate(
+                    "source",
+                    1000.0,
+                    translation_sequence=3,
+                    timeout_seconds=10.0,
+                    request_snapshot=self._race_request_snapshot(primary),
+                )
+
+            self.assertIsInstance(result, str)
+            self.assertIn("deadline", result.lower())
+            self.assertNotIn("primary-secret", result)
+            self.assertNotIn("alternate-secret", result)
+            handler.custom_ai_provider.translate.assert_not_called()
+            counters = handler.app.runtime_metrics.snapshot()["counters"]
+            self.assertEqual(counters.get("fallback_deadline_exhausted"), 1)
+        finally:
+            handler.close()
+
+    def test_race_skips_provider_calls_when_app_is_stopped(self):
+        handler, primary, _alternate = self._make_race_handler()
+        try:
+            handler.app.is_running = False
+            handler.custom_ai_provider.translate = Mock(
+                side_effect=AssertionError("network should not be called")
+            )
+
+            result = handler._custom_ai_translate(
+                "source",
+                time.monotonic(),
+                translation_sequence=3,
+                request_snapshot=self._race_request_snapshot(primary),
+            )
+
+            self.assertIsNone(result)
+            handler.custom_ai_provider.translate.assert_not_called()
+        finally:
+            handler.close()
+
+    def test_healthy_race_still_calls_candidates_concurrently_with_remaining_budget(self):
+        handler, primary, alternate = self._make_race_handler()
+        try:
+            observed = []
+            barrier = threading.Barrier(2, timeout=1.0)
+
+            def fake_translate(profile, *_args, **kwargs):
+                observed.append((profile["id"], kwargs.get("timeout_seconds")))
+                barrier.wait()
+                if profile["id"] == primary["id"]:
+                    time.sleep(0.05)
+                    return "slow result", {}, 0.05
+                return "fast result", {}, 0.01
+
+            handler.custom_ai_provider.translate = Mock(side_effect=fake_translate)
+            clock = {"now": 1000.0}
+
+            with patch(
+                "handlers.translation_requests.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ):
+                result = handler._custom_ai_translate(
+                    "source",
+                    1000.0,
+                    translation_sequence=3,
+                    timeout_seconds=10.0,
+                    request_snapshot=self._race_request_snapshot(
+                        primary,
+                        deadline_monotonic=1010.0,
+                    ),
+                )
+
+            self.assertEqual(result, "fast result")
+            called_ids = sorted(profile_id for profile_id, _timeout in observed)
+            self.assertEqual(called_ids, ["alternate", "primary"])
+            for _profile_id, timeout_seconds in observed:
+                self.assertAlmostEqual(timeout_seconds, 10.0, places=6)
+            self.assertEqual(handler.custom_ai_provider.translate.call_count, 2)
         finally:
             handler.close()
 

@@ -1852,8 +1852,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             screenshot.size,
             region_origin=screenshot._gct_region_origin,
         )
+        app.last_processed_subtitle = "Held subtitle"
         app.api_ocr_repeat_backoff_scope = cache_key[1:]
         app.api_ocr_repeat_backoff_until_monotonic = time.monotonic() + 10.0
+        app.api_ocr_repeat_backoff_text = "Held subtitle"
 
         with patch.object(worker_threads, "_increment_metric") as increment:
             worker_threads.run_api_ocr(app, screenshot)
@@ -1882,24 +1884,258 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         before = time.monotonic()
         with patch.object(worker_threads, "_increment_metric") as increment:
-            worker_threads.process_api_ocr_response(
-                app,
-                "Unchanged subtitle",
-                1,
-                "en",
-                "custom_ai",
-                ocr_cache_key=cache_key,
-            )
+            with patch.object(worker_threads, "start_async_translation") as start_translation:
+                worker_threads.process_api_ocr_response(
+                    app,
+                    "Unchanged subtitle",
+                    1,
+                    "en",
+                    "custom_ai",
+                    ocr_cache_key=cache_key,
+                )
 
         self.assertEqual(
             getattr(app, "api_ocr_repeat_backoff_scope", None),
             cache_key[1:],
         )
+        self.assertEqual(
+            getattr(app, "api_ocr_repeat_backoff_text", None),
+            "Unchanged subtitle",
+        )
         self.assertGreater(
             getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0),
             before,
         )
-        increment.assert_called_once_with(app, "api_ocr_repeat_backoff_armed")
+        self.assertEqual(app.last_processed_subtitle, "Unchanged subtitle")
+        self.assertEqual(app.last_displayed_batch_sequence, 1)
+        start_translation.assert_not_called()
+        self.assertEqual(
+            [call.args[1] for call in increment.call_args_list],
+            [
+                "api_ocr_repeat_backoff_armed",
+                "api_ocr_text_stable_backoff_armed",
+            ],
+        )
+
+    def test_api_ocr_near_dup_skips_translation_and_arms_backoff(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = (
+            "frame-hash",
+            "custom_ai",
+            "en",
+            "api",
+            10,
+            20,
+            320,
+            120,
+        )
+        # Soft single-token OCR flicker: helper requires mismatch_count > 0 after
+        # normalize, so trailing-punctuation-only changes are exact-stable, not near-dup.
+        last_text = "Please open the treasure door"
+        near_text = "Please open the treasure doors"
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle=last_text,
+            reset_clear_timeout=Mock(),
+            current_scan_interval=500,
+        )
+
+        before = time.monotonic()
+        with patch.object(worker_threads, "_increment_metric") as increment:
+            with patch.object(worker_threads, "start_async_translation") as start_translation:
+                worker_threads.process_api_ocr_response(
+                    app,
+                    near_text,
+                    4,
+                    "en",
+                    "custom_ai",
+                    ocr_cache_key=cache_key,
+                )
+
+        start_translation.assert_not_called()
+        app.reset_clear_timeout.assert_called_once_with()
+        self.assertEqual(app.last_processed_subtitle, last_text)
+        self.assertEqual(app.last_displayed_batch_sequence, 4)
+        self.assertEqual(
+            getattr(app, "api_ocr_repeat_backoff_scope", None),
+            cache_key[1:],
+        )
+        self.assertEqual(
+            getattr(app, "api_ocr_repeat_backoff_text", None),
+            last_text,
+        )
+        self.assertGreaterEqual(
+            getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0),
+            before + worker_threads.API_OCR_REPEAT_BACKOFF_SECONDS - 0.05,
+        )
+        self.assertEqual(
+            [call.args[1] for call in increment.call_args_list],
+            [
+                "api_ocr_repeat_backoff_armed",
+                "api_ocr_near_dup_translation_skip",
+                "api_ocr_text_stable_backoff_armed",
+            ],
+        )
+
+    def test_api_ocr_material_text_change_still_starts_translation(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = (
+            "frame-hash",
+            "custom_ai",
+            "en",
+            "api",
+            10,
+            20,
+            320,
+            120,
+        )
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="The treasure door is open.",
+            api_ocr_repeat_backoff_scope=cache_key[1:],
+            api_ocr_repeat_backoff_until_monotonic=time.monotonic() + 10.0,
+            api_ocr_repeat_backoff_text="The treasure door is open.",
+            reset_clear_timeout=Mock(),
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            worker_threads.process_api_ocr_response(
+                app,
+                "The treasure door is closed.",
+                5,
+                "en",
+                "custom_ai",
+                ocr_cache_key=cache_key,
+            )
+
+        start_translation.assert_called_once_with(
+            app,
+            "The treasure door is closed.",
+            5,
+        )
+        self.assertEqual(app.last_processed_subtitle, "The treasure door is closed.")
+        self.assertIsNone(app.api_ocr_repeat_backoff_scope)
+        self.assertEqual(app.api_ocr_repeat_backoff_until_monotonic, 0.0)
+        self.assertIsNone(app.api_ocr_repeat_backoff_text)
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 0)
+        self.assertEqual(app.last_displayed_batch_sequence, 5)
+
+    def test_api_ocr_digit_change_is_not_treated_as_near_dup(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = (
+            "frame-hash",
+            "custom_ai",
+            "en",
+            "api",
+            10,
+            20,
+            320,
+            120,
+        )
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="Mission timer shows 12 minutes remaining.",
+            reset_clear_timeout=Mock(),
+        )
+
+        with patch.object(worker_threads, "start_async_translation") as start_translation:
+            worker_threads.process_api_ocr_response(
+                app,
+                "Mission timer shows 13 minutes remaining.",
+                6,
+                "en",
+                "custom_ai",
+                ocr_cache_key=cache_key,
+            )
+
+        start_translation.assert_called_once_with(
+            app,
+            "Mission timer shows 13 minutes remaining.",
+            6,
+        )
+        self.assertEqual(
+            app.last_processed_subtitle,
+            "Mission timer shows 13 minutes remaining.",
+        )
+
+    def test_api_ocr_repeat_backoff_duration_adapts_to_scan_and_ocr_p50(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Metrics:
+            def snapshot(self):
+                return {
+                    "timings": {
+                        "api_ocr_duration": {"p50": 1.2},
+                    }
+                }
+
+        app = types.SimpleNamespace(
+            current_scan_interval=500,
+            runtime_metrics=Metrics(),
+        )
+        first_duration = worker_threads._api_ocr_repeat_backoff_seconds(app, 1)
+        self.assertAlmostEqual(
+            first_duration,
+            worker_threads.API_OCR_REPEAT_BACKOFF_SECONDS,
+            places=5,
+        )
+        duration = worker_threads._api_ocr_repeat_backoff_seconds(app, 2)
+        self.assertAlmostEqual(duration, 2.0, places=5)
+        self.assertLessEqual(duration, worker_threads.API_OCR_REPEAT_BACKOFF_MAX_SECONDS)
+
+        app.current_scan_interval = 1000
+        app.runtime_metrics = types.SimpleNamespace(
+            snapshot=lambda: {"timings": {"api_ocr_duration": {"p50": 3.0}}}
+        )
+        capped = worker_threads._api_ocr_repeat_backoff_seconds(app, 2)
+        self.assertAlmostEqual(
+            capped,
+            worker_threads.API_OCR_REPEAT_BACKOFF_MAX_SECONDS,
+            places=5,
+        )
+
+        bare = types.SimpleNamespace()
+        self.assertAlmostEqual(
+            worker_threads._api_ocr_repeat_backoff_seconds(bare, 2),
+            worker_threads.API_OCR_REPEAT_BACKOFF_SECONDS,
+            places=5,
+        )
+
+    def test_api_ocr_backoff_first_repeat_is_floor_then_same_hold_adapts(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = ("frame-hash", "custom_ai", "en", "api", 10, 20, 320, 120)
+        changed_scope_key = ("frame-hash-2", "other_custom_ai", "en", "api", 10, 20, 320, 120)
+        app = types.SimpleNamespace(
+            last_processed_subtitle="Held subtitle",
+            current_scan_interval=1000,
+            runtime_metrics=types.SimpleNamespace(
+                snapshot=lambda: {"timings": {"api_ocr_duration": {"p50": 3.0}}}
+            ),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=100.0):
+            worker_threads._arm_api_ocr_repeat_backoff(
+                app, cache_key, "Held subtitle"
+            )
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 1)
+        self.assertAlmostEqual(app.api_ocr_repeat_backoff_until_monotonic, 100.75)
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.0):
+            worker_threads._arm_api_ocr_repeat_backoff(
+                app, cache_key, "Held subtitle"
+            )
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 2)
+        self.assertAlmostEqual(
+            app.api_ocr_repeat_backoff_until_monotonic,
+            101.0 + worker_threads.API_OCR_REPEAT_BACKOFF_MAX_SECONDS,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=104.0):
+            worker_threads._arm_api_ocr_repeat_backoff(
+                app, changed_scope_key, "Held subtitle"
+            )
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 1)
+        self.assertAlmostEqual(app.api_ocr_repeat_backoff_until_monotonic, 104.75)
 
     def test_api_ocr_repeat_backoff_does_not_block_changed_scope(self):
         worker_threads = import_worker_threads_for_tests()
@@ -1937,6 +2173,124 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_ocr_calls, {1})
+
+    def test_api_ocr_repeat_backoff_inactive_when_last_processed_cleared(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        pool = Pool()
+        screenshot = Image.new("RGB", (320, 120), (7, 8, 9))
+        screenshot._gct_frame_hash = "post-clear-frame"
+        screenshot._gct_region_origin = (10, 20)
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            max_concurrent_ocr_calls=2,
+            convert_to_webp_for_api=lambda _image: b"post-clear-webp",
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+            last_processed_subtitle=None,
+        )
+        cache_key = ocr_utils.build_ocr_frame_cache_key(
+            "post-clear-frame",
+            worker_threads._get_api_ocr_cache_model_key(app, "custom_ai"),
+            "en",
+            worker_threads._get_api_ocr_cache_mode_key(
+                app,
+                "custom_ai",
+                image_size=screenshot.size,
+            ),
+            screenshot.size,
+            region_origin=screenshot._gct_region_origin,
+        )
+        app.api_ocr_repeat_backoff_scope = cache_key[1:]
+        app.api_ocr_repeat_backoff_until_monotonic = time.monotonic() + 10.0
+        app.api_ocr_repeat_backoff_text = "Stale held subtitle"
+
+        with patch.object(worker_threads, "_increment_metric") as increment:
+            worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(app.active_ocr_calls, {1})
+        self.assertIsNone(app.api_ocr_repeat_backoff_scope)
+        self.assertEqual(app.api_ocr_repeat_backoff_until_monotonic, 0.0)
+        self.assertIsNone(app.api_ocr_repeat_backoff_text)
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 0)
+        self.assertNotIn(
+            "api_ocr_repeat_backoff_skip",
+            [call.args[1] for call in increment.call_args_list],
+        )
+
+    def test_api_ocr_empty_clears_repeat_backoff(self):
+        worker_threads = import_worker_threads_for_tests()
+        cache_key = (
+            "frame-hash",
+            "custom_ai",
+            "en",
+            "api",
+            10,
+            20,
+            320,
+            120,
+        )
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="Held subtitle",
+            api_ocr_repeat_backoff_scope=cache_key[1:],
+            api_ocr_repeat_backoff_until_monotonic=time.monotonic() + 10.0,
+            api_ocr_repeat_backoff_text="Held subtitle",
+            handle_empty_ocr_result=Mock(),
+        )
+
+        worker_threads.process_api_ocr_response(
+            app,
+            "<EMPTY>",
+            7,
+            "en",
+            "custom_ai",
+            ocr_cache_key=cache_key,
+        )
+
+        app.handle_empty_ocr_result.assert_called_once_with()
+        self.assertIsNone(app.api_ocr_repeat_backoff_scope)
+        self.assertEqual(app.api_ocr_repeat_backoff_until_monotonic, 0.0)
+        self.assertIsNone(app.api_ocr_repeat_backoff_text)
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 0)
+        self.assertEqual(app.last_displayed_batch_sequence, 7)
+
+    def test_api_ocr_error_clears_repeat_backoff_state(self):
+        worker_threads = import_worker_threads_for_tests()
+        app = types.SimpleNamespace(
+            last_displayed_batch_sequence=0,
+            last_processed_subtitle="Held subtitle",
+            api_ocr_repeat_backoff_scope=("custom_ai", "en", "api"),
+            api_ocr_repeat_backoff_until_monotonic=time.monotonic() + 10.0,
+            api_ocr_repeat_backoff_text="Held subtitle",
+            api_ocr_repeat_backoff_stable_count=2,
+            update_translation_text=Mock(),
+        )
+
+        worker_threads.process_api_ocr_response(
+            app, "<e>: provider error", 8, "en", "other", ocr_cache_key=None
+        )
+
+        self.assertIsNone(app.api_ocr_repeat_backoff_scope)
+        self.assertEqual(app.api_ocr_repeat_backoff_until_monotonic, 0.0)
+        self.assertIsNone(app.api_ocr_repeat_backoff_text)
+        self.assertEqual(app.api_ocr_repeat_backoff_stable_count, 0)
 
     def test_api_ocr_cache_hit_is_used_even_when_concurrency_is_full(self):
         worker_threads = import_worker_threads_for_tests()

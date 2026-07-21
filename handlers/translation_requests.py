@@ -13,6 +13,9 @@ from custom_ai import (
     CUSTOM_AI_LATENCY_MODE_RACE,
     CUSTOM_AI_LATENCY_MODE_SAFE,
     CUSTOM_AI_LATENCY_MODE_STREAM,
+    CUSTOM_AI_STRUCTURED_OUTPUT_AUTO,
+    CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_JSON_SCHEMA,
+    CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_TEXT,
     normalize_custom_ai_latency_mode,
     normalize_custom_ai_structured_output_mode,
     normalize_custom_ai_wire_api,
@@ -606,7 +609,32 @@ class TranslationRequestsMixin:
         if not profile:
             return None
 
-        cached_result = self.unified_cache.get(cleaned_text, source_lang, target_lang, "custom_ai", **cache_params)
+        cached_result = self.unified_cache.get(
+            cleaned_text,
+            source_lang,
+            target_lang,
+            "custom_ai",
+            **cache_params,
+        )
+        if not cached_result:
+            # H2-B: peer-contract secondary lookup for display-equivalent
+            # text/json_schema transport flips under AUTO only.
+            for peer_params in self._custom_ai_display_cache_param_variants(
+                cache_params,
+                profile=profile,
+            )[1:]:
+                cached_result = self.unified_cache.get(
+                    cleaned_text,
+                    source_lang,
+                    target_lang,
+                    "custom_ai",
+                    **peer_params,
+                )
+                if cached_result:
+                    self._increment_runtime_metric(
+                        "translation_cache_contract_peer_hit"
+                    )
+                    break
         if not cached_result:
             return None
 
@@ -1110,6 +1138,26 @@ class TranslationRequestsMixin:
 
         try:
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
+                # Pre-start gate only: mirror failover stopped/obsolete/deadline
+                # checks before opening N parallel race HTTP calls. Does not
+                # cancel already-in-flight race candidates.
+                deadline_monotonic = (
+                    self._resolve_custom_ai_request_deadline_monotonic(
+                        request_snapshot=(
+                            request_snapshot if use_request_snapshot else None
+                        ),
+                        timeout_seconds=timeout_seconds,
+                        translation_start_monotonic=translation_start_monotonic,
+                    )
+                )
+                preflight = self._custom_ai_failover_preflight(
+                    translation_sequence,
+                    deadline_monotonic=deadline_monotonic,
+                    timeout_seconds=timeout_seconds,
+                )
+                if preflight["action"] != "continue":
+                    return preflight["result"]
+                race_timeout_seconds = preflight["timeout_seconds"]
                 (
                     translated_api_text,
                     usage,
@@ -1124,7 +1172,7 @@ class TranslationRequestsMixin:
                     context,
                     keep_linebreaks,
                     custom_prompt=custom_prompt,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=race_timeout_seconds,
                     force_no_reasoning=force_no_reasoning,
                 )
             else:
@@ -1169,7 +1217,9 @@ class TranslationRequestsMixin:
             )
 
         if translated_api_text and not self._is_error_message(translated_api_text):
-            cache_targets = [cache_params]
+            # Each target keeps the profile that owns those cache params so
+            # H2 AUTO peer dual-write is never decided by a different profile.
+            cache_targets = [(cache_params, winning_profile)]
             if latency_mode == CUSTOM_AI_LATENCY_MODE_RACE:
                 active_cache_params = self._cache_params_for_profile(
                     profile,
@@ -1185,16 +1235,14 @@ class TranslationRequestsMixin:
                     )
                     == cache_params.get("structured_output_contract")
                 ):
-                    cache_targets.append(active_cache_params)
-            for target_cache_params in cache_targets:
-                self.unified_cache.store(
-                    cleaned_text_main,
-                    source_lang,
-                    target_lang,
-                    "custom_ai",
-                    translated_api_text,
-                    **target_cache_params,
-                )
+                    cache_targets.append((active_cache_params, profile))
+            self._store_custom_ai_cached_translation(
+                cleaned_text_main,
+                source_lang,
+                target_lang,
+                translated_api_text,
+                cache_targets,
+            )
             self._update_custom_context(
                 cleaned_text_main,
                 translated_api_text,
@@ -1423,7 +1471,7 @@ class TranslationRequestsMixin:
         deadline_monotonic=None,
         timeout_seconds=None,
     ):
-        """Shared stopped/obsolete/deadline gate for safe/stream failover paths.
+        """Shared stopped/obsolete/deadline gate for failover and race pre-start.
 
         Returns a dict:
         - action="abort": stop without another candidate; result is the return value
@@ -1624,13 +1672,13 @@ class TranslationRequestsMixin:
                     usage,
                     duration,
                 )
-                self.unified_cache.store(
+                self._store_custom_ai_cached_translation(
                     text,
                     source_lang,
                     target_lang,
-                    "custom_ai",
                     translated_text,
-                    **cache_params,
+                    [cache_params],
+                    profile=candidate,
                 )
                 self._update_custom_context(
                     text,
@@ -2061,3 +2109,134 @@ class TranslationRequestsMixin:
             "keep_linebreaks": keep_linebreaks,
             "context": tuple(context),
         }
+
+    def _custom_ai_display_cache_param_variants(
+        self,
+        cache_params,
+        profile=None,
+    ):
+        """Return primary + peer display-contract params for cache reuse.
+
+        Successful Custom AI stores are plain normalized translation strings.
+        Under AUTO, stream uses ``text`` while safe/race use ``json_schema``,
+        so mirroring the peer contract avoids a paid re-translate on mode flip
+        without removing contract from the cache key.
+
+        Peer expansion is gated on profile structured_output_mode=AUTO only.
+        off always uses text and strict always uses json_schema, so those modes
+        must not dual-write or dual-read a peer contract.
+        """
+        if not isinstance(cache_params, dict):
+            return []
+        primary = dict(cache_params)
+        variants = [primary]
+        if not self._custom_ai_display_cache_peer_allowed(profile):
+            return variants
+        contract = str(primary.get("structured_output_contract") or "").strip()
+        if contract == CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_TEXT:
+            peer_contract = CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_JSON_SCHEMA
+        elif contract == CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_JSON_SCHEMA:
+            peer_contract = CUSTOM_AI_STRUCTURED_OUTPUT_CONTRACT_TEXT
+        else:
+            return variants
+        peer = dict(primary)
+        peer["structured_output_contract"] = peer_contract
+        variants.append(peer)
+        return variants
+
+    def _custom_ai_display_cache_peer_allowed(self, profile):
+        """Return True only when AUTO can flip text/json_schema by latency mode."""
+        if not isinstance(profile, dict):
+            return False
+        mode = normalize_custom_ai_structured_output_mode(
+            profile.get("structured_output_mode")
+        )
+        return mode == CUSTOM_AI_STRUCTURED_OUTPUT_AUTO
+
+    def _store_custom_ai_cached_translation(
+        self,
+        text,
+        source_lang,
+        target_lang,
+        translation,
+        cache_targets,
+        profile=None,
+    ):
+        """Store a successful translation under primary and peer contracts.
+
+        ``cache_targets`` items may be bare cache-param dicts or
+        ``(cache_params, owner_profile)`` pairs. Peer dual-write is gated by
+        each target's owner profile (AUTO only). Bare dicts fall back to the
+        shared ``profile`` kwarg for single-target call sites.
+        """
+        if not translation or self._is_error_message(translation):
+            return
+        seen = set()
+        dual_store_count = 0
+        for target in cache_targets or ():
+            target_params, target_profile = (
+                self._normalize_custom_ai_cache_store_target(
+                    target,
+                    default_profile=profile,
+                )
+            )
+            variants = self._custom_ai_display_cache_param_variants(
+                target_params,
+                profile=target_profile,
+            )
+            primary_contract = None
+            if variants:
+                primary_contract = variants[0].get(
+                    "structured_output_contract"
+                )
+            for variant in variants:
+                key = (
+                    variant.get("profile_id"),
+                    variant.get("base_url"),
+                    variant.get("model"),
+                    variant.get("credential_scope"),
+                    variant.get("wire_api"),
+                    variant.get("reasoning_effort"),
+                    variant.get("structured_output_contract"),
+                    variant.get("custom_prompt"),
+                    variant.get("keep_linebreaks"),
+                    variant.get("context"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                self.unified_cache.store(
+                    text,
+                    source_lang,
+                    target_lang,
+                    "custom_ai",
+                    translation,
+                    **variant,
+                )
+                if (
+                    primary_contract is not None
+                    and variant.get("structured_output_contract")
+                    != primary_contract
+                ):
+                    dual_store_count += 1
+        if dual_store_count:
+            self._increment_runtime_metric(
+                "translation_cache_contract_dual_store",
+                dual_store_count,
+            )
+
+    def _normalize_custom_ai_cache_store_target(
+        self,
+        target,
+        default_profile=None,
+    ):
+        """Return ``(cache_params, owner_profile)`` for one store target."""
+        if (
+            isinstance(target, tuple)
+            and len(target) == 2
+            and isinstance(target[0], dict)
+        ):
+            return target[0], target[1]
+        if isinstance(target, dict):
+            return target, default_profile
+        return {}, default_profile

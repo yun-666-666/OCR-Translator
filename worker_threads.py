@@ -44,6 +44,9 @@ CAPTURE_SLOW_SECONDS_MSS = 0.050
 OCR_CACHE_HIT_SLOW_SECONDS = 0.050
 PADDLE_OCR_SLOW_SECONDS = 0.500
 API_OCR_REPEAT_BACKOFF_SECONDS = 0.75
+API_OCR_REPEAT_BACKOFF_MAX_SECONDS = 2.5
+API_OCR_REPEAT_BACKOFF_SCAN_MULTIPLIER = 4.0
+API_OCR_REPEAT_BACKOFF_OCR_P50_MULTIPLIER = 1.5
 from worker_capture import (
     CaptureUISnapshot,
     run_capture_thread,
@@ -521,6 +524,164 @@ def run_translation_thread(app):
 
 # ==================== GENERIC ASYNC API OCR WORKFLOW ====================
 
+def _api_ocr_scan_interval_seconds(app):
+    for attr_name in ("current_scan_interval", "base_scan_interval"):
+        raw_value = getattr(app, attr_name, None)
+        if raw_value is None:
+            continue
+        try:
+            interval_ms = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if interval_ms > 0.0:
+            return interval_ms / 1000.0
+
+    scan_var = getattr(app, "scan_interval_var", None)
+    getter = getattr(scan_var, "get", None)
+    if callable(getter):
+        try:
+            interval_ms = float(getter())
+        except (TypeError, ValueError):
+            interval_ms = 0.0
+        if interval_ms > 0.0:
+            return interval_ms / 1000.0
+    return 0.0
+
+
+def _api_ocr_recent_duration_p50_seconds(app):
+    metrics = _runtime_metrics(app)
+    snapshotter = getattr(metrics, "snapshot", None)
+    if not callable(snapshotter):
+        return 0.0
+    try:
+        snapshot = snapshotter() or {}
+    except Exception:
+        return 0.0
+    timings = snapshot.get("timings") if isinstance(snapshot, dict) else None
+    if not isinstance(timings, dict):
+        return 0.0
+    for metric_name in ("api_ocr_duration", "ocr_duration"):
+        timing = timings.get(metric_name)
+        if not isinstance(timing, dict):
+            continue
+        try:
+            p50 = float(timing.get("p50") or 0.0)
+        except (TypeError, ValueError):
+            p50 = 0.0
+        if p50 > 0.0:
+            return p50
+    return 0.0
+
+
+def _api_ocr_repeat_backoff_seconds(app, stable_repeat_count=1):
+    """Return the next stable-text backoff duration.
+
+    The first stable OCR result keeps the historical 0.75-second behavior.
+    Only a second consecutive result for the same held text may use the
+    adaptive scan/latency budget.
+    """
+    try:
+        stable_repeat_count = int(stable_repeat_count)
+    except (TypeError, ValueError):
+        stable_repeat_count = 1
+    duration = float(API_OCR_REPEAT_BACKOFF_SECONDS)
+    if stable_repeat_count <= 1:
+        return duration
+    scan_seconds = _api_ocr_scan_interval_seconds(app)
+    if scan_seconds > 0.0:
+        duration = max(
+            duration,
+            scan_seconds * API_OCR_REPEAT_BACKOFF_SCAN_MULTIPLIER,
+        )
+    ocr_p50 = _api_ocr_recent_duration_p50_seconds(app)
+    if ocr_p50 > 0.0:
+        duration = max(
+            duration,
+            ocr_p50 * API_OCR_REPEAT_BACKOFF_OCR_P50_MULTIPLIER,
+        )
+    return min(duration, float(API_OCR_REPEAT_BACKOFF_MAX_SECONDS))
+
+
+def _clear_api_ocr_repeat_backoff(app):
+    app.api_ocr_repeat_backoff_scope = None
+    app.api_ocr_repeat_backoff_until_monotonic = 0.0
+    app.api_ocr_repeat_backoff_text = None
+    app.api_ocr_repeat_backoff_stable_count = 0
+
+
+def _api_ocr_repeat_backoff_has_live_held_text(app, repeat_scope):
+    if not repeat_scope:
+        return False
+    if repeat_scope != getattr(app, "api_ocr_repeat_backoff_scope", None):
+        return False
+    held_text = getattr(app, "api_ocr_repeat_backoff_text", None)
+    if not isinstance(held_text, str) or not held_text:
+        return False
+    return getattr(app, "last_processed_subtitle", None) == held_text
+
+
+def _arm_api_ocr_repeat_backoff(
+    app,
+    ocr_cache_key,
+    held_text,
+    metric_name="api_ocr_repeat_backoff_armed",
+):
+    if ocr_cache_key is None:
+        return False
+    if not isinstance(held_text, str) or not held_text:
+        return False
+    repeat_scope = tuple(ocr_cache_key[1:])
+    if _api_ocr_repeat_backoff_has_live_held_text(app, repeat_scope):
+        try:
+            stable_count = int(
+                getattr(app, "api_ocr_repeat_backoff_stable_count", 0) or 0
+            ) + 1
+        except (TypeError, ValueError):
+            stable_count = 2
+    else:
+        stable_count = 1
+    app.api_ocr_repeat_backoff_scope = repeat_scope
+    app.api_ocr_repeat_backoff_until_monotonic = (
+        time.monotonic() + _api_ocr_repeat_backoff_seconds(app, stable_count)
+    )
+    app.api_ocr_repeat_backoff_text = held_text
+    app.api_ocr_repeat_backoff_stable_count = stable_count
+    _increment_metric(app, metric_name)
+    return True
+
+
+def _api_ocr_repeat_backoff_is_active(app, repeat_scope):
+    if not _api_ocr_repeat_backoff_has_live_held_text(app, repeat_scope):
+        return False
+    try:
+        repeat_until = float(
+            getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0) or 0.0
+        )
+    except (TypeError, ValueError):
+        return False
+    if time.monotonic() >= repeat_until:
+        return False
+
+    return True
+
+
+def _api_ocr_text_is_stable_repeat(ocr_result, last_processed_subtitle):
+    if not isinstance(ocr_result, str) or not isinstance(last_processed_subtitle, str):
+        return False, False
+    if ocr_result == last_processed_subtitle:
+        return True, False
+
+    current_norm = _normalize_local_ocr_submit_text(ocr_result)
+    last_norm = _normalize_local_ocr_submit_text(last_processed_subtitle)
+    if not current_norm or not last_norm:
+        return False, False
+    if current_norm == last_norm:
+        return True, False
+    if _looks_like_safe_local_ocr_near_repeat(current_norm, last_norm):
+        return True, True
+    return False, False
+
+
 def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
@@ -619,18 +780,7 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 return
 
         repeat_scope = tuple(ocr_cache_key[1:]) if ocr_cache_key else None
-        try:
-            repeat_until = float(
-                getattr(app, "api_ocr_repeat_backoff_until_monotonic", 0.0)
-                or 0.0
-            )
-        except (TypeError, ValueError):
-            repeat_until = 0.0
-        if (
-            repeat_scope
-            and repeat_scope == getattr(app, "api_ocr_repeat_backoff_scope", None)
-            and time.monotonic() < repeat_until
-        ):
+        if _api_ocr_repeat_backoff_is_active(app, repeat_scope):
             _increment_metric(app, "api_ocr_repeat_backoff_skip")
             log_debug_coalesced(
                 ("api-ocr-repeat-backoff", provider_name),
@@ -639,6 +789,14 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 interval_seconds=5.0,
             )
             return
+        # Clear only invalidated state.  An expired but still-live held subtitle
+        # must retain its count so the next stable OCR result can escalate.
+        if getattr(app, "api_ocr_repeat_backoff_scope", None) is not None:
+            if not _api_ocr_repeat_backoff_has_live_held_text(
+                app,
+                getattr(app, "api_ocr_repeat_backoff_scope", None),
+            ):
+                _clear_api_ocr_repeat_backoff(app)
 
         concurrency_limit = _api_ocr_concurrency_limit(app, provider_name)
         if len(app.active_ocr_calls) >= concurrency_limit:
@@ -804,6 +962,7 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
             app.ocr_frame_cache.put(ocr_cache_key, ocr_result)
 
         if isinstance(ocr_result, str) and ocr_result.startswith("<e>:"):
+            _clear_api_ocr_repeat_backoff(app)
             log_debug(
                 f"OCR error in {provider_name} batch {sequence_number} "
                 f"{summarize_text_for_log(ocr_result)}"
@@ -826,27 +985,43 @@ def process_api_ocr_response(app, ocr_result, sequence_number, source_lang, prov
             return
 
         if ocr_result == "<EMPTY>":
+            _clear_api_ocr_repeat_backoff(app)
             app.handle_empty_ocr_result()
             app.last_displayed_batch_sequence = sequence_number
             return
 
-        if hasattr(app, 'last_processed_subtitle') and ocr_result == app.last_processed_subtitle:
-            if ocr_cache_key is not None:
-                app.api_ocr_repeat_backoff_scope = tuple(ocr_cache_key[1:])
-                app.api_ocr_repeat_backoff_until_monotonic = (
-                    time.monotonic() + API_OCR_REPEAT_BACKOFF_SECONDS
+        last_processed_subtitle = getattr(app, "last_processed_subtitle", None)
+        is_stable_repeat, is_near_dup = _api_ocr_text_is_stable_repeat(
+            ocr_result,
+            last_processed_subtitle,
+        )
+        if is_stable_repeat:
+            held_text = last_processed_subtitle
+            if is_near_dup:
+                armed = _arm_api_ocr_repeat_backoff(
+                    app,
+                    ocr_cache_key,
+                    held_text,
                 )
-                _increment_metric(app, "api_ocr_repeat_backoff_armed")
+                _increment_metric(app, "api_ocr_near_dup_translation_skip")
+                if armed:
+                    _increment_metric(app, "api_ocr_text_stable_backoff_armed")
+                log_debug(
+                    "Keeping existing translation for safe near-duplicate "
+                    f"{provider_name} OCR {summarize_text_for_log(ocr_result)}"
+                )
+            else:
+                if _arm_api_ocr_repeat_backoff(app, ocr_cache_key, held_text):
+                    _increment_metric(app, "api_ocr_text_stable_backoff_armed")
+                log_debug(
+                    "Keeping existing translation for successive identical "
+                    f"{provider_name} OCR {summarize_text_for_log(ocr_result)}"
+                )
             app.reset_clear_timeout()
-            log_debug(
-                "Keeping existing translation for successive identical "
-                f"{provider_name} OCR {summarize_text_for_log(ocr_result)}"
-            )
             app.last_displayed_batch_sequence = sequence_number
             return
 
-        app.api_ocr_repeat_backoff_scope = None
-        app.api_ocr_repeat_backoff_until_monotonic = 0.0
+        _clear_api_ocr_repeat_backoff(app)
         app.last_processed_subtitle = ocr_result
         app.reset_clear_timeout()
         start_async_translation(app, ocr_result, sequence_number)
