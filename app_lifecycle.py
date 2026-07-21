@@ -141,6 +141,8 @@ class AppLifecycleMixin:
             self.clear_ocr_stability_gate("cache cleared")
             if hasattr(self, 'active_translation_inflight_keys'):
                 self.active_translation_inflight_keys.clear()
+            if hasattr(self, 'active_ocr_inflight_keys'):
+                self.active_ocr_inflight_keys.clear()
             _log_debug("Unified translation cache and related states cleared successfully.")
 
             # Update status briefly
@@ -182,6 +184,7 @@ class AppLifecycleMixin:
         self.batch_sequence_counter = 0
         self.last_displayed_batch_sequence = 0
         self.active_ocr_calls = set()
+        self.active_ocr_inflight_keys = set()
         self.last_processed_subtitle = None
         self.last_local_ocr_submitted_text = None
         self.last_local_ocr_submitted_norm = None
@@ -232,6 +235,8 @@ class AppLifecycleMixin:
 
         if hasattr(self, 'active_ocr_calls'):
             self.active_ocr_calls.clear()
+        if hasattr(self, 'active_ocr_inflight_keys'):
+            self.active_ocr_inflight_keys.clear()
         if hasattr(self, 'active_translation_calls'):
             self.active_translation_calls.clear()
 

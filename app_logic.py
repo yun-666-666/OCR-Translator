@@ -176,6 +176,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.batch_sequence_counter = 0  # Track batch sequence numbers
         self.clear_timeout_timer_start = None  # Timer for clear translation timeout
         self.active_ocr_calls = set()  # Track active async OCR calls
+        self.active_ocr_inflight_keys = set()  # Track unique in-flight OCR cache keys
         self.max_concurrent_ocr_calls = 8  # Limit concurrent OCR API calls (8 for Gemini)
 
         # Gemini OCR Simple Management (No Queue for Gemini)

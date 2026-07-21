@@ -1813,6 +1813,155 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(app.batch_sequence_counter, 1)
         self.assertEqual(app.active_ocr_calls, set())
 
+    def test_api_ocr_inflight_dedupe_skips_duplicate_same_cache_key(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        pool = Pool()
+        convert_calls = []
+        screenshot = Image.new("RGB", (320, 120), (11, 22, 33))
+        screenshot._gct_frame_hash = "inflight-same-frame"
+        screenshot._gct_region_origin = (10, 20)
+
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            active_ocr_inflight_keys=set(),
+            max_concurrent_ocr_calls=4,
+            convert_to_webp_for_api=lambda _image: convert_calls.append("encoded") or b"webp-bytes",
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+        )
+
+        with patch.object(worker_threads, "_increment_metric") as increment:
+            worker_threads.run_api_ocr(app, screenshot)
+            worker_threads.run_api_ocr(app, screenshot)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(convert_calls, ["encoded"])
+        self.assertEqual(app.batch_sequence_counter, 1)
+        self.assertEqual(app.active_ocr_calls, {1})
+        self.assertEqual(len(app.active_ocr_inflight_keys), 1)
+        increment.assert_any_call(app, "ocr_duplicate_inflight_skip")
+
+        # Completing the in-flight request releases the key so a later identical
+        # frame can be submitted again if the cache was not populated.
+        fn, args = pool.submissions[0]
+        app.batch_sequence_counter = 1
+        app.translation_handler = types.SimpleNamespace(
+            perform_ocr=lambda *a, **k: "<EMPTY>"
+        )
+        with patch.object(worker_threads, "_schedule_ui_callback"):
+            fn(*args)
+        self.assertEqual(app.active_ocr_inflight_keys, set())
+        self.assertEqual(app.active_ocr_calls, set())
+
+        worker_threads.run_api_ocr(app, screenshot)
+        self.assertEqual(len(pool.submissions), 2)
+        self.assertEqual(app.batch_sequence_counter, 2)
+
+    def test_api_ocr_write_through_cache_on_async_success(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        cache = ocr_utils.OCRFrameCache(max_size=4)
+        cache_key = ocr_utils.build_ocr_frame_cache_key(
+            "write-through-frame",
+            "custom_ai",
+            "en",
+            "api",
+            (320, 120),
+            region_origin=(10, 20),
+        )
+        app = types.SimpleNamespace(
+            batch_sequence_counter=5,
+            active_ocr_calls={5},
+            active_ocr_inflight_keys={cache_key},
+            ocr_frame_cache=cache,
+            translation_handler=types.SimpleNamespace(
+                perform_ocr=lambda *a, **k: "Write-through OCR text"
+            ),
+        )
+        scheduled = []
+
+        def capture_schedule(_app, callback, *args, **kwargs):
+            scheduled.append((callback, args))
+
+        with patch.object(
+            worker_threads,
+            "_schedule_ui_callback",
+            side_effect=capture_schedule,
+        ):
+            worker_threads.process_api_ocr_async(
+                app,
+                b"webp-bytes",
+                "en",
+                5,
+                "custom_ai",
+                cache_key,
+            )
+
+        self.assertEqual(cache.get(cache_key), "Write-through OCR text")
+        self.assertEqual(app.active_ocr_inflight_keys, set())
+        self.assertEqual(app.active_ocr_calls, set())
+        self.assertEqual(len(scheduled), 1)
+
+    def test_api_ocr_inflight_allows_distinct_cache_keys(self):
+        worker_threads = import_worker_threads_for_tests()
+        ocr_utils = import_ocr_utils_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            get_ocr_model_setting=lambda: "custom_ai",
+            batch_sequence_counter=0,
+            active_ocr_calls=set(),
+            active_ocr_inflight_keys=set(),
+            max_concurrent_ocr_calls=4,
+            convert_to_webp_for_api=lambda _image: b"webp-bytes",
+            translation_model_var=types.SimpleNamespace(get=lambda: "custom_ai"),
+            is_gemini_model=lambda model: False,
+            is_openai_model=lambda model: False,
+            source_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            ocr_thread_pool=pool,
+            ocr_frame_cache=ocr_utils.OCRFrameCache(max_size=4),
+        )
+
+        first = Image.new("RGB", (320, 120), (1, 2, 3))
+        first._gct_frame_hash = "frame-a"
+        first._gct_region_origin = (10, 20)
+        second = Image.new("RGB", (320, 120), (4, 5, 6))
+        second._gct_frame_hash = "frame-b"
+        second._gct_region_origin = (10, 20)
+
+        worker_threads.run_api_ocr(app, first)
+        worker_threads.run_api_ocr(app, second)
+
+        self.assertEqual(len(pool.submissions), 2)
+        self.assertEqual(app.batch_sequence_counter, 2)
+        self.assertEqual(app.active_ocr_calls, {1, 2})
+        self.assertEqual(len(app.active_ocr_inflight_keys), 2)
+
     def test_api_ocr_repeat_backoff_skips_same_scope_before_encoding(self):
         worker_threads = import_worker_threads_for_tests()
         ocr_utils = import_ocr_utils_for_tests()
@@ -3936,6 +4085,161 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             app.active_translation_started_monotonic,
             {1: 100.0, 2: 101.6},
         )
+
+    def test_submit_invalidates_stale_pending_translation_request(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request={
+                "text": "StalePending",
+                "ocr_sequence_number": 2,
+                "requested_at_monotonic": 100.5,
+                "configuration_refresh": False,
+            },
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=101.0,
+            pending_translation_flush_generation=3,
+            is_running=True,
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(app, "Latest", 3)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "Latest")
+        self.assertIsNone(app.pending_translation_request)
+        self.assertFalse(app.pending_translation_flush_scheduled)
+        self.assertEqual(app.pending_translation_flush_deadline_monotonic, 0.0)
+
+        # Completing either active call must not resurrect the stale pending text.
+        with patch.object(
+            worker_threads,
+            "_queue_pending_translation_request",
+        ) as queue_pending:
+            worker_threads._expedite_pending_translation_request(app)
+        queue_pending.assert_not_called()
+
+    def test_supersede_completion_does_not_send_stale_pending_translation(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+            def translate_text_with_timeout(self, text, **kwargs):
+                return f"translated:{text}"
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            latest_translation_sequence_started=1,
+            last_displayed_translation_sequence=0,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+        )
+
+        # First newer text is forced into pending while concurrency is full and
+        # the active call is still younger than the supersede threshold.
+        with patch.object(worker_threads.time, "monotonic", return_value=100.2):
+            worker_threads.start_async_translation(app, "StalePending", 2)
+        self.assertEqual(app.pending_translation_request["text"], "StalePending")
+        self.assertEqual(len(pool.submissions), 0)
+
+        # Later supersede starts the true latest request and must drop pending.
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(app, "Latest", 3)
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "Latest")
+        self.assertIsNone(app.pending_translation_request)
+
+        # Completing the superseded older call must not re-submit StalePending.
+        with patch.object(worker_threads.time, "monotonic", return_value=102.0):
+            with patch.object(worker_threads, "_schedule_ui_callback"):
+                worker_threads.process_translation_async(
+                    app,
+                    "Old",
+                    1,
+                    1,
+                    ("custom_ai", "Old", "scope"),
+                    requested_at_monotonic=100.0,
+                    latency_mode="safe",
+                )
+
+        submitted_texts = [args[1] for _fn, args in pool.submissions]
+        self.assertEqual(submitted_texts, ["Latest"])
+        self.assertNotIn("StalePending", submitted_texts)
 
     def test_translation_supersede_threshold_uses_route_p90(self):
         worker_threads = import_worker_threads_for_tests()

@@ -725,23 +725,41 @@ def _clear_ocr_stability_gate(app, reason):
     return had_pending
 
 
+def _ocr_queue_prefers_latest_frame(ocr_model):
+    """Return whether queued older frames can never beat a fresher capture.
+
+    Local Paddle and Custom AI OCR both process one frame at a time and discard
+    older responses by sequence. Keeping a multi-frame backlog only delays the
+    latest subtitle and can force paid API encode/OCR work on already-stale
+    frames once capacity frees up.
+    """
+    model = str(ocr_model or "").strip().lower()
+    return model == PADDLEOCR_MODEL_CODE or model == "custom_ai"
+
+
 def enqueue_ocr_frame_for_model(app, screenshot, ocr_model):
     ocr_queue = app.ocr_queue
-    if ocr_model == PADDLEOCR_MODEL_CODE:
+    prefer_latest = _ocr_queue_prefers_latest_frame(ocr_model)
+    dropped = 0
+    if prefer_latest:
         try:
             while True:
                 ocr_queue.get_nowait()
+                dropped += 1
         except queue.Empty:
             pass
+        if dropped:
+            _increment_metric(app, "ocr_queue_stale_frame_drop", dropped)
 
     try:
         if not ocr_queue.full():
             ocr_queue.put_nowait(screenshot)
             _refresh_ocr_queue_metric(app)
             return True
-        if ocr_model == PADDLEOCR_MODEL_CODE:
+        if prefer_latest:
             try:
                 ocr_queue.get_nowait()
+                _increment_metric(app, "ocr_queue_stale_frame_drop")
             except queue.Empty:
                 pass
             ocr_queue.put_nowait(screenshot)

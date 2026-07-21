@@ -807,6 +807,18 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
             )
             return
 
+        if not hasattr(app, 'active_ocr_inflight_keys'):
+            app.active_ocr_inflight_keys = set()
+        if ocr_cache_key is not None and ocr_cache_key in app.active_ocr_inflight_keys:
+            _increment_metric(app, "ocr_duplicate_inflight_skip")
+            log_debug_coalesced(
+                ("api-ocr-duplicate-inflight", provider_name),
+                "LATENCY: duplicate in-flight API OCR skipped "
+                f"provider={provider_name}",
+                interval_seconds=5.0,
+            )
+            return
+
         encoded_image = None
         metadata_encoder = getattr(app, 'convert_to_api_ocr_image', None)
         if callable(metadata_encoder):
@@ -854,6 +866,8 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
         sequence_number = app.batch_sequence_counter
 
         app.active_ocr_calls.add(sequence_number)
+        if ocr_cache_key is not None:
+            app.active_ocr_inflight_keys.add(ocr_cache_key)
         _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
         try:
             app.ocr_thread_pool.submit(
@@ -872,6 +886,8 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
             )
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
+            if ocr_cache_key is not None and hasattr(app, 'active_ocr_inflight_keys'):
+                app.active_ocr_inflight_keys.discard(ocr_cache_key)
             raise
         log_debug(f"Started {provider_name} OCR batch {sequence_number} (active calls: {len(app.active_ocr_calls)})")
 
@@ -918,6 +934,18 @@ def process_api_ocr_async(
         if route_metric_name:
             _record_metric_timing(app, route_metric_name, ocr_duration)
 
+        # Write-through successful OCR text so concurrent identical frames can
+        # hit the frame cache without waiting for UI-thread response processing.
+        if (
+            ocr_cache_key is not None
+            and hasattr(app, 'ocr_frame_cache')
+            and isinstance(ocr_result, str)
+            and ocr_result.strip()
+            and not ocr_result.startswith("<e>:")
+            and ocr_result != "<EMPTY>"
+        ):
+            app.ocr_frame_cache.put(ocr_cache_key, ocr_result)
+
         log_debug(
             f"{provider_name} OCR batch {sequence_number} completed, "
             f"scheduling response {summarize_text_for_log(ocr_result)}"
@@ -931,6 +959,8 @@ def process_api_ocr_async(
 
     finally:
         app.active_ocr_calls.discard(sequence_number)
+        if ocr_cache_key is not None and hasattr(app, 'active_ocr_inflight_keys'):
+            app.active_ocr_inflight_keys.discard(ocr_cache_key)
         _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
         log_debug(f"{provider_name} OCR batch {sequence_number} finished (active calls: {len(app.active_ocr_calls)})")
 

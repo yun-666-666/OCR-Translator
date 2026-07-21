@@ -1298,6 +1298,60 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         self.assertEqual(app.ocr_queue.qsize(), 1)
         self.assertIs(app.ocr_queue.get_nowait(), latest_frame)
 
+    def test_custom_ai_ocr_queue_keeps_latest_frame_only(self):
+        import worker_threads
+
+        increments = []
+        app = types.SimpleNamespace(
+            ocr_queue=queue.Queue(maxsize=8),
+            runtime_metrics=types.SimpleNamespace(
+                increment=lambda name, amount=1: increments.append((name, amount))
+            ),
+        )
+        old_frame = object()
+        newer_frame = object()
+        latest_frame = object()
+        app.ocr_queue.put_nowait(old_frame)
+        app.ocr_queue.put_nowait(newer_frame)
+
+        enqueued = worker_threads.enqueue_ocr_frame_for_model(
+            app,
+            latest_frame,
+            "custom_ai",
+        )
+
+        self.assertTrue(enqueued)
+        self.assertEqual(app.ocr_queue.qsize(), 1)
+        self.assertIs(app.ocr_queue.get_nowait(), latest_frame)
+        self.assertIn(("ocr_queue_stale_frame_drop", 2), increments)
+
+    def test_custom_ai_ocr_queue_full_replaces_with_latest_frame(self):
+        import worker_threads
+
+        increments = []
+        app = types.SimpleNamespace(
+            ocr_queue=queue.Queue(maxsize=1),
+            runtime_metrics=types.SimpleNamespace(
+                increment=lambda name, amount=1: increments.append((name, amount))
+            ),
+        )
+        old_frame = object()
+        latest_frame = object()
+        app.ocr_queue.put_nowait(old_frame)
+
+        enqueued = worker_threads.enqueue_ocr_frame_for_model(
+            app,
+            latest_frame,
+            "custom_ai",
+        )
+
+        self.assertTrue(enqueued)
+        self.assertEqual(app.ocr_queue.qsize(), 1)
+        self.assertIs(app.ocr_queue.get_nowait(), latest_frame)
+        self.assertTrue(
+            any(name == "ocr_queue_stale_frame_drop" for name, _amount in increments)
+        )
+
     def test_paddleocr_first_clear_text_submits_without_legacy_stability_threshold(self):
         import worker_threads
         from paddle_ocr_backend import PaddleOCRSettings

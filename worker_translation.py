@@ -852,6 +852,26 @@ def _submit_async_translation_request(
     latency_mode=None,
     request_snapshot=None,
 ):
+    # A real submit supersedes any older pending request. Instant-cache hits
+    # already invalidate pending; without this, completion of an older active
+    # call can expedite stale pending text and re-bill remote translation.
+    pending_request = getattr(app, "pending_translation_request", None)
+    if isinstance(pending_request, dict):
+        pending_text = pending_request.get("text")
+        if pending_text != text_to_translate:
+            _invalidate_pending_translation_request(
+                app,
+                "newer translation submitted",
+            )
+            _increment_metric(app, "pending_translation_superseded")
+        else:
+            # Same text already pending: clear timer/state so completion
+            # expedite cannot double-submit the just-started request.
+            _invalidate_pending_translation_request(
+                app,
+                "matching pending translation already submitted",
+            )
+
     app.translation_sequence_counter += 1
     translation_sequence = app.translation_sequence_counter
     app.latest_translation_sequence_started = translation_sequence
