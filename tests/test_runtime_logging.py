@@ -1,0 +1,912 @@
+import ast
+import os
+import tempfile
+import threading
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+import logger
+from handlers.translation_handler import TranslationHandler
+from handlers.ui_interaction_handler import UIInteractionHandler
+
+
+class LogCoalescingGateTests(unittest.TestCase):
+    def test_first_event_is_visible_and_window_emits_suppressed_summary(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(
+            gate.prepare("cache-miss", "first", interval_seconds=5.0),
+            "first",
+        )
+        now[0] = 101.0
+        self.assertIsNone(
+            gate.prepare("cache-miss", "second", interval_seconds=5.0)
+        )
+        now[0] = 105.0
+        self.assertEqual(
+            gate.prepare("cache-miss", "current", interval_seconds=5.0),
+            "current (suppressed 1 similar event since previous log)",
+        )
+
+    def test_event_keys_are_independent_and_clear_restores_first_visibility(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(gate.prepare("cache", "cache first"), "cache first")
+        self.assertEqual(gate.prepare("queue", "queue first"), "queue first")
+        self.assertIsNone(gate.prepare("cache", "cache hidden"))
+
+        gate.clear()
+
+        self.assertEqual(
+            gate.prepare("cache", "cache after clear"),
+            "cache after clear",
+        )
+
+    def test_concurrent_events_keep_exact_suppressed_count(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+        prepared = []
+        prepared_lock = threading.Lock()
+        start = threading.Barrier(20)
+
+        def submit(index):
+            start.wait()
+            result = gate.prepare("queue", f"event-{index}")
+            with prepared_lock:
+                prepared.append(result)
+
+        threads = [
+            threading.Thread(target=submit, args=(index,))
+            for index in range(20)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sum(message is not None for message in prepared), 1)
+        now[0] = 105.0
+        self.assertEqual(
+            gate.prepare("queue", "periodic"),
+            "periodic (suppressed 19 similar events since previous log)",
+        )
+
+    def test_status_change_forces_log_inside_interval_with_suppressed_count(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=1 translation=0",
+                interval_seconds=5.0,
+                status="1:0",
+            ),
+            "waiting ocr=1 translation=0",
+        )
+        now[0] = 101.0
+        self.assertIsNone(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=1 translation=0",
+                interval_seconds=5.0,
+                status="1:0",
+            )
+        )
+        now[0] = 102.0
+        self.assertEqual(
+            gate.prepare(
+                "shutdown-wait",
+                "waiting ocr=0 translation=1",
+                interval_seconds=5.0,
+                status="0:1",
+            ),
+            "waiting ocr=0 translation=1 "
+            "(suppressed 1 similar event since previous log)",
+        )
+
+    def test_status_none_keeps_interval_coalescing_behavior(self):
+        now = [100.0]
+        gate = logger._LogCoalescingGate(clock=lambda: now[0])
+
+        self.assertEqual(
+            gate.prepare("plain", "a", interval_seconds=5.0),
+            "a",
+        )
+        now[0] = 101.0
+        self.assertIsNone(gate.prepare("plain", "b", interval_seconds=5.0))
+        now[0] = 102.0
+        self.assertIsNone(
+            gate.prepare("plain", "c", interval_seconds=5.0, status=None)
+        )
+
+    def test_wrapper_falls_back_to_direct_log_when_coalescing_fails(self):
+        with patch.object(
+            logger._debug_log_coalescer,
+            "prepare",
+            side_effect=RuntimeError("coalescer unavailable"),
+        ):
+            with patch.object(logger, "log_debug") as direct_log:
+                result = logger.log_debug_coalesced(
+                    ["unhashable", "event", "key"],
+                    "current diagnostic remains visible",
+                    interval_seconds=5.0,
+                )
+
+        self.assertTrue(result)
+        direct_log.assert_called_once_with("current diagnostic remains visible")
+
+    def test_wrapper_forwards_status_to_coalescer(self):
+        with patch.object(
+            logger._debug_log_coalescer,
+            "prepare",
+            return_value="emitted",
+        ) as prepare:
+            with patch.object(logger, "log_debug") as direct_log:
+                result = logger.log_debug_coalesced(
+                    "route-retry",
+                    "retry class=rate_limit",
+                    interval_seconds=2.0,
+                    status="rate_limit",
+                )
+
+        self.assertTrue(result)
+        prepare.assert_called_once_with(
+            "route-retry",
+            "retry class=rate_limit",
+            interval_seconds=2.0,
+            status="rate_limit",
+        )
+        direct_log.assert_called_once_with("emitted")
+
+
+class DiagnosticSanitizerTests(unittest.TestCase):
+    def test_sanitize_redacts_auth_bearer_and_common_api_keys(self):
+        raw = (
+            "Authorization: Bearer sk-live-secretTOKEN123 "
+            "and sk-test-abcdef and key-zzzzzzzz"
+        )
+        cleaned = logger.sanitize_log_message(raw)
+
+        self.assertNotIn("sk-live-secretTOKEN123", cleaned)
+        self.assertNotIn("sk-test-abcdef", cleaned)
+        self.assertNotIn("Bearer sk-live", cleaned)
+        self.assertIn("[redacted]", cleaned.lower().replace(" ", "") or cleaned)
+        self.assertTrue(
+            "Bearer [redacted]" in cleaned or "[redacted-auth]" in cleaned
+        )
+
+    def test_sanitize_redacts_explicit_api_key_and_query_tokens(self):
+        api_key = "super-secret-user-key-value"
+        raw = (
+            f"failed for key={api_key} at "
+            "https://api.example.com/v1/models?api_key=abc123XYZ&x=1"
+        )
+        cleaned = logger.sanitize_log_message(raw, api_key=api_key)
+
+        self.assertNotIn(api_key, cleaned)
+        self.assertNotIn("api_key=abc123XYZ", cleaned)
+        self.assertIn("https://api.example.com/v1/models", cleaned)
+
+    def test_sanitize_redacts_long_opaque_tokens_without_raising(self):
+        token = "a" * 40
+        cleaned = logger.sanitize_log_message(f"token={token}")
+        self.assertNotIn(token, cleaned)
+        self.assertEqual(logger.sanitize_log_message(None), "")
+
+        class Hostile:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        self.assertEqual(logger.sanitize_log_message(Hostile()), "")
+
+    def test_sanitize_redacts_short_and_structured_secret_fields(self):
+        cases = (
+            (
+                "plain-short-api-key",
+                "provider failed api_key=short",
+                ("short",),
+                ("api_key=",),
+            ),
+            (
+                "plain-short-token-password-secret",
+                "token=ab password=cd secret=ef",
+                ("ab", "cd", "ef"),
+                ("token=", "password=", "secret="),
+            ),
+            (
+                "colon-header-forms",
+                "x-api-key: shortkey; x-auth-token: tok1; api-key: ak1",
+                ("shortkey", "tok1", "ak1"),
+                ("x-api-key:", "x-auth-token:", "api-key:"),
+            ),
+            (
+                "json-quoted-values",
+                '{"api_key":"jsonShort","token":"t1","password":"p1","secret":"s1"}',
+                ("jsonShort", "t1", "p1", "s1"),
+                ('"api_key":', '"token":', '"password":', '"secret":'),
+            ),
+            (
+                "access-token-and-authorization-assignment",
+                "access_token=at1 authorization=authval access-token=at2",
+                ("at1", "authval", "at2"),
+                ("access_token=", "authorization=", "access-token="),
+            ),
+            (
+                "url-query-short-and-long",
+                "https://api.example.com/v1?api_key=qShort&token=qTok&x=1",
+                ("qShort", "qTok"),
+                ("api_key=", "token=", "https://api.example.com/v1"),
+            ),
+            (
+                "bearer-and-nested-text",
+                "detail=Authorization: Bearer nestSecret99 and api_key=nestKey",
+                ("nestSecret99", "nestKey"),
+                ("api_key=",),
+            ),
+            (
+                "long-token-field-value",
+                "token=" + ("L" * 40),
+                ("L" * 40,),
+                ("token=",),
+            ),
+        )
+        for name, raw, sentinels, keep_markers in cases:
+            with self.subTest(case=name):
+                cleaned = logger.sanitize_log_message(raw)
+                for sentinel in sentinels:
+                    self.assertNotIn(sentinel, cleaned)
+                for marker in keep_markers:
+                    self.assertIn(marker, cleaned)
+                self.assertIn("[redacted]", cleaned)
+
+    def test_sanitize_preserves_ordinary_diagnostic_fields(self):
+        raw = (
+            "retry status=timeout class=transport duration_ms=123 "
+            "model=gpt-test scope=ocr event=cache-miss"
+        )
+        cleaned = logger.sanitize_log_message(raw)
+
+        self.assertEqual(cleaned, raw)
+        self.assertIn("status=timeout", cleaned)
+        self.assertIn("class=transport", cleaned)
+        self.assertIn("duration_ms=123", cleaned)
+
+        # Error codes that embed api_key as a substring must not be redacted.
+        error_code = "INVALID_API_KEY: Invalid API key"
+        self.assertEqual(
+            logger.sanitize_log_message(error_code),
+            error_code,
+        )
+        nested = f"{error_code}; api_key=shortSecret"
+        nested_cleaned = logger.sanitize_log_message(nested)
+        self.assertIn("INVALID_API_KEY: Invalid API key", nested_cleaned)
+        self.assertNotIn("shortSecret", nested_cleaned)
+        self.assertIn("api_key=[redacted]", nested_cleaned)
+
+    def test_log_debug_never_persists_short_secret_field_sentinels(self):
+        sentinels = (
+            "SENTINEL_API_KEY_SHORT",
+            "SENTINEL_TOKEN_SHORT",
+            "SENTINEL_PASSWORD_SHORT",
+            "SENTINEL_SECRET_SHORT",
+        )
+        message = (
+            f"api_key={sentinels[0]} token={sentinels[1]} "
+            f"password={sentinels[2]} secret={sentinels[3]} "
+            'json={"api_key":"SENTINEL_JSON_KEY","token":"SENTINEL_JSON_TOKEN"} '
+            "url=https://ex.test/v1?api_key=SENTINEL_QUERY_KEY&token=SENTINEL_QUERY_TOKEN "
+            "Authorization: Bearer SENTINEL_BEARER_VALUE "
+            "status=timeout class=transport duration_ms=9"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"OCR_TRANSLATOR_LOG_DIR": tmp_dir}):
+                logger.close_log_writers()
+                logger.log_debug(message)
+                logger.close_log_writers()
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+
+        for sentinel in sentinels + (
+            "SENTINEL_JSON_KEY",
+            "SENTINEL_JSON_TOKEN",
+            "SENTINEL_QUERY_KEY",
+            "SENTINEL_QUERY_TOKEN",
+            "SENTINEL_BEARER_VALUE",
+        ):
+            self.assertNotIn(sentinel, content)
+        self.assertIn("status=timeout", content)
+        self.assertIn("class=transport", content)
+        self.assertIn("duration_ms=9", content)
+
+    def test_classify_log_error_class_covers_rate_auth_server_parse(self):
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 429 rate limit"),
+            "rate_limit",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 401 unauthorized"),
+            "auth",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("HTTP 503 unavailable"),
+            "server_error",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("response was non-JSON or empty"),
+            "parse",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("SSL EOF unexpected"),
+            "transport",
+        )
+        self.assertEqual(
+            logger.classify_log_error_class("something mild"),
+            "other",
+        )
+
+    def test_log_debug_sanitizes_message_before_write(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"OCR_TRANSLATOR_LOG_DIR": tmp_dir}):
+                logger.log_debug(
+                    "Authorization: Bearer supersecretvalue123456789012345"
+                )
+                logger.close_log_writers()
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+
+        self.assertNotIn("supersecretvalue123456789012345", content)
+        self.assertTrue(
+            "Bearer [redacted]" in content or "[redacted-auth]" in content,
+            msg=content,
+        )
+
+
+class RuntimeTextSummaryTests(unittest.TestCase):
+    def test_summary_reports_shape_without_retaining_content(self):
+        summary = logger.summarize_text_for_log(
+            "source-secret\nsecond line"
+        )
+
+        self.assertEqual(summary, "chars=25 lines=2")
+        self.assertNotIn("source-secret", summary)
+        self.assertEqual(
+            logger.summarize_text_for_log(None),
+            "chars=0 lines=0",
+        )
+
+    def test_summary_never_raises_for_hostile_string_conversion(self):
+        class HostileValue:
+            def __str__(self):
+                raise RuntimeError("cannot stringify")
+
+        self.assertEqual(
+            logger.summarize_text_for_log(HostileValue()),
+            "chars=0 lines=0",
+        )
+
+
+class RuntimeContentFreeLogSourceTests(unittest.TestCase):
+    def test_main_debug_log_calls_do_not_interpolate_runtime_text_directly(self):
+        sensitive_names = {
+            "cached_result",
+            "cleaned_text_main",
+            "context_string",
+            "ocr_result",
+            "original_text",
+            "source_text",
+            "target_text",
+            "text_to_translate",
+            "text_to_translate_dl",
+            "text_to_translate_gt",
+            "text_to_translate_mm",
+            "translated_api_text",
+            "translated_text",
+            "translation_result",
+        }
+        production_files = {
+            Path("handlers/translation_handler.py"): sensitive_names,
+            Path("worker_threads.py"): sensitive_names,
+        }
+        violations = []
+
+        for path, file_sensitive_names in production_files.items():
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+            scan_roots = (tree,)
+            for call in (
+                node
+                for scan_root in scan_roots
+                for node in ast.walk(scan_root)
+                if isinstance(node, ast.Call)
+            ):
+                function_name = getattr(call.func, "id", None)
+                if function_name not in {"log_debug", "log_debug_coalesced"}:
+                    continue
+                for formatted in (
+                    node
+                    for argument in call.args
+                    for node in ast.walk(argument)
+                    if isinstance(node, ast.FormattedValue)
+                ):
+                    if (
+                        isinstance(formatted.value, ast.Call)
+                        and getattr(formatted.value.func, "id", None)
+                        == "summarize_text_for_log"
+                    ):
+                        continue
+                    interpolated_names = {
+                        node.id
+                        for node in ast.walk(formatted.value)
+                        if isinstance(node, ast.Name)
+                    }
+                    leaked_names = sorted(
+                        interpolated_names & file_sensitive_names
+                    )
+                    if leaked_names:
+                        violations.append(
+                            f"{path}:{call.lineno}: {', '.join(leaked_names)}"
+                        )
+
+        self.assertEqual(violations, [])
+
+class RotatingTextWriterTests(unittest.TestCase):
+    def tearDown(self):
+        close_writers = getattr(logger, "close_log_writers", None)
+        if callable(close_writers):
+            close_writers()
+
+    def test_writer_reuses_stream_and_remains_reusable_after_clear(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            writer = logger._RotatingTextWriter(path, max_bytes=1024, backup_count=2)
+
+            writer.write("first\n")
+            first_stream = writer._stream
+            writer.write("second\n")
+
+            self.assertIs(writer._stream, first_stream)
+            writer.clear("cleared\n")
+            writer.write("after\n")
+            writer.close()
+            content = path.read_text(encoding="utf-8-sig")
+            self.assertEqual(content, "cleared\nafter\n")
+
+    def test_writer_rotation_keeps_only_configured_backups(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            writer = logger._RotatingTextWriter(path, max_bytes=90, backup_count=2)
+
+            for index in range(8):
+                writer.write(f"line-{index}-" + ("x" * 32) + "\n")
+            writer.close()
+
+            self.assertTrue(path.exists())
+            self.assertTrue(Path(f"{path}.1").exists())
+            self.assertTrue(Path(f"{path}.2").exists())
+            self.assertFalse(Path(f"{path}.3").exists())
+            for candidate in (path, Path(f"{path}.1"), Path(f"{path}.2")):
+                self.assertLessEqual(candidate.stat().st_size, 93)
+
+    def test_writer_preserves_platform_newline_format(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            writer = logger._RotatingTextWriter(path, max_bytes=1024, backup_count=1)
+
+            writer.write("line\n")
+            writer.close()
+
+            self.assertTrue(path.read_bytes().endswith(os.linesep.encode("ascii")))
+
+    def test_writer_preserves_every_line_from_concurrent_threads(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            writer = logger._RotatingTextWriter(
+                path,
+                max_bytes=1024 * 1024,
+                backup_count=1,
+            )
+            expected = {
+                f"worker-{worker_id}-line-{line_id}"
+                for worker_id in range(8)
+                for line_id in range(50)
+            }
+
+            def write_lines(worker_id):
+                for line_id in range(50):
+                    writer.write(f"worker-{worker_id}-line-{line_id}\n")
+
+            threads = [
+                threading.Thread(target=write_lines, args=(worker_id,))
+                for worker_id in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            writer.close()
+
+            actual = set(path.read_text(encoding="utf-8-sig").splitlines())
+            self.assertEqual(actual, expected)
+
+    def test_shared_tail_reader_does_not_race_with_windows_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            errors = []
+            producer_done = threading.Event()
+
+            def produce():
+                try:
+                    for index in range(1000):
+                        logger.append_rotating_text(
+                            path,
+                            f"line-{index}-" + ("x" * 40) + "\n",
+                            max_bytes=512,
+                            backup_count=2,
+                        )
+                except Exception as error:
+                    errors.append(error)
+                finally:
+                    producer_done.set()
+
+            def consume():
+                while not producer_done.is_set():
+                    try:
+                        logger.read_shared_log_tail(
+                            path,
+                            max_lines=20,
+                            max_bytes=512,
+                            backup_count=2,
+                            block_size=256,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    except Exception as error:
+                        errors.append(error)
+                        return
+
+            producer = threading.Thread(target=produce)
+            consumer = threading.Thread(target=consume)
+            producer.start()
+            consumer.start()
+            producer.join()
+            consumer.join()
+            logger.close_log_writers()
+
+            self.assertEqual(errors, [])
+
+    def test_unittest_process_uses_pid_specific_temporary_log_directory(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OCR_TRANSLATOR_LOG_DIR", None)
+            path = logger.resolve_runtime_log_path("translator_debug.log")
+
+        self.assertEqual(
+            path.parent,
+            Path(tempfile.gettempdir()) / f"ocr-translator-tests-{os.getpid()}",
+        )
+        self.assertEqual(path.name, "translator_debug.log")
+
+    def test_unittest_process_exports_log_directory_for_child_processes(self):
+        expected = (
+            Path(tempfile.gettempdir())
+            / f"ocr-translator-tests-{os.getpid()}"
+        )
+
+        logger.ensure_test_log_environment()
+
+        self.assertEqual(
+            os.environ.get("OCR_TRANSLATOR_LOG_DIR"),
+            str(expected),
+        )
+
+    def test_log_debug_keeps_timestamp_format_in_resolved_directory(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(
+                os.environ,
+                {"OCR_TRANSLATOR_LOG_DIR": tmp_dir},
+            ):
+                logger.log_debug("hello")
+                logger.close_log_writers()
+
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+            self.assertRegex(
+                content,
+                r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}: hello\n$",
+            )
+
+    def test_read_log_tail_returns_only_requested_utf8_lines(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "runtime.log"
+            lines = [f"行-{index}\r\n" for index in range(500)]
+            path.write_text("".join(lines), encoding="utf-8-sig", newline="")
+
+            tail = logger.read_log_tail(path, max_lines=3, block_size=64)
+
+            self.assertEqual(tail, [line.replace("\r\n", "\n") for line in lines[-3:]])
+
+    def test_custom_ai_short_log_uses_shared_rotating_writer(self):
+        handler = TranslationHandler(object())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    "translated",
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+            handler.close()
+
+        append_text.assert_called_once()
+        args, kwargs = append_text.call_args
+        self.assertEqual(args[0], "CustomAI_Translation_Short_Log.txt")
+        self.assertIn("SESSION 1 STARTED", args[1])
+        self.assertIn("chars=", args[1])
+        self.assertNotIn("translated", args[1])
+        self.assertEqual(kwargs["max_bytes"], 2 * 1024 * 1024)
+        self.assertEqual(kwargs["backup_count"], 2)
+
+    def test_custom_ai_short_log_default_is_content_free(self):
+        unique_body = "UNIQUE_SHORT_LOG_BODY_DEFAULT_PRIVACY_MARKER"
+        handler = TranslationHandler(object())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertNotIn(unique_body, block)
+        self.assertIn("Result: chars=", block)
+        self.assertIn("lines=", block)
+
+    def test_custom_ai_short_log_opt_in_includes_result_body(self):
+        unique_body = "UNIQUE_SHORT_LOG_BODY_OPT_IN_MARKER"
+        app = types.SimpleNamespace(
+            custom_ai_log_content_enabled_var=types.SimpleNamespace(
+                get=lambda: True
+            )
+        )
+        handler = TranslationHandler(app)
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=True,
+            ):
+                handler._log_custom_short_call(
+                    "translation",
+                    profile,
+                    unique_body,
+                    {"prompt_tokens": 3, "completion_tokens": 2},
+                    0.25,
+                )
+            handler.close()
+
+        block = append_text.call_args.args[1]
+        self.assertIn(unique_body, block)
+        self.assertIn("Result:\n--------------------\n", block)
+
+    def test_custom_ai_short_log_skips_disk_when_debug_logging_disabled(self):
+        class App:
+            custom_ai_log_content_enabled_var = types.SimpleNamespace(
+                get=lambda: False
+            )
+
+        handler = TranslationHandler(App())
+        profile = {"name": "Test Provider", "model": "test-model"}
+
+        with patch(
+            "handlers.translation_handler.append_rotating_text",
+            create=True,
+        ) as append_text:
+            with patch(
+                "handlers.translation_results.is_debug_logging_enabled",
+                return_value=False,
+            ):
+                with patch.object(
+                    handler,
+                    "_record_custom_prompt_cache_usage",
+                    return_value=0.5,
+                ) as cache_record:
+                    with patch.object(
+                        handler,
+                        "_record_custom_ai_latency_observation",
+                    ) as latency_record:
+                        handler._log_custom_short_call(
+                            "translation",
+                            profile,
+                            "should-not-be-written",
+                            {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 2,
+                                "cached_prompt_tokens": 5,
+                            },
+                            0.33,
+                        )
+            handler.close()
+
+        append_text.assert_not_called()
+        cache_record.assert_called_once()
+        latency_record.assert_called_once()
+
+    def test_clear_debug_log_also_clears_custom_ai_short_logs(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            previous = os.environ.get("OCR_TRANSLATOR_LOG_DIR")
+            os.environ["OCR_TRANSLATOR_LOG_DIR"] = tmp_dir
+            try:
+                logger.close_log_writers()
+                ocr_path = logger.resolve_runtime_log_path(
+                    logger.CUSTOM_AI_OCR_SHORT_LOG_FILENAME
+                )
+                translation_path = logger.resolve_runtime_log_path(
+                    logger.CUSTOM_AI_TRANSLATION_SHORT_LOG_FILENAME
+                )
+                debug_path = logger.resolve_runtime_log_path(
+                    logger.DEBUG_LOG_FILENAME
+                )
+                ocr_path.write_text("ocr body\n", encoding="utf-8-sig")
+                translation_path.write_text(
+                    "translation body\n",
+                    encoding="utf-8-sig",
+                )
+                Path(f"{ocr_path}.1").write_text(
+                    "ocr backup\n",
+                    encoding="utf-8-sig",
+                )
+                Path(f"{translation_path}.2").write_text(
+                    "translation backup\n",
+                    encoding="utf-8-sig",
+                )
+                debug_path.write_text("debug body\n", encoding="utf-8-sig")
+
+                logger.clear_debug_log()
+
+                self.assertTrue(debug_path.exists())
+                self.assertIn(
+                    "Debug log cleared by user.",
+                    debug_path.read_text(encoding="utf-8-sig"),
+                )
+                self.assertEqual(
+                    ocr_path.read_text(encoding="utf-8-sig"),
+                    "",
+                )
+                self.assertEqual(
+                    translation_path.read_text(encoding="utf-8-sig"),
+                    "",
+                )
+                self.assertFalse(Path(f"{ocr_path}.1").exists())
+                self.assertFalse(Path(f"{translation_path}.2").exists())
+            finally:
+                logger.close_log_writers()
+                if previous is None:
+                    os.environ.pop("OCR_TRANSLATOR_LOG_DIR", None)
+                else:
+                    os.environ["OCR_TRANSLATOR_LOG_DIR"] = previous
+
+    def test_ui_clear_debug_log_uses_shared_writer(self):
+        handler = object.__new__(UIInteractionHandler)
+        handler.app = object()
+        handler.refresh_debug_log = Mock()
+
+        with patch(
+            "handlers.ui_interaction_handler.clear_runtime_debug_log",
+            create=True,
+        ) as clear_log:
+            handler.clear_debug_log()
+
+        clear_log.assert_called_once_with()
+        handler.refresh_debug_log.assert_called_once_with()
+
+    def test_ui_refresh_debug_log_uses_tail_reader(self):
+        log_text = types.SimpleNamespace(
+            winfo_exists=lambda: True,
+            config=Mock(),
+            delete=Mock(),
+            insert=Mock(),
+            see=Mock(),
+        )
+        handler = object.__new__(UIInteractionHandler)
+        handler.app = types.SimpleNamespace(log_text=log_text)
+
+        with patch(
+            "handlers.ui_interaction_handler.read_debug_log_tail",
+            create=True,
+            return_value=["first\n", "second\n"],
+        ) as read_tail:
+            handler.refresh_debug_log()
+
+        read_tail.assert_called_once_with(max_lines=200)
+        self.assertEqual(log_text.insert.call_count, 2)
+        log_text.see.assert_called_once()
+
+
+class RuntimeContentFreeHandlerLogTests(unittest.TestCase):
+    def test_dialog_noop_does_not_write_debug_events(self):
+        handler = TranslationHandler(object())
+
+        with patch(
+            "handlers.translation_handler.log_debug"
+        ) as direct_log:
+            with patch(
+                "handlers.translation_handler.log_debug_coalesced",
+                create=True,
+            ) as coalesced_log:
+                result = handler._format_dialog_text(
+                    "plain source-secret"
+                )
+
+        self.assertEqual(result, "plain source-secret")
+        direct_log.assert_not_called()
+        coalesced_log.assert_not_called()
+
+    def test_dialog_change_writes_one_content_free_coalesced_event(self):
+        handler = TranslationHandler(object())
+
+        with patch(
+            "handlers.translation_handler.log_debug"
+        ) as direct_log:
+            with patch(
+                "handlers.translation_handler.log_debug_coalesced",
+                create=True,
+            ) as coalesced_log:
+                result = handler._format_dialog_text(
+                    "- Hello. - result-secret"
+                )
+
+        self.assertEqual(result, "- Hello.\n- result-secret")
+        direct_log.assert_not_called()
+        coalesced_log.assert_called_once_with(
+            "translation-dialog-format-applied",
+            "Dialog formatting applied input chars=24 lines=1 "
+            "output chars=24 lines=2",
+            interval_seconds=5.0,
+        )
+        self.assertNotIn(
+            "result-secret",
+            coalesced_log.call_args.args[1],
+        )
+
+    def test_dialog_exclamation_before_en_dash_keeps_exclamation(self):
+        handler = TranslationHandler(object())
+
+        self.assertEqual(
+            handler._format_dialog_text("- A! – B."),
+            "- A!\n– B.",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

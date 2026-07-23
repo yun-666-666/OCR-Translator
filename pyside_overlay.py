@@ -33,7 +33,14 @@ except Exception:
 try:
     from PySide6.QtWidgets import QApplication, QTextEdit, QVBoxLayout, QMainWindow, QWidget
     from PySide6.QtCore import Qt, QRect, QPoint
-    from PySide6.QtGui import QFont, QTextCursor, QTextBlockFormat
+    from PySide6.QtGui import (
+        QColor,
+        QFont,
+        QPen,
+        QTextBlockFormat,
+        QTextCharFormat,
+        QTextCursor,
+    )
     PYSIDE6_AVAILABLE = True
 except Exception:
     PYSIDE6_AVAILABLE = False
@@ -60,6 +67,15 @@ def _valid_scale(scale):
     return scale if scale > 0 else 1.0
 
 
+def _outline_pen_width(configured_width):
+    """Convert the user-facing outline width to Qt's native glyph-pen width."""
+    try:
+        width = float(configured_width)
+    except (TypeError, ValueError):
+        width = 2.0
+    return max(0.0, min(6.0, width)) * 0.25
+
+
 def physical_rect_to_qt_rect(rect, scale):
     """Convert physical screen pixels from Tk selection into Qt logical pixels."""
     scale = _valid_scale(scale)
@@ -84,10 +100,94 @@ def qt_rect_to_physical_rect(rect, scale):
     ]
 
 
+def _disable_windows_native_border(window):
+    """Disable the Windows 11 DWM outline around a frameless overlay window."""
+    if sys.platform != "win32" or not PYSIDE6_AVAILABLE:
+        return False
+    try:
+        border_color_attribute = ctypes.c_uint(34)  # DWMWA_BORDER_COLOR
+        no_border_color = ctypes.c_uint(0xFFFFFFFE)  # DWMWA_COLOR_NONE
+        result = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(int(window.winId())),
+            border_color_attribute,
+            ctypes.byref(no_border_color),
+            ctypes.sizeof(no_border_color),
+        )
+        if result != 0:
+            log_debug(
+                "PySide overlay: Windows native border disable returned "
+                f"HRESULT {result}"
+            )
+            return False
+        return True
+    except Exception as exc:
+        log_debug(f"PySide overlay: Could not disable Windows native border: {exc}")
+        return False
+
+
+def _qt_object_is_valid(obj):
+    """Best-effort check that a PySide/Qt wrapper still owns a live C++ object."""
+    try:
+        from shiboken6 import isValid as _shiboken_is_valid
+    except Exception:
+        _shiboken_is_valid = None
+    if _shiboken_is_valid is not None:
+        try:
+            if not bool(_shiboken_is_valid(obj)):
+                return False
+        except Exception:
+            return False
+    try:
+        # Touch a cheap QObject property; deleted C++ objects raise RuntimeError.
+        # Also fails closed for non-Qt proxies if shiboken is optimistic/unavailable.
+        obj.objectName()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:
+        return False
+
+
+def _tk_compat_winfo_exists(obj):
+    """Tk-compatible exists check for Qt widgets (hide != destroy)."""
+    try:
+        if bool(getattr(obj, "_tk_compat_destroyed", False)):
+            return False
+    except Exception:
+        return False
+    return _qt_object_is_valid(obj)
+
+
+def _bind_tk_compat_destroyed(obj):
+    """Track Qt destruction for Tk winfo_exists compatibility."""
+    try:
+        obj._tk_compat_destroyed = False
+    except Exception:
+        return
+
+    def _mark_destroyed(*_args):
+        try:
+            obj._tk_compat_destroyed = True
+        except Exception:
+            pass
+
+    try:
+        obj.destroyed.connect(_mark_destroyed)
+    except Exception:
+        pass
+
+
 # -----------------------
 # PySide6-backed classes
 # -----------------------
 if PYSIDE6_AVAILABLE:
+    TOP_BAR_TRANSPARENT_STYLE = """
+                QWidget {
+                    background-color: transparent;
+                    border: none;
+                }
+            """
+
 
     class RTLTextDisplay(QTextEdit):
         """RTL-capable text display for translation overlay (QTextEdit wrapper)."""
@@ -99,6 +199,12 @@ if PYSIDE6_AVAILABLE:
             self._fg_color = "#ecf0f1"
             self._current_text = ""
             self._current_language = None
+            self._preserve_linebreaks = True
+            self._horizontal_centered = False
+            self._font_bold = False
+            self._outline_color = "#000000"
+            self._outline_width = 0.0
+            _bind_tk_compat_destroyed(self)
             self.setup_widget()
 
         def setup_widget(self):
@@ -127,24 +233,166 @@ if PYSIDE6_AVAILABLE:
                 }
             """)
 
-        def set_rtl_text(self, text: str, language_code: str = None, bg_color: str = "#2c3e50", text_color: str = "#ecf0f1", font_size: int = 14):
+        def _apply_font_if_changed(
+            self,
+            font_family=None,
+            font_size=None,
+            font_bold=None,
+        ):
+            """Apply a font only when its effective family, size, or weight changed."""
+            current_font = self.font()
+            target_family = current_font.family()
+            has_explicit_family = (
+                font_family is not None and bool(str(font_family).strip())
+            )
+            if has_explicit_family:
+                target_family = str(font_family).strip()
+
+            try:
+                target_size = int(font_size)
+            except (TypeError, ValueError):
+                target_size = current_font.pointSize()
+            if target_size <= 0:
+                target_size = current_font.pointSize()
+            target_bold = (
+                current_font.bold()
+                if font_bold is None
+                else bool(font_bold)
+            )
+
+            family_changed = (
+                has_explicit_family and current_font.family() != target_family
+            )
+            size_changed = current_font.pointSize() != target_size
+            weight_changed = current_font.bold() != target_bold
+            if not family_changed and not size_changed and not weight_changed:
+                return False
+
+            updated_font = QFont(current_font)
+            if family_changed:
+                updated_font.setFamily(target_family)
+            if size_changed:
+                updated_font.setPointSize(target_size)
+            if weight_changed:
+                updated_font.setBold(target_bold)
+            self.setFont(updated_font)
+            log_debug(
+                "PySide RTLTextDisplay: Updated font to "
+                f"{target_family} {target_size} "
+                f"{'bold' if target_bold else 'normal'}"
+            )
+            return True
+
+        def _apply_text_outline(self, outline_color=None, outline_width=None):
+            """Apply a native Qt outline to every glyph in the document."""
+            color = (
+                self._outline_color
+                if outline_color is None
+                else str(outline_color or "#000000")
+            )
+            qcolor = QColor(color)
+            if not qcolor.isValid():
+                color = "#000000"
+                qcolor = QColor(color)
+            foreground_alpha = 1.0
+            alpha_match = re.fullmatch(
+                r"\s*rgba\(\s*[^,]+\s*,\s*[^,]+\s*,\s*[^,]+\s*,"
+                r"\s*([0-9]*\.?[0-9]+)\s*\)\s*",
+                str(getattr(self, "_fg_color", "")),
+                flags=re.IGNORECASE,
+            )
+            if alpha_match:
+                try:
+                    foreground_alpha = max(
+                        0.0,
+                        min(1.0, float(alpha_match.group(1))),
+                    )
+                except (TypeError, ValueError):
+                    foreground_alpha = 1.0
+            qcolor.setAlphaF(qcolor.alphaF() * foreground_alpha)
+            try:
+                width = (
+                    self._outline_width
+                    if outline_width is None
+                    else float(outline_width)
+                )
+            except (TypeError, ValueError):
+                width = 2.0
+            width = max(0.0, min(6.0, width))
+            self._outline_color = color
+            self._outline_width = width
+
+            try:
+                cursor = self.textCursor()
+                cursor.select(QTextCursor.Document)
+                char_format = QTextCharFormat()
+                if width > 0:
+                    outline_pen = QPen(qcolor)
+                    outline_pen.setWidthF(_outline_pen_width(width))
+                else:
+                    outline_pen = QPen(Qt.NoPen)
+                char_format.setTextOutline(outline_pen)
+                cursor.mergeCharFormat(char_format)
+                cursor.clearSelection()
+                cursor.movePosition(QTextCursor.Start)
+                self.setTextCursor(cursor)
+                return True
+            except Exception as e:
+                log_debug(f"Error applying PySide text outline: {e}")
+                return False
+
+        def update_text_outline(self, outline_color, outline_width):
+            """Update the current glyph outline without rebuilding the overlay."""
+            return self._apply_text_outline(outline_color, outline_width)
+
+        def set_rtl_text(
+            self,
+            text: str,
+            language_code: str = None,
+            bg_color: str = "#2c3e50",
+            text_color: str = "#ecf0f1",
+            font_size: int = 14,
+            font_family=None,
+            preserve_linebreaks=True,
+            horizontal_centered=False,
+            font_bold=None,
+            outline_color=None,
+            outline_width=None,
+        ):
             """Set text content while respecting RTL/LTR and applying inline HTML."""
+            self._apply_font_if_changed(
+                font_family,
+                font_size,
+                font_bold,
+            )
+
             # Store current state for color updates
             self._current_text = text
             self._current_language = language_code
             self._bg_color = bg_color
+            self._preserve_linebreaks = bool(preserve_linebreaks)
+            self._horizontal_centered = bool(horizontal_centered)
+            self._font_bold = self.font().bold()
+            if outline_color is not None:
+                self._outline_color = str(outline_color or "#000000")
+            if outline_width is not None:
+                try:
+                    self._outline_width = max(
+                        0.0,
+                        min(6.0, float(outline_width)),
+                    )
+                except (TypeError, ValueError):
+                    self._outline_width = 2.0
             # self._fg_color = text_color
             
-            # Normalize whitespace WHILE PRESERVING intentional line breaks (SURGICAL FIX)
-            processed = text.replace('\r\n', '\n').replace('\r', '\n')
-            # Split by lines, clean whitespace within each line, then rejoin with newlines
-            lines = processed.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                # Clean excessive whitespace within each line, but preserve the line structure
-                cleaned_line = ' '.join(line.split())  # This only affects whitespace within the line
-                cleaned_lines.append(cleaned_line)
-            processed = '\n'.join(cleaned_lines)
+            processed = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+            processed = re.sub(r'<br\s*/?>', '\n', processed, flags=re.IGNORECASE)
+            if self._preserve_linebreaks:
+                processed = '\n'.join(
+                    ' '.join(line.split()) for line in processed.split('\n')
+                )
+            else:
+                processed = ' '.join(processed.split())
 
             # Determine direction heuristically if language_code not provided
             is_rtl = False
@@ -164,25 +412,42 @@ if PYSIDE6_AVAILABLE:
             # HTML ignores \n characters, so we need to convert them to <br> tags
             html_processed = processed.replace('\n', '<br>')
 
+            alignment_css = (
+                'center'
+                if self._horizontal_centered
+                else ('right' if is_rtl else 'left')
+            )
+            font_weight_css = "700" if self._font_bold else "400"
             if is_rtl:
                 self.setLayoutDirection(Qt.RightToLeft)
-                html_text = f"""<div style="text-align: right; direction: rtl; font-family: '{self.font().family()}'; font-size: {font_size}pt; color: {self._fg_color};">
-                {html_processed}
-                </div>"""
+                html_text = (
+                    f"<div style=\"text-align: {alignment_css}; direction: rtl; "
+                    f"font-family: '{self.font().family()}'; font-size: "
+                    f"{self.font().pointSize()}pt; font-weight: "
+                    f"{font_weight_css}; color: {self._fg_color};\""
+                    f">{html_processed}</div>"
+                )
             else:
                 self.setLayoutDirection(Qt.LeftToRight)
-                html_text = f"""<div style="text-align: left; direction: ltr; font-family: '{self.font().family()}'; font-size: {font_size}pt; color: {self._fg_color};">
-                {html_processed}
-                </div>"""
+                html_text = (
+                    f"<div style=\"text-align: {alignment_css}; direction: ltr; "
+                    f"font-family: '{self.font().family()}'; font-size: "
+                    f"{self.font().pointSize()}pt; font-weight: "
+                    f"{font_weight_css}; color: {self._fg_color};\""
+                    f">{html_processed}</div>"
+                )
 
             # Use HTML insertion for richer control
             self.setHtml(html_text)
+            self._apply_text_outline()
 
             # Ensure block alignment matches direction
             cursor = self.textCursor()
             cursor.select(QTextCursor.Document)
             block_fmt = QTextBlockFormat()
-            if is_rtl:
+            if self._horizontal_centered:
+                block_fmt.setAlignment(Qt.AlignHCenter)
+            elif is_rtl:
                 block_fmt.setAlignment(Qt.AlignRight | Qt.AlignAbsolute)
             else:
                 block_fmt.setAlignment(Qt.AlignLeft | Qt.AlignAbsolute)
@@ -203,10 +468,27 @@ if PYSIDE6_AVAILABLE:
 
         # Simple compatibility wrappers mimicking tkinter Text behavior
         def winfo_exists(self):
-            return True
+            return _tk_compat_winfo_exists(self)
 
         def winfo_viewable(self):
-            return self.isVisible()
+            if not self.winfo_exists():
+                return False
+            try:
+                return bool(self.isVisible())
+            except Exception:
+                return False
+
+        def destroy(self):
+            """Tk-compatible destroy: mark gone, then delete the Qt object."""
+            self._tk_compat_destroyed = True
+            try:
+                self.hide()
+            except Exception:
+                pass
+            try:
+                self.deleteLater()
+            except Exception:
+                pass
 
         def config(self, **kwargs):
             """Enhanced config method with full tkinter Text widget compatibility"""
@@ -257,7 +539,12 @@ if PYSIDE6_AVAILABLE:
                             self._current_language, 
                             getattr(self, '_bg_color', '#2c3e50'), 
                             fg_color, 
-                            self.font().pointSize()
+                            self.font().pointSize(),
+                            font_bold=getattr(self, '_font_bold', False),
+                            outline_color=getattr(self, '_outline_color', '#000000'),
+                            outline_width=getattr(self, '_outline_width', 0.0),
+                            preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
+                            horizontal_centered=getattr(self, '_horizontal_centered', False),
                         )
                     log_debug(f"PySide RTLTextDisplay: Updated text color to {fg_color}")
                 except Exception as e:
@@ -271,21 +558,34 @@ if PYSIDE6_AVAILABLE:
                         # Font specified as tuple (family, size, *style)
                         font_family = font_spec[0]
                         font_size = int(font_spec[1])
+                        font_bold = None
+                        if len(font_spec) >= 3:
+                            font_bold = "bold" in {
+                                str(style).strip().lower()
+                                for style in font_spec[2:]
+                            }
                         
-                        # Update the widget font
-                        qfont = QFont(font_family, font_size)
-                        self.setFont(qfont)
-                        
-                        # Re-render current text with new font if text exists
-                        if hasattr(self, '_current_text') and hasattr(self, '_current_language'):
+                        font_changed = self._apply_font_if_changed(
+                            font_family,
+                            font_size,
+                            font_bold,
+                        )
+
+                        # Re-render current text only after a real font change.
+                        if font_changed and hasattr(self, '_current_text') and hasattr(self, '_current_language'):
                             self.set_rtl_text(
                                 self._current_text, 
                                 self._current_language, 
                                 getattr(self, '_bg_color', '#2c3e50'), 
                                 getattr(self, '_fg_color', '#ecf0f1'), 
-                                font_size
+                                font_size,
+                                font_family=font_family,
+                                font_bold=self.font().bold(),
+                                outline_color=getattr(self, '_outline_color', '#000000'),
+                                outline_width=getattr(self, '_outline_width', 0.0),
+                                preserve_linebreaks=getattr(self, '_preserve_linebreaks', True),
+                                horizontal_centered=getattr(self, '_horizontal_centered', False),
                             )
-                        log_debug(f"PySide RTLTextDisplay: Updated font to {font_family} {font_size}")
                     else:
                         log_debug(f"Unsupported font specification format: {font_spec}")
                 except Exception as e:
@@ -378,10 +678,13 @@ if PYSIDE6_AVAILABLE:
                      text_padding: tuple = (5, 5),
                      font_size: int = 14,
                      font_family: str = "Arial",
+                     font_bold: bool = False,
                      border_px: int = 0,
                      opacity: float = 0.85,
                      corner_radius: int = 16,
-                     parent=None):
+                     parent=None,
+                     text_outline_color: str = "#000000",
+                     text_outline_width: float = 0):
             super().__init__(parent)
             self.text_widget = None
             self.bg_color = bg_color
@@ -395,6 +698,15 @@ if PYSIDE6_AVAILABLE:
                 self._text_padding = (5, 5)
             self._font_size = int(font_size)
             self._font_family = font_family
+            self._font_bold = bool(font_bold)
+            self._text_outline_color = str(text_outline_color or "#000000")
+            try:
+                self._text_outline_width = max(
+                    0.0,
+                    min(6.0, float(text_outline_width)),
+                )
+            except (TypeError, ValueError):
+                self._text_outline_width = 2.0
             self._border_px = int(border_px)
             self._corner_radius = int(corner_radius)
             try:
@@ -402,6 +714,10 @@ if PYSIDE6_AVAILABLE:
             except Exception:
                 self._opacity = 0.85
             self._geometry_scale = 1.0
+            self._last_background_style = None
+            self._last_top_bar_style = None
+            self._last_text_bg_color = None
+            _bind_tk_compat_destroyed(self)
 
             # Native hit-test constants for Windows
             if sys.platform == "win32":
@@ -450,6 +766,7 @@ if PYSIDE6_AVAILABLE:
             self.setAttribute(Qt.WA_TranslucentBackground)
             self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint)
             self.setWindowFlag(Qt.Tool, True)
+            _disable_windows_native_border(self)
 
             # The main window itself is transparent; opacity is handled by the central widget's background
             self.setStyleSheet("background-color: transparent;")
@@ -480,26 +797,12 @@ if PYSIDE6_AVAILABLE:
             layout.setSpacing(0)
 
             # The central widget holds the semi-transparent background and border
-            border_css = f"border: {self._border_px}px solid {self._adjust_color_brightness(bg_color, -20)};" if self._border_px > 0 else "border: none;"
-            semi_transparent_bg = self._hex_to_rgba(bg_color, self._opacity)
-
-            central_widget.setStyleSheet(f"""
-                QWidget {{
-                    background-color: {semi_transparent_bg};
-                    {border_css}
-                    border-radius: {self._corner_radius}px;
-                }}
-            """)
+            PySideTranslationOverlay._apply_background_style(self, bg_color, force=True)
 
             # Top bar (purely visual) using the requested height
             self.top_bar = VisualTopBar(self, height=self._top_bar_height)
             # Top bar is transparent to show the central widget's background
-            self.top_bar.setStyleSheet("""
-                QWidget {
-                    background-color: transparent;
-                    border: none;
-                }
-            """)
+            PySideTranslationOverlay._apply_top_bar_style(self, force=True)
             layout.addWidget(self.top_bar)
 
             # Text display
@@ -507,9 +810,14 @@ if PYSIDE6_AVAILABLE:
             # Set requested font and size
             try:
                 qfont = QFont(self._font_family, self._font_size)
+                qfont.setBold(self._font_bold)
                 self.text_widget.setFont(qfont)
             except Exception:
                 pass
+            self.text_widget.update_text_outline(
+                self._text_outline_color,
+                self._text_outline_width,
+            )
 
             pad_x, pad_y = self._text_padding
             # Set padding and ensure background is transparent for the text widget
@@ -548,6 +856,42 @@ if PYSIDE6_AVAILABLE:
             except Exception:
                 return hex_color
 
+        def _background_style_sheet(self, bg_color):
+            border_css = (
+                f"border: {self._border_px}px solid "
+                f"{self._hex_to_rgba(self._adjust_color_brightness(bg_color, -20), self._opacity)};"
+                if self._border_px > 0
+                else "border: none;"
+            )
+            semi_transparent_bg = self._hex_to_rgba(bg_color, self._opacity)
+            return f"""
+                QWidget {{
+                    background-color: {semi_transparent_bg};
+                    {border_css}
+                    border-radius: {self._corner_radius}px;
+                }}
+            """
+
+        def _apply_background_style(self, bg_color, force=False):
+            style = PySideTranslationOverlay._background_style_sheet(self, bg_color)
+            if not force and getattr(self, "_last_background_style", None) == style:
+                return False
+            central_widget = self.centralWidget()
+            if central_widget:
+                central_widget.setStyleSheet(style)
+                self._last_background_style = style
+                return True
+            return False
+
+        def _apply_top_bar_style(self, force=False):
+            if not force and getattr(self, "_last_top_bar_style", None) == TOP_BAR_TRANSPARENT_STYLE:
+                return False
+            if self.top_bar:
+                self.top_bar.setStyleSheet(TOP_BAR_TRANSPARENT_STYLE)
+                self._last_top_bar_style = TOP_BAR_TRANSPARENT_STYLE
+                return True
+            return False
+
         def show_translation(self, text: str, language_code: str = None, text_color: str = "#FFFFFF", font_size: int = None):
             """Set the translation text in the QTextEdit-compatible widget."""
             if not self.text_widget:
@@ -560,7 +904,17 @@ if PYSIDE6_AVAILABLE:
                 # which supports the RGBA value for opacity. The 'text_color'
                 # parameter was overwriting it with a solid color.
                 final_text_color = self.text_widget._fg_color
-                self.text_widget.set_rtl_text(text, language_code, self.bg_color, final_text_color, font_size)
+                self.text_widget.set_rtl_text(
+                    text,
+                    language_code,
+                    self.bg_color,
+                    final_text_color,
+                    font_size,
+                    font_family=self._font_family,
+                    font_bold=self._font_bold,
+                    outline_color=self._text_outline_color,
+                    outline_width=self._text_outline_width,
+                )
             except Exception as e:
                 log_debug(f"Error setting translation text: {e}")
 
@@ -576,33 +930,17 @@ if PYSIDE6_AVAILABLE:
                 except (ValueError, TypeError):
                     log_debug(f"PySide overlay: Invalid opacity value {new_opacity}, keeping existing")
 
-            # Update the central widget, which holds the visual background
-            semi_transparent_bg = self._hex_to_rgba(new_color, self._opacity)
-            border_css = f"border: {self._border_px}px solid {self._adjust_color_brightness(new_color, -20)};" if self._border_px > 0 else "border: none;"
-
-            if self.centralWidget():
-                self.centralWidget().setStyleSheet(f"""
-                    QWidget {{
-                        background-color: {semi_transparent_bg};
-                        {border_css}
-                        border-radius: {self._corner_radius}px;
-                    }}
-                """)
+            PySideTranslationOverlay._apply_background_style(self, new_color)
 
             # Ensure top_bar remains transparent to show the central widget's background
-            if self.top_bar:
-                self.top_bar.setStyleSheet("""
-                    QWidget {
-                        background-color: transparent;
-                        border: none;
-                    }
-                """)
+            PySideTranslationOverlay._apply_top_bar_style(self)
                 
             # The text_widget's background must also remain transparent.
             # Its config method is modified to handle this correctly.
-            if self.text_widget:
+            if self.text_widget and getattr(self, "_last_text_bg_color", None) != new_color:
                 try:
                     self.text_widget.config(bg=new_color)
+                    self._last_text_bg_color = new_color
                     log_debug(f"PySide overlay: Stored new bg color '{new_color}' in text widget.")
                 except Exception as e:
                     log_debug(f"Error updating PySide text widget color: {e}")
@@ -625,6 +963,22 @@ if PYSIDE6_AVAILABLE:
                 except Exception as e:
                     log_debug(f"Error updating PySide text color: {e}")
 
+        def update_text_outline(self, outline_color, outline_width):
+            """Update glyph outline color and width for the translation display."""
+            self._text_outline_color = str(outline_color or "#000000")
+            try:
+                self._text_outline_width = max(
+                    0.0,
+                    min(6.0, float(outline_width)),
+                )
+            except (TypeError, ValueError):
+                self._text_outline_width = 2.0
+            if self.text_widget:
+                self.text_widget.update_text_outline(
+                    self._text_outline_color,
+                    self._text_outline_width,
+                )
+
         def get_geometry(self):
             """Return geometry as [x1, y1, x2, y2] for compatibility with tkinter overlay code."""
             try:
@@ -644,8 +998,6 @@ if PYSIDE6_AVAILABLE:
             super().show()
             self.raise_()
             self.activateWindow()
-            # Re-apply color to ensure styling is correct after show
-            self.update_color(self.bg_color)
 
         def toggle_visibility(self):
             if self.isVisible():
@@ -654,17 +1006,33 @@ if PYSIDE6_AVAILABLE:
                 self.show()
 
         def winfo_exists(self):
-            return True
+            return _tk_compat_winfo_exists(self)
 
         def winfo_viewable(self):
+            if not self.winfo_exists():
+                return False
             try:
-                return self.isVisible()
+                return bool(self.isVisible())
             except Exception:
                 return False
 
         def destroy(self):
+            """Tk-compatible destroy: mark gone, then close/delete the Qt window."""
+            self._tk_compat_destroyed = True
+            try:
+                if self.text_widget is not None:
+                    try:
+                        self.text_widget._tk_compat_destroyed = True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             try:
                 self.close()
+            except Exception:
+                pass
+            try:
+                self.deleteLater()
             except Exception:
                 pass
 

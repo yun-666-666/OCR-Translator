@@ -3,6 +3,17 @@ import csv
 from logger import log_debug
 from resource_handler import get_resource_path
 
+LANGUAGE_DISPLAY_NAMES = {
+    "eng": "English",
+    "pol": "polski",
+    "zh": "中文",
+}
+
+LEGACY_DISPLAY_NAME_ALIASES = {
+    "\u6d93\ue15f\u6783": "中文",
+}
+
+
 class UILanguageManager:
     def __init__(self, resources_dir="resources"):
         self.resources_dir = resources_dir
@@ -24,11 +35,7 @@ class UILanguageManager:
                     if filename.startswith("gui_") and filename.endswith(".csv"):
                         lang_code = filename[4:-4]  # Extract 'eng' from 'gui_eng.csv'
                         # Map language codes to display names
-                        display_name = {
-                            "eng": "English",
-                            "pol": "polski",
-                            "zh": "中文",
-                        }.get(lang_code, lang_code.capitalize())
+                        display_name = LANGUAGE_DISPLAY_NAMES.get(lang_code, lang_code.capitalize())
                         languages[lang_code] = display_name
             else:
                 # If resources is not a directory, it might be the path itself
@@ -38,11 +45,7 @@ class UILanguageManager:
                     for filename in os.listdir(parent_dir):
                         if filename.startswith("gui_") and filename.endswith(".csv"):
                             lang_code = filename[4:-4]
-                            display_name = {
-                                "eng": "English",
-                                "pol": "polski",
-                                "zh": "中文",
-                            }.get(lang_code, lang_code.capitalize())
+                            display_name = LANGUAGE_DISPLAY_NAMES.get(lang_code, lang_code.capitalize())
                             languages[lang_code] = display_name
             
             if not languages:
@@ -62,10 +65,15 @@ class UILanguageManager:
     
     def get_language_code_from_name(self, display_name):
         """Convert a display name back to language code"""
+        normalized_display_name = self.normalize_display_name(display_name)
         for code, name in self.available_languages.items():
-            if name == display_name:
+            if name == normalized_display_name:
                 return code
         return self.default_lang
+
+    def normalize_display_name(self, display_name):
+        """Normalize legacy mojibake language names to their current display text."""
+        return LEGACY_DISPLAY_NAME_ALIASES.get(display_name, display_name)
     
     def load_language(self, lang_code):
         """Load labels from the specified language CSV file"""

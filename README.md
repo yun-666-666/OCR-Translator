@@ -1,44 +1,51 @@
 # Game-Changing Translator
 
-Copyright (C) 2025-2026 Tomasz Kaminski
+[中文文档](README_ZH.md) | **English**
 
-This fork was modified with assistance from GPT-5.5.
+> **Original project and author:** [Game-Changing Translator](https://github.com/tomkam1702/OCR-Translator) by [Tomasz Kamiński](https://github.com/tomkam1702). This repository is a modified fork; the original author’s copyright and attribution are retained.
 
 ![Game-Changing Translator Logo](docs/screenshots/readme_screen.jpg)
 
+Game-Changing Translator is a Windows desktop OCR translation tool for text that cannot be copied directly. Select a source area on screen, choose where the translated overlay should appear, and the app continuously captures, recognizes, translates, caches, and displays the result.
+
 ## Overview
 
-Game-Changing Translator is a desktop OCR translation application that captures text from a selected screen area, runs OCR, and translates the result in real time. It can display translations in a floating overlay, which makes it useful for games, videos, PDFs, and other applications where text cannot be copied directly.
+The current project is centered on two active paths:
 
-The application supports Tesseract OCR, AI-assisted OCR providers, offline MarianMT translation, and API-backed translation providers such as DeepL, Google Translate, Gemini, OpenAI, and custom OpenAI-compatible endpoints.
+- **PaddleOCR local OCR** for fast on-device text recognition.
+- **Custom AI profiles** for OpenAI-compatible translation endpoints, with optional Custom AI OCR for image-based providers.
+
+Older built-in provider modules and historical resources may still exist in the repository for compatibility and migration context, but new runtime work should treat PaddleOCR plus Custom AI profiles as the supported path. Legacy local OCR support has been removed from the active UI, configuration, dependencies, and runtime routing.
 
 ## Core Features
 
-- Screen area selection for OCR input and translation output
-- Real-time OCR and translation loop
-- Floating translation overlay
-- Tesseract OCR support
-- AI OCR and AI translation provider support
-- Offline MarianMT translation support
-- Translation caching to reduce repeated API calls
-- Custom prompt and custom provider profile support
-- Configurable appearance, font, colour, and transparency
-- Hotkey support for controlling translation while another app is focused
+- Region-based screen capture for OCR input and translated overlay output
+- Real-time OCR and translation loop with stale-result protection
+- Local PaddleOCR backend with configurable language, model size, device, score threshold, and detection limits
+- Custom AI OCR image payloads using WebP, PNG, or JPEG
+- Custom AI translation through OpenAI-compatible provider profiles
+- Unified translation cache to reduce repeated API calls
+- Custom prompt support for translation style and terminology
+- Floating overlay with configurable font, color, transparency, and geometry
+- Hotkeys for controlling translation while another app is focused
+- Startup/shutdown paths that preserve settings and overlay placement
 
 ## Installation
 
 ### Prerequisites
 
-- Windows
-- [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
-- Python 3.7 or newer
+- Windows 10 or Windows 11
+- Python 3.9-3.12 when running from source
 
-### Setup
+The bundled application does not require a separate OCR engine installation. Source users should install the Python dependencies and configure PaddleOCR or Custom AI from the app settings.
+
+### Setup From Source
 
 1. Clone this repository:
 
    ```bash
    git clone https://github.com/yun-666-666/OCR-Translator.git
+   cd OCR-Translator
    ```
 
 2. Install required Python packages:
@@ -58,37 +65,46 @@ The application supports Tesseract OCR, AI-assisted OCR providers, offline Maria
 1. Launch the application.
 2. Select the OCR source area.
 3. Select the translation output area.
-4. Configure the OCR and translation provider in Settings.
-5. Click Start to begin translation.
-6. Use the configured hotkey to toggle translation while working or playing.
+4. In Settings, choose PaddleOCR for local OCR or configure a Custom AI OCR profile.
+5. Configure a Custom AI translation profile for your OpenAI-compatible endpoint.
+6. Click **Start** to begin translating.
+7. Use the configured hotkey to pause or resume translation while another app is focused.
 
-## Configuration And Secrets
+## Configuration and Privacy
 
-Do not commit real API keys or personal provider profiles. The runtime config file `ocr_translator_config.ini`, API logs, debug logs, cache files, and local backup folders are intentionally ignored by Git.
+Do not commit real API keys, personal provider profiles, debug logs, runtime caches, or generated local configuration. The runtime config file `ocr_translator_config.ini`, API logs, debug logs, cache files, and local backup folders are intentionally ignored by Git.
 
-Use `ocr_translator_config.example.ini` as a clean starting point for a publishable configuration template.
+Use `ocr_translator_config.example.ini` as a clean publishable template. Custom provider settings belong in Custom AI profiles, and the active translation cache implementation lives in `unified_translation_cache.py`.
+
+## Documentation
+
+- [Chinese documentation](README_ZH.md)
+- [User Manual](docs/user-manual.html)
+- [Installation Guide](docs/installation.html)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Developer Guide](docs/developer-guide.md)
+- [Changelog](CHANGELOG.md)
 
 ## Licence
 
-This project is free software, licensed under the GNU General Public Licence version 3 (GPLv3).
+This modified fork is licensed under the GNU General Public License, version 3 or later (GPL-3.0-or-later). It retains the original project’s copyright notice and GPL licence. See [LICENSE](LICENSE) for the complete licence text and third-party notices.
 
-You can:
-
-- Use the software for any purpose
-- Change the software to suit your needs
-- Share the software and your changes with others
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY. See the [LICENSE](LICENSE) file for complete details.
+If you distribute a modified version or binaries, comply with the GPL and retain the original project attribution described in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 ## Acknowledgments
 
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract)
-- Modified with assistance from GPT-5.5
+- **GPT** — primary AI collaborator for this fork’s development work.
+- **Claude** and **Grok** — collaborating AI assistants for implementation, review, and iteration.
+- **Tomasz Kamiński** — original author and maintainer of Game-Changing Translator; this fork builds on his original work.
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for the maintained credit record.
 
 ## Contributing
 
-Please keep attribution to the original author. Read [ATTRIBUTION.md](ATTRIBUTION.md) before forking or using this code.
+Contributions are welcome. Before opening a pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md) and preserve all copyright, licence, and original-author notices.
+
+This fork is based on [Game-Changing Translator by Tomasz Kamiński](https://github.com/tomkam1702/OCR-Translator). Please keep this source acknowledgement and the original author attribution in derivative work.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Attribution Required](https://img.shields.io/badge/Attribution-Required-red.svg)](ATTRIBUTION.md)
-[![Original Author](https://img.shields.io/badge/Original%20Author-Tomasz%20Kaminski-green.svg)](https://github.com/tomkam1702)
+[![Original Author](https://img.shields.io/badge/Original%20Author-Tomasz%20Kamiński-green.svg)](https://github.com/tomkam1702)

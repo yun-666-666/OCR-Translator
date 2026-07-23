@@ -1,11 +1,13 @@
 # Attribution Requirements for Game-Changing Translator
 
+This repository is a modified fork of the original project. These notices preserve the provenance of the work; they do not replace the terms of the [GPL licence](LICENSE).
+
 ## Original Author
 **Game-Changing Translator** was created by **Tomasz Kamiński** in 2025.
 
 ## Attribution Requirements
 
-When forking, modifying, or redistributing this software, you MUST:
+When forking, modifying, or redistributing this software, preserve the following notices and comply with the GPL:
 
 ### 1. Preserve Copyright Notices
 - Keep all copyright notices intact in all source files
@@ -13,14 +15,14 @@ When forking, modifying, or redistributing this software, you MUST:
 - Preserve this ATTRIBUTION.md file
 
 ### 2. Visible Attribution
-- Include "Original Author: Tomasz Kamiński" in any README or documentation
+- Include "Original Author: Tomasz Kamiński" and the original source link in any README or primary documentation
 - Maintain credits in the application's About dialog or help section
 - Keep attribution in any compiled/distributed versions
 
-### 3. GPL v3 Compliance
-- Follow all requirements of the GNU General Public License v3
+### 3. GPL Compliance
+- Follow all requirements of the GNU General Public License v3 or later
 - Make source code available if distributing binaries
-- License derivative works under GPL v3
+- License derivative works under GPL v3 or later when required by the licence
 
 ### 4. Modified Versions
 If you modify this software:

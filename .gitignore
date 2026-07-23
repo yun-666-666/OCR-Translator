@@ -27,12 +27,12 @@ OCR_images/
 # Application specific files
 translator_debug*.log
 *.log
+*.log.*
 marian_models_cache/
+PaddleOCR-*/
 debug_images/
 artifacts/
 backups/
-RUST/
-rust2/
 photo/
 *.png
 !screenshots/*.png
@@ -45,9 +45,12 @@ gemini_cache*.txt
 openai_cache*.txt
 *_log*.txt
 *_Log.txt
+*_log*.txt.*
+*_Log.txt.*
 *_LOG.txt
 *API*Log*.txt
 *API*log*.txt
+log_analysis.txt
 
 # API Keys and sensitive information
 api_keys.json
@@ -64,10 +67,7 @@ Desktop.ini
 *.zip
 *.bak
 
-# Test files and temporary documentation (development)
-test_*.py
-*test*.py
-*verification*.py
+# Temporary development documentation
 *_COMPLETE.md
 *_APPLIED*.md
 *_FIXES*.md
@@ -83,7 +83,6 @@ temp_preserve/
 *.staged
 update_info.json
 cleanup_repository.py
-*prompt*.txt
 GPU_chat/
 prompts/
 
@@ -104,6 +103,18 @@ sync_to_github_fixed.bat
 # Configuration files (user-generated)
 ocr_translator_config.ini
 !ocr_translator_config.example.ini
+custom_ai_profiles.json
+.custom_ai_profiles.json.*.tmp
+custom_ai_translation_cache.json
+custom_ai_translation_cache.json.tmp
+custom_ai_translation_cache.sqlite3
+custom_ai_translation_cache.sqlite3.tmp
+
+# Codex session backups are local rollback artifacts
+.codex/backups/
+
+# Isolated implementation worktrees
+/.worktrees/
 
 # Download statistics files
 downloads.py

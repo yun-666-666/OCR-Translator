@@ -15,10 +15,10 @@
             margin: 0 auto;
             padding: 20px;
         }
-            
+
         /* Avoid page breaks inside the most common attributes, especially for exports (i.e. PDF) */
         td, h1, h2, h3, h4, h5, p, ul, ol, li {
-            page-break-inside: avoid; 
+            page-break-inside: avoid;
         }
 
         /* Make all images responsive - fit within browser window width */
@@ -35,23 +35,23 @@
             margin-bottom: 0.5em;
             color: #111;
         }
-        
+
         h1 {
             font-size: 2.2em;
             border-bottom: 2px solid #eaecef;
             padding-bottom: 0.3em;
         }
-        
+
         h2 {
             font-size: 1.8em;
             border-bottom: 1px solid #eaecef;
             padding-bottom: 0.3em;
         }
-        
+
         h3 {
             font-size: 1.4em;
         }
-        
+
         h4 {
             font-size: 1.2em;
         }
@@ -63,18 +63,18 @@
             margin: 20px 0;
             overflow: auto;
         }
-        
+
         table th, table td {
             border: 1px solid #ddd;
             padding: 12px 16px;
             text-align: left;
         }
-        
+
         table th {
             background-color: #f6f8fa;
             font-weight: 600;
         }
-        
+
         table tr:nth-child(2n) {
             background-color: #f8f8f8;
         }
@@ -83,7 +83,7 @@
         ol, ul {
             padding-left: 2em;
         }
-        
+
         li {
             margin: 0.3em 0;
         }
@@ -103,7 +103,7 @@
             color: #0366d6;
             text-decoration: none;
         }
-        
+
         a:hover {
             text-decoration: underline;
         }
@@ -134,7 +134,7 @@
             padding: 8px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         }
-        
+
         .flag-container img {
             width: 48px;
             height: auto;
@@ -167,12 +167,12 @@
       <li><a href="#installation-method-2-python-source-version-for-developers">Metoda instalacji 2: wersja źródłowa Python (dla programistów)</a>
         <ul>
           <li><a href="#prerequisites">Wymagania wstępne</a></li>
-          <li><a href="#step-1-install-tesseract-ocr">Krok 1: Instalacja Tesseract OCR</a></li>
+          <li><a href="#step-1-configure-ocr">Krok 1: Konfiguracja OCR</a></li>
           <li><a href="#step-2-install-python-and-dependencies">Krok 2: Instalacja Pythona i zależności</a></li>
           <li><a href="#step-3-run-the-application">Krok 3: Uruchamianie aplikacji</a></li>
         </ul>
       </li>
-      <li><a href="#translation-service-configuration-both-installation-methods">Konfiguracja usług tłumaczenia (obie metody instalacji)</a></li>
+      <li><a href="#translation-service-configuration-both-installation-methods">Konfiguracja Custom AI i starszych usług (obie metody instalacji)</a></li>
       <li><a href="#version-comparison">Porównanie wersji</a></li>
       <li><a href="#troubleshooting">Rozwiązywanie problemów</a></li>
       <li><a href="#which-version-should-i-choose">Którą wersję wybrać?</a></li>
@@ -184,8 +184,8 @@
       <li>Minimum 4 GB RAM (zalecane 8 GB)</li>
       <li><strong>Wersja skompilowana</strong>: 1–4 GB wolnego miejsca na dysku (w zależności od wybranej wersji)</li>
       <li><strong>Wersja Python</strong>: 500 MB wolnego miejsca na dysku</li>
-      <li>Dodatkowe miejsce na modele MarianMT w przypadku korzystania z tłumaczenia offline (ok. 500 MB na parę językową)</li>
-      <li>Dostęp do Internetu (do usług tłumaczenia opartych na API oraz początkowego pobierania modeli MarianMT)</li>
+      <li>Dodatkowe miejsce na starsze modele MarianMT w przypadku korzystania z tłumaczenia offline (ok. 500 MB na parę językową)</li>
+      <li>Dostęp do Internetu (do usług Custom AI / endpointów zgodnych z OpenAI oraz początkowego pobierania starszych modeli MarianMT)</li>
     </ul>
 
     <h2 id="installation-method-1-compiled-version-recommended-for-most-users">Metoda instalacji 1: wersja skompilowana (zalecana dla większości użytkowników)</h2>
@@ -196,10 +196,10 @@
 
     <h4 id="version-370-cpu-only-260mb-latest"><strong>Wersja 3.9.5 - wyłącznie CPU</strong> (ok. 260 MB) <em>[Najnowsza wersja]</em></h4>
     <ul>
-      <li><strong>Najlepsza dla</strong>: wszystkich użytkowników poszukujących najnowszych funkcji z zaawansowanym systemem Gemini Translation + Gemini OCR</li>
+      <li><strong>Najlepsza dla</strong>: wszystkich użytkowników poszukujących najnowszych funkcji ze ścieżką Custom AI translation + Custom AI OCR</li>
       <li><strong>Wymagania</strong>: dowolny nowoczesny procesor</li>
       <li><strong>Rozmiar pliku do pobrania</strong>: ok. 260 MB (1 plik)</li>
-      <li><strong>Uwaga</strong>: Tłumaczenia offline MarianMT pozostają dostępne jako niezawodna opcja zapasowa, choć zaawansowany system Gemini zapewnia lepsze rezultaty w większości zastosowań</li>
+      <li><strong>Uwaga</strong>: starsze tłumaczenia offline MarianMT pozostają w pakiecie dla kompatybilności, ale bieżąca ścieżka online koncentruje się na profilach Custom AI</li>
     </ul>
 
     <h4 id="version-2-legacy-versions">Wersja 2 - wersje starsze</h4>
@@ -255,11 +255,11 @@
         </ul>
       </li>
       <li>
-        <p><strong>Zainstaluj Tesseract OCR</strong> (wymagane do rozpoznawania tekstu):</p>
+        <p><strong>Skonfiguruj OCR</strong>:</p>
         <ul>
-          <li>Pobierz z <a href="https://github.com/UB-Mannheim/tesseract/wiki">repozytorium UB-Mannheim</a>.</li>
-          <li>Wybierz najnowszą wersję 64-bitową.</li>
-          <li>Zainstaluj w domyślnej lokalizacji: <code>C:\Program Files\Tesseract-OCR\</code>.</li>
+          <li>Użyj dołączonej ścieżki PaddleOCR albo skonfiguruj profil Custom AI OCR.</li>
+          <li>Wybierz PaddleOCR dla lokalnego OCR albo Custom AI OCR dla rozpoznawania przez API.</li>
+          <li>Pozostaw domyślny katalog źródłowy PaddleOCR, chyba że używasz własnego checkoutu.</li>
           <li>Zaznacz wszystkie opcjonalne składniki instalacji, łącznie z obsługą wszystkich języków.</li>
         </ul>
       </li>
@@ -274,7 +274,7 @@
       <li>
         <p><strong>Konfiguracja przy pierwszym uruchomieniu</strong>:</p>
         <ul>
-          <li>Sprawdź ścieżkę Tesseract w zakładce <strong>Ustawienia</strong> (powinna zostać wykryta automatycznie).</li>
+          <li>Sprawdź ustawienia PaddleOCR w zakładce <strong>Ustawienia</strong> (powinna zostać wykryta automatycznie).</li>
           <li>Wybierz obszar źródłowy i obszar tłumaczenia.</li>
           <li>Skonfiguruj preferowaną metodę tłumaczenia.</li>
           <li>Gotowe!</li>
@@ -293,7 +293,7 @@
     </ul>
 
     <h3 id="no-additional-setup-required">Brak dodatkowej konfiguracji</h3>
-    <p>W przeciwieństwie do wersji Python wersja skompilowana nie wymaga instalacji dodatkowego oprogramowania poza Tesseract OCR. Wszystkie zależności Pythona, biblioteki tłumaczeń i biblioteki sieci neuronowych są dołączone i gotowe do użycia.</p>
+    <p>W przeciwieństwie do wersji Python wersja skompilowana nie wymaga osobnej instalacji silnika OCR. Wszystkie zależności Pythona, biblioteki tłumaczeń i biblioteki sieci neuronowych są dołączone i gotowe do użycia.</p>
 
     <hr>
 
@@ -302,29 +302,29 @@
 
     <h3 id="prerequisites">Wymagania wstępne</h3>
     <ul>
-      <li>Python 3.7 lub nowszy</li>
+      <li>Python 3.9-3.12</li>
       <li>Git (opcjonalnie, do klonowania repozytorium)</li>
     </ul>
 
-    <h3 id="step-1-install-tesseract-ocr">Krok 1: Instalacja Tesseract OCR</h3>
-    <p><strong>Game-Changing Translator</strong> opiera się na programie Tesseract do optycznego rozpoznawania znaków. Wykonaj następujące kroki, aby go zainstalować:</p>
+    <h3 id="step-1-configure-ocr">Krok 1: Konfiguracja OCR</h3>
+    <p><strong>Game-Changing Translator</strong> obsługuje lokalny PaddleOCR oraz Custom AI OCR. Skonfiguruj ścieżkę OCR, której chcesz używać:</p>
     <ol>
       <li>
-        <p>Pobierz instalator Tesseract z <a href="https://github.com/UB-Mannheim/tesseract/wiki">repozytorium UB-Mannheim</a>.</p>
+        <p>Użyj dołączonego/lokalnego katalogu źródłowego PaddleOCR albo zainstaluj zależności poleceniem <code>pip install -r requirements.txt</code>.</p>
         <ul>
-          <li>Wybierz najnowszą wersję 64-bitową.</li>
+          <li>Wybierz PaddleOCR dla lokalnego OCR albo Custom AI OCR dla rozpoznawania przez API.</li>
           <li>Zaznacz wszystkie opcjonalne składniki instalacji, łącznie z obsługą wszystkich języków.</li>
         </ul>
       </li>
       <li>
-        <p>Zainstaluj Tesseract w domyślnej lokalizacji: <code>C:\Program Files\Tesseract-OCR\</code></p>
+        <p>Pozostaw domyślny katalog źródłowy PaddleOCR, chyba że masz własny checkout PaddleOCR.</p>
         <ul>
           <li>Jeśli instalujesz w innej lokalizacji, trzeba będzie zaktualizować ścieżkę w ustawieniach aplikacji.</li>
         </ul>
       </li>
       <li>
         <p>Sprawdź instalację, otwierając wiersz poleceń i wpisując:</p>
-        <pre><code>"C:\Program Files\Tesseract-OCR\tesseract.exe" --version</code></pre>
+        <pre><code>python main.py</code></pre>
       </li>
     </ol>
 
@@ -347,9 +347,9 @@ cd OCR-Translator</code></pre>
         <pre><code>pip install -r requirements.txt</code></pre>
         <p>Zainstalowane zostaną:</p>
         <ul>
-          <li>podstawowe zależności (numpy, opencv, pytesseract, Pillow, pyautogui);</li>
-          <li>klienty API tłumaczeń (Google Cloud Translate, DeepL);</li>
-          <li>opcjonalne biblioteki tłumaczenia offline MarianMT (transformers, torch, sentencepiece);</li>
+          <li>podstawowe zależności (numpy, opencv, paddleocr, Pillow, pyautogui);</li>
+          <li>obsługę profili Custom AI / endpointów zgodnych z OpenAI przez klienta HTTP Requests;</li>
+          <li>obsługę nakładki RTL PySide6 i skrótów klawiaturowych;</li>
           <li>obsługa skrótów klawiszowych.</li>
         </ul>
       </li>
@@ -367,7 +367,7 @@ cd OCR-Translator</code></pre>
       <li>
         <p>Przy pierwszym uruchomieniu trzeba będzie:</p>
         <ul>
-          <li>sprawdzić ścieżkę Tesseract w zakładce <strong>Ustawienia</strong>,</li>
+          <li>sprawdzić ustawienia PaddleOCR w zakładce <strong>Ustawienia</strong>,</li>
           <li>wybrać obszary źródłowy i obszar tłumaczenia,</li>
           <li>skonfigurować preferowaną metodę tłumaczenia.</li>
         </ul>
@@ -376,9 +376,10 @@ cd OCR-Translator</code></pre>
 
     <hr>
 
-    <h2 id="translation-service-configuration-both-installation-methods">Konfiguracja usług tłumaczenia (obie metody instalacji)</h2>
+    <h2 id="translation-service-configuration-both-installation-methods">Konfiguracja Custom AI i starszych usług (obie metody instalacji)</h2>
+    <p>Bieżąca ścieżka działania używa profili Custom AI z endpointami zgodnymi z OpenAI do OCR i tłumaczenia online. Bazowy URL, klucz API i model skonfiguruj w ustawieniach profili Custom AI aplikacji. Poniższe informacje o Google, DeepL i MarianMT są starszym odniesieniem dla użytkowników, którzy jawnie ponownie włączają te ścieżki w forku.</p>
 
-    <h3 id="google-cloud-translation-api-optional">Google Cloud Translation API (opcjonalnie):</h3>
+    <h3 id="google-cloud-translation-api-optional">Starszy Google Cloud Translation API (opcjonalnie):</h3>
     <ol>
       <li>Utwórz konto Google Cloud i projekt.</li>
       <li>Włącz Cloud Translation API.</li>
@@ -388,19 +389,19 @@ cd OCR-Translator</code></pre>
           <li>Kliknij <strong>Create credentials</strong> → <strong>API key</strong>.</li>
         </ul>
       </li>
-      <li>Skopiuj klucz API do użycia w ustawieniach <strong>Game-Changing Translator</strong>.</li>
+      <li>Skopiuj klucz API tylko wtedy, gdy używasz starszej ścieżki Google Translate.</li>
     </ol>
 
-    <h3 id="deepl-api-optional">DeepL API (opcjonalnie):</h3>
+    <h3 id="deepl-api-optional">Starszy DeepL API (opcjonalnie):</h3>
     <ol>
       <li>Utwórz konto DeepL na <a href="https://www.deepl.com/pro-api">deepl.com/pro-api</a>.</li>
       <li>Wybierz plan (włącznie z planem darmowym).</li>
       <li>Pobierz klucz API z panelu konta.</li>
-      <li>Skopiuj klucz API do użycia w ustawieniach <strong>Game-Changing Translator</strong>.</li>
+      <li>Skopiuj klucz API tylko wtedy, gdy używasz starszej ścieżki DeepL.</li>
     </ol>
 
-    <h3 id="marianmt-offline-translation">MarianMT (tłumaczenie offline):</h3>
-    <p>Ta opcja nie wymaga konfiguracji, ponieważ modele pobierane są automatycznie przy pierwszym użyciu. Należy jednak pamiętać o następujących kwestiach:</p>
+    <h3 id="marianmt-offline-translation">Starszy MarianMT (tłumaczenie offline):</h3>
+    <p>Ta starsza opcja nie wymaga konfiguracji, ponieważ modele pobierane są automatycznie przy pierwszym użyciu. Należy jednak pamiętać o następujących kwestiach:</p>
     <ul>
       <li>Każdy model ma około 500 MB.</li>
       <li>Pierwsze tłumaczenie w nowej parze językowej potrwa trochę dłużej z uwagi na pobieranie modelu.</li>
@@ -451,11 +452,11 @@ cd OCR-Translator</code></pre>
           <td>Instalacja ręczna</td>
         </tr>
         <tr>
-          <td><strong>Integracja Gemini API</strong></td>
-          <td>Zaawansowana (najnowsza)</td>
+          <td><strong>Integracja Custom AI</strong></td>
+          <td>Bieżąca ścieżka</td>
           <td>Podstawowa</td>
           <td>Podstawowa</td>
-          <td>Zaawansowana (po aktualizacji)</td>
+          <td>Dostępna z zależnościami</td>
         </tr>
         <tr>
           <td><strong>Działanie MarianMT</strong></td>
@@ -496,22 +497,22 @@ cd OCR-Translator</code></pre>
     <h3 id="for-compiled-versions">Wersje skompilowane:</h3>
     <ul>
       <li><strong>Aplikacja się nie uruchamia</strong>: sprawdź, czy masz zainstalowane Visual C++ Redistributable.</li>
-      <li><strong>Nie znaleziono Tesseract</strong>: sprawdź, czy ścieżka w <strong>Ustawieniach</strong> pasuje do lokalizacji instalacji.</li>
+      <li><strong>Nie znaleziono PaddleOCR</strong>: sprawdź, czy ścieżka w <strong>Ustawieniach</strong> pasuje do lokalizacji instalacji.</li>
       <li><strong>Wersja GPU działa wolno</strong>: sprawdź, czy sterowniki NVIDIA są aktualne i czy CUDA działa.</li>
       <li><strong>Ostrzeżenia antywirusowe</strong>: dodaj folder aplikacji do wykluczeń programu antywirusowego.</li>
     </ul>
 
     <h3 id="for-python-source-version">Wersja źródłowa Python:</h3>
     <ul>
-      <li><strong>Błędy zależności Python</strong>: upewnij się, że używasz Pythona 3.7+ i spróbuj ponownie zainstalować zależności.</li>
+      <li><strong>Błędy zależności Python</strong>: upewnij się, że używasz Pythona 3.9-3.12 i spróbuj ponownie zainstalować zależności.</li>
       <li><strong>Błędy importu</strong>: sprawdź, czy wszystkie pakiety zostały poprawnie zainstalowane poleceniem <code>pip list</code>.</li>
     </ul>
 
     <h3 id="common-issues-all-versions">Typowe problemy (wszystkie wersje):</h3>
     <ul>
-      <li><strong>Błędy API tłumaczenia</strong>: sprawdź klucze API i połączenie internetowe.</li>
-      <li><strong>Błędy MarianMT</strong>: sprawdź, czy masz wystarczająco miejsca na dysku i stabilne połączenie internetowe do pobierania modeli.</li>
-      <li><strong>OCR nie działa</strong>: sprawdź instalację Tesseract i konfigurację ścieżki.</li>
+      <li><strong>Błędy API tłumaczenia</strong>: sprawdź bazowy URL Custom AI, klucz API, model i połączenie internetowe.</li>
+      <li><strong>Błędy starszego MarianMT</strong>: sprawdź, czy masz wystarczająco miejsca na dysku i stabilne połączenie internetowe do pobierania modeli.</li>
+      <li><strong>OCR nie działa</strong>: sprawdź instalację PaddleOCR i konfigurację ścieżki.</li>
     </ul>
 
     <p>Więcej pomocy znajdziesz w <a href="troubleshooting.md">Instrukcji rozwiązywania problemów</a>.</p>
@@ -523,11 +524,11 @@ cd OCR-Translator</code></pre>
     <h3 id="choose-version-35-if">Wybierz <strong>wersję 3.9.5 – tylko CPU</strong>, jeśli:</h3>
     <ul>
       <li>chcesz mieć najnowsze funkcje i usprawnienia,</li>
-      <li>preferujesz zaawansowaną integrację z Gemini API zapewniającą wyższą jakość tłumaczeń,</li>
+      <li>preferujesz profile Custom AI / endpointy zgodne z OpenAI do tłumaczenia online,</li>
       <li>potrzebujesz kompleksowego śledzenia i monitorowania kosztów API,</li>
       <li>zależy ci na najmniejszym rozmiarze pliku do pobrania i nowoczesnym zestawie funkcji,</li>
-      <li>głównie korzystasz z internetowych usług tłumaczenia (Gemini, DeepL, Google Translate),</li>
-      <li>nie przeszkadza ci używanie MarianMT jako niezawodnej opcji zapasowej zamiast głównej metody tłumaczenia.</li>
+      <li>głównie korzystasz z profili Custom AI do OCR i tłumaczenia online,</li>
+      <li>nie przeszkadza ci pozostawienie starszego MarianMT jako ścieżki zapasowej/referencyjnej zamiast głównej metody tłumaczenia.</li>
     </ul>
 
     <h3 id="choose-version-2-gpu-if">Wybierz <strong>wersję 2 – z obsługą GPU</strong>, jeśli:</h3>
@@ -554,7 +555,7 @@ cd OCR-Translator</code></pre>
       <li>czujesz się swobodnie w środowiskach programistycznych Python.</li>
     </ul>
 
-    <p>Większości użytkowników <strong>Wersja 3.9.5 - wyłącznie CPU</strong> zapewnia najlepszy kompromis między nowoczesnymi funkcjami, jakością tłumaczeń, prostotą obsługi i rozmiarem pliku do pobrania. Użytkownicy, którzy intensywnie korzystają z tłumaczeń offline MarianMT i posiadają kompatybilny sprzęt NVIDIA, mogą preferować Wersję 2 - z obsługą GPU dla maksymalnej wydajności offline.</p>
+    <p>Większości użytkowników <strong>Wersja 3.9.5 - wyłącznie CPU</strong> zapewnia najlepszy kompromis między nowoczesnymi funkcjami Custom AI, jakością tłumaczeń, prostotą obsługi i rozmiarem pliku do pobrania. Użytkownicy, którzy intensywnie korzystają ze starszego tłumaczenia offline MarianMT i posiadają kompatybilny sprzęt NVIDIA, mogą preferować Wersję 2 - z obsługą GPU dla maksymalnej wydajności offline.</p>
 
   </body>
 </html>

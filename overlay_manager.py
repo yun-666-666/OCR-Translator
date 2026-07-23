@@ -6,9 +6,75 @@ from ui_elements import ResizableMovableFrame
 from modern_ui import style_selection_window
 
 
+DEFAULT_TARGET_OPACITY = 0.4
+SOURCE_AREA_CONFIG = (
+    ('source_area_x1', '0'),
+    ('source_area_y1', '0'),
+    ('source_area_x2', '200'),
+    ('source_area_y2', '100'),
+)
+TARGET_AREA_CONFIG = (
+    ('target_area_x1', '200'),
+    ('target_area_y1', '200'),
+    ('target_area_x2', '500'),
+    ('target_area_y2', '400'),
+)
+
+
 def _get_pyside_api():
     from pyside_overlay import get_pyside_manager, is_pyside_available
     return get_pyside_manager, is_pyside_available
+
+
+def _widget_exists_om(widget):
+    if widget is None:
+        return False
+    try:
+        return bool(widget.winfo_exists())
+    except Exception:
+        return False
+
+
+def _publish_source_geometry_change(app, reason="source overlay geometry changed"):
+    """UI-thread publisher for source overlay move/resize completion."""
+    overlay = getattr(app, "source_overlay", None)
+    if overlay is not None:
+        try:
+            area = overlay.get_geometry()
+            if area:
+                app.source_area = list(area)
+        except Exception:
+            pass
+    publisher = getattr(app, "publish_capture_ui_snapshot", None)
+    if callable(publisher):
+        publisher(bump_generation=True, reason=reason)
+
+
+def _valid_area_om(area):
+    try:
+        x1, y1, x2, y2 = map(int, area)
+    except (TypeError, ValueError):
+        return False
+    return x2 > x1 and y2 > y1
+
+
+def restore_areas_from_config_om(app):
+    """Restore saved source/target coordinates without creating any windows."""
+    try:
+        settings = app.config['Settings']
+        app.source_area = [int(settings.get(name, default)) for name, default in SOURCE_AREA_CONFIG]
+        app.target_area = [int(settings.get(name, default)) for name, default in TARGET_AREA_CONFIG]
+    except (KeyError, TypeError, ValueError) as exc:
+        log_debug(f"OverlayManager: Could not restore areas from config: {exc}")
+        return False
+
+    if not _valid_area_om(app.source_area) or not _valid_area_om(app.target_area):
+        log_debug(
+            "OverlayManager: Saved overlay coordinates are invalid: "
+            f"source={app.source_area}, target={app.target_area}"
+        )
+        return False
+    return True
 
 def _hex_to_rgba_om(hex_color, opacity):
     """Helper to convert #RRGGBB hex and opacity float to rgba(r,g,b,a) string."""
@@ -142,12 +208,18 @@ def select_source_area_om(app):
         app.source_area = selected
         log_debug(f"OverlayManager: Source area selected: {app.source_area}")
         messagebox.showinfo(
-            app.ui_lang.get_label("dialog_area_selected_title", "Area Selected"), 
-            f"{app.ui_lang.get_label('dialog_source_area_set_message', 'Source area set to:')}\n{app.source_area}", 
+            app.ui_lang.get_label("dialog_area_selected_title", "Area Selected"),
+            f"{app.ui_lang.get_label('dialog_source_area_set_message', 'Source area set to:')}\n{app.source_area}",
             parent=app.root
         )
         create_source_overlay_om(app)
-        
+        publisher = getattr(app, "publish_capture_ui_snapshot", None)
+        if callable(publisher):
+            publisher(
+                bump_generation=True,
+                reason="source area selected",
+            )
+
         if app.source_overlay and app.source_overlay.winfo_exists() and app.source_overlay.winfo_viewable():
             app.source_overlay.hide()
             app.config['Settings']['source_area_visible'] = 'False'
@@ -180,7 +252,7 @@ def select_target_area_om(app):
             app.config['Settings']['target_area_visible'] = 'False'
             log_debug("OverlayManager: Target overlay hidden after initial selection")
 
-def create_source_overlay_om(app):
+def create_source_overlay_om(app, force_hidden=False):
     if not app.source_area or len(app.source_area) != 4:
          try:
              x1 = int(app.config['Settings'].get('source_area_x1', '0'))
@@ -191,7 +263,7 @@ def create_source_overlay_om(app):
          except (ValueError, KeyError) as e:
              log_debug(f"OverlayManager: Could not load source area from config for overlay creation: {e}")
              return
-    
+
     if app.source_overlay and app.source_overlay.winfo_exists():
         try:
             app.source_overlay.destroy()
@@ -200,19 +272,37 @@ def create_source_overlay_om(app):
         app.source_overlay = None
 
     try:
-        app.source_overlay = ResizableMovableFrame(app.root, app.source_area, bg_color=app.source_colour_var.get(), title="")
+        app.source_overlay = ResizableMovableFrame(
+            app.root,
+            app.source_area,
+            bg_color=app.source_colour_var.get(),
+            title="",
+            start_hidden=force_hidden,
+        )
         app.source_overlay.attributes("-alpha", 0.7)
-        
+
         app.source_overlay.update_color(app.source_colour_var.get())
+        if hasattr(app.source_overlay, "set_geometry_changed_callback"):
+            app.source_overlay.set_geometry_changed_callback(
+                lambda: _publish_source_geometry_change(app)
+            )
 
         should_be_visible = app.config['Settings'].getboolean('source_area_visible', fallback=False)
-        if not should_be_visible and app.source_overlay.winfo_viewable():
-            app.source_overlay.hide()
+        if force_hidden:
+            if app.source_overlay.winfo_viewable():
+                app.source_overlay.hide()
+            app.config['Settings']['source_area_visible'] = 'False'
         elif should_be_visible and not app.source_overlay.winfo_viewable():
             app.source_overlay.show()
-        else:
+        elif not should_be_visible and app.source_overlay.winfo_viewable():
             app.source_overlay.hide()
-            app.config['Settings']['source_area_visible'] = 'False'
+
+        publisher = getattr(app, "publish_capture_ui_snapshot", None)
+        if callable(publisher):
+            publisher(
+                bump_generation=True,
+                reason="source overlay created",
+            )
         
         log_debug(f"OverlayManager: Created source overlay. Visible: {app.source_overlay.winfo_viewable()}")
     except Exception as e_cso:
@@ -254,7 +344,7 @@ def _preserve_overlay_position(app):
     except Exception as e:
         log_debug(f"OverlayManager: Error preserving overlay position: {e}")
 
-def create_target_overlay_om(app, skip_preservation=False):
+def create_target_overlay_om(app, skip_preservation=False, force_hidden=False):
     if not app.target_area or len(app.target_area) != 4:
          try:
              x1 = int(app.config['Settings'].get('target_area_x1', '200'))
@@ -302,6 +392,39 @@ def create_target_overlay_om(app, skip_preservation=False):
             font_family = app.target_font_type_var.get() or "Arial"
         except Exception:
             font_family = "Arial"
+        try:
+            font_bold = bool(app.target_font_bold_var.get())
+        except Exception:
+            try:
+                font_bold = app.config.getboolean(
+                    'Settings',
+                    'target_font_bold',
+                    fallback=False,
+                )
+            except (AttributeError, TypeError, ValueError):
+                font_bold = False
+        try:
+            text_outline_color = app.target_text_outline_colour_var.get()
+        except Exception:
+            text_outline_color = app.config['Settings'].get(
+                'target_text_outline_colour',
+                '#000000',
+            )
+        try:
+            text_outline_width = int(
+                app.target_text_outline_width_var.get()
+            )
+        except Exception:
+            try:
+                text_outline_width = int(
+                    app.config['Settings'].get(
+                        'target_text_outline_width',
+                        '2',
+                    )
+                )
+            except (TypeError, ValueError):
+                text_outline_width = 2
+        text_outline_width = max(0, min(6, text_outline_width))
 
         pad_x = int(app.config['Settings'].get('target_text_pad_x', '5'))
         pad_y = int(app.config['Settings'].get('target_text_pad_y', '5'))
@@ -312,7 +435,7 @@ def create_target_overlay_om(app, skip_preservation=False):
         try:
             opacity = app.target_opacity_var.get()
         except (AttributeError, tk.TclError):
-            opacity = float(app.config['Settings'].get('target_opacity', '0.15'))
+            opacity = float(app.config['Settings'].get('target_opacity', str(DEFAULT_TARGET_OPACITY)))
         
         # Text opacity - prefer app variable over config  
         try:
@@ -333,6 +456,9 @@ def create_target_overlay_om(app, skip_preservation=False):
                 text_padding=(pad_x, pad_y),
                 font_size=font_size,
                 font_family=font_family,
+                font_bold=font_bold,
+                text_outline_color=text_outline_color,
+                text_outline_width=text_outline_width,
                 border_px=border_px,
                 opacity=opacity,
                 corner_radius=16
@@ -364,7 +490,13 @@ def create_target_overlay_om(app, skip_preservation=False):
         if not app.target_overlay:
             log_debug("OverlayManager: Using tkinter target overlay as fallback")
             try:
-                app.target_overlay = ResizableMovableFrame(app.root, app.target_area, bg_color=target_color, title="Translation")
+                app.target_overlay = ResizableMovableFrame(
+                    app.root,
+                    app.target_area,
+                    bg_color=target_color,
+                    title="Translation",
+                    start_hidden=force_hidden,
+                )
                 app.target_overlay.attributes("-alpha", opacity)
                 app.target_overlay.update_color(target_color)
 
@@ -389,12 +521,17 @@ def create_target_overlay_om(app, skip_preservation=False):
 
                 text_justify = tk.RIGHT if is_rtl else tk.LEFT
 
+                target_font = (
+                    (font_family, font_size, "bold")
+                    if font_bold
+                    else (font_family, font_size)
+                )
                 app.translation_text = tk.Text(
                     app.target_overlay.content_frame,
                     wrap=tk.WORD,
                     bg=target_color,
                     fg=app.target_text_colour_var.get(),
-                    font=(font_family, font_size),
+                    font=target_font,
                     bd=border_px,
                     relief="flat",
                     padx=pad_x,
@@ -423,13 +560,14 @@ def create_target_overlay_om(app, skip_preservation=False):
                 raise e_tkinter
 
         should_be_visible = app.config['Settings'].getboolean('target_area_visible', fallback=False)
-        if not should_be_visible and app.target_overlay.winfo_viewable():
-            app.target_overlay.hide()
+        if force_hidden:
+            if app.target_overlay.winfo_viewable():
+                app.target_overlay.hide()
+            app.config['Settings']['target_area_visible'] = 'False'
         elif should_be_visible and not app.target_overlay.winfo_viewable():
             app.target_overlay.show()
-        else:
+        elif not should_be_visible and app.target_overlay.winfo_viewable():
             app.target_overlay.hide()
-            app.config['Settings']['target_area_visible'] = 'False'
 
         overlay_type = "PySide" if hasattr(app.translation_text, 'set_rtl_text') else "tkinter"
         log_debug(f"OverlayManager: {overlay_type} target overlay created. Visible: {app.target_overlay.winfo_viewable()}")
@@ -440,54 +578,99 @@ def create_target_overlay_om(app, skip_preservation=False):
         app.translation_text = None
 
 
-def toggle_source_visibility_om(app):
-    if (not app.source_overlay or not app.source_overlay.winfo_exists()) and app.source_area:
-        create_source_overlay_om(app)
+def ensure_overlays_ready_om(app, require_source=True, require_target=True, force_hidden=False):
+    """Create missing overlays from saved coordinates and report readiness."""
+    source_area_ready = not require_source or _valid_area_om(getattr(app, 'source_area', None))
+    target_area_ready = not require_target or _valid_area_om(getattr(app, 'target_area', None))
+    if not source_area_ready or not target_area_ready:
+        if not restore_areas_from_config_om(app):
+            return False
 
-    if app.source_overlay and app.source_overlay.winfo_exists():
+    if require_source and not _widget_exists_om(getattr(app, 'source_overlay', None)):
+        create_source_overlay_om(app, force_hidden=force_hidden)
+
+    target_ready = _widget_exists_om(getattr(app, 'target_overlay', None)) and _widget_exists_om(
+        getattr(app, 'translation_text', None)
+    )
+    if require_target and not target_ready:
+        create_target_overlay_om(app, force_hidden=force_hidden)
+
+    source_ready = not require_source or _widget_exists_om(getattr(app, 'source_overlay', None))
+    target_ready = not require_target or (
+        _widget_exists_om(getattr(app, 'target_overlay', None))
+        and _widget_exists_om(getattr(app, 'translation_text', None))
+    )
+    return source_ready and target_ready
+
+
+def _flush_overlay_visibility_om(app, overlay):
+    """Paint a visibility change before the caller performs settings I/O."""
+    try:
+        app.root.update_idletasks()
+    except (AttributeError, tk.TclError):
+        pass
+
+    if overlay is not getattr(app, 'target_overlay', None) or not hasattr(
+        getattr(app, 'translation_text', None),
+        'set_rtl_text',
+    ):
+        return
+    try:
+        get_pyside_manager, is_pyside_available = _get_pyside_api()
+        if not is_pyside_available():
+            return
+        qapp = get_pyside_manager().ensure_qapp()
+        if qapp is not None:
+            qapp.processEvents()
+    except Exception as exc:
+        log_debug(f"OverlayManager: Could not flush PySide visibility events: {exc}")
+
+
+def toggle_source_visibility_om(app):
+    ready = ensure_overlays_ready_om(
+        app,
+        require_source=True,
+        require_target=False,
+        force_hidden=True,
+    )
+    if ready:
         app.source_overlay.toggle_visibility()
         action = "hidden" if not app.source_overlay.winfo_viewable() else "shown"
         log_debug(f"OverlayManager: Source overlay {action} by user.")
+        _flush_overlay_visibility_om(app, app.source_overlay)
     else:
         messagebox.showwarning("Warning", "Source area overlay window does not exist.\nPlease select the source area first.", parent=app.root)
         log_debug("OverlayManager: Toggle source visibility failed: Overlay does not exist.")
 
 def toggle_target_visibility_om(app):
-    if (not app.target_overlay or not app.target_overlay.winfo_exists()) and app.target_area:
-        create_target_overlay_om(app)
-
-    if app.target_overlay and app.target_overlay.winfo_exists():
-        if hasattr(app.target_overlay, 'update_color'):
+    was_ready = _widget_exists_om(getattr(app, 'target_overlay', None)) and _widget_exists_om(
+        getattr(app, 'translation_text', None)
+    )
+    ready = ensure_overlays_ready_om(
+        app,
+        require_source=False,
+        require_target=True,
+        force_hidden=True,
+    )
+    if ready:
+        if was_ready and hasattr(app.target_overlay, 'update_color'):
             app.target_overlay.update_color(app.target_colour_var.get())
         app.target_overlay.toggle_visibility()
         action = "hidden" if not app.target_overlay.winfo_viewable() else "shown"
         log_debug(f"OverlayManager: Target overlay {action} by user.")
+        _flush_overlay_visibility_om(app, app.target_overlay)
     else:
         messagebox.showwarning("Warning", "Target area overlay window does not exist.\nPlease select the target area first.", parent=app.root)
         log_debug("OverlayManager: Toggle target visibility failed: Overlay does not exist.")
 
 def load_areas_from_config_om(app):
-    """Loads the source and target areas from saved config and creates overlays via OM functions."""
-    try:
-        x1 = int(app.config['Settings'].get('source_area_x1', '0'))
-        y1 = int(app.config['Settings'].get('source_area_y1', '0'))
-        x2 = int(app.config['Settings'].get('source_area_x2', '200'))
-        y2 = int(app.config['Settings'].get('source_area_y2', '100'))
-        app.source_area = [x1, y1, x2, y2]
-
-        if (not app.source_overlay or not app.source_overlay.winfo_exists()) and app.config['Settings'].getboolean('source_area_visible', fallback=False):
-            create_source_overlay_om(app)
-            log_debug(f"OverlayManager: Created source overlay from config: {app.source_area}")
-
-        target_x1 = int(app.config['Settings'].get('target_area_x1', '200'))
-        target_y1 = int(app.config['Settings'].get('target_area_y1', '200'))
-        target_x2 = int(app.config['Settings'].get('target_area_x2', '500'))
-        target_y2 = int(app.config['Settings'].get('target_area_y2', '400'))
-        app.target_area = [target_x1, target_y1, target_x2, target_y2]
-
-        if (not app.target_overlay or not app.target_overlay.winfo_exists()) and app.config['Settings'].getboolean('target_area_visible', fallback=False):
-            create_target_overlay_om(app)
-            log_debug(f"OverlayManager: Created target overlay from config: {app.target_area}")
-
-    except (ValueError, KeyError) as e:
-        log_debug(f"OverlayManager: Could not load areas from config: {e}")
+    """Restore saved areas and prepare hidden overlays for immediate use."""
+    if not restore_areas_from_config_om(app):
+        return False
+    ready = ensure_overlays_ready_om(app, force_hidden=True)
+    if ready:
+        log_debug(
+            "OverlayManager: Restored saved areas and prepared hidden overlays: "
+            f"source={app.source_area}, target={app.target_area}"
+        )
+    return ready

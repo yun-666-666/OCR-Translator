@@ -1,490 +1,327 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Game-Changing Translator - Revolutionary AI-Powered Real-Time Screen Translation</title>
+    <title>Game-Changing Translator - Real-Time Screen OCR Translation</title>
     <style>
         * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
         }
-        
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f6f8fb;
+            color: #172033;
+            font-family: "Segoe UI", Arial, sans-serif;
             line-height: 1.6;
-            color: #1f2937;
-            background: #f8fafc;
             min-height: 100vh;
         }
-        
+
+        a {
+            color: #155eef;
+        }
+
         .container {
-            max-width: 1200px;
             margin: 0 auto;
-            padding: 20px;
+            max-width: 1180px;
+            padding: 24px;
         }
-        
-        .header {
-            text-align: center;
-            color: #1e40af;
-            padding: 2rem 0;
-            margin-bottom: 2rem;
+
+        .hero {
+            background: #ffffff;
+            border: 1px solid #d9e2f2;
+            border-left: 5px solid #155eef;
+            border-radius: 8px;
+            box-shadow: 0 12px 30px rgba(21, 94, 239, 0.08);
+            margin-bottom: 24px;
+            padding: 40px;
         }
-        
-        .header h1 {
-            font-size: 3rem;
+
+        .eyebrow {
+            color: #155eef;
+            font-size: 0.9rem;
             font-weight: 700;
-            margin-bottom: 0.5rem;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            letter-spacing: 0.08em;
+            margin-bottom: 12px;
+            text-transform: uppercase;
         }
-        
-        .header .subtitle {
+
+        h1 {
+            color: #101828;
+            font-size: 3rem;
+            line-height: 1.08;
+            margin-bottom: 16px;
+        }
+
+        .subtitle {
+            color: #344054;
             font-size: 1.2rem;
-            opacity: 0.9;
-            margin-bottom: 1rem;
+            max-width: 820px;
         }
-        
-        .hero-badge {
-            background: white;
-            border: 2px solid #3b82f6;
-            border-radius: 25px;
-            padding: 0.5rem 1.5rem;
-            display: inline-block;
-            font-weight: 600;
-            margin-bottom: 2rem;
-            color: #1e40af;
-        }
-        
-        .content-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 2rem;
-            margin-bottom: 2rem;
-        }
-        
-        .card {
-            background: white;
-            border-left: 4px solid #3b82f6;
-            border-radius: 15px;
-            padding: 2rem;
-            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.1);
-            border: 1px solid rgba(59, 130, 246, 0.1);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-        }
-        
-        .card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 12px 40px rgba(0,0,0,0.15);
-        }
-        
-        .card h2 {
-            color: #2c3e50;
-            font-size: 1.5rem;
-            margin-bottom: 1rem;
+
+        .hero-actions {
             display: flex;
-            align-items: center;
-            gap: 0.5rem;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-top: 28px;
         }
-        
-        .card .icon {
-            font-size: 1.8rem;
+
+        .btn {
+            border-radius: 6px;
+            display: inline-block;
+            font-weight: 700;
+            padding: 12px 18px;
+            text-decoration: none;
         }
-        
+
+        .btn-primary {
+            background: #155eef;
+            color: #ffffff;
+        }
+
+        .btn-secondary {
+            background: #ffffff;
+            border: 1px solid #b7c4da;
+            color: #172033;
+        }
+
+        .grid {
+            display: grid;
+            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            margin-bottom: 24px;
+        }
+
+        .card {
+            background: #ffffff;
+            border: 1px solid #d9e2f2;
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(16, 24, 40, 0.06);
+            padding: 24px;
+        }
+
+        .card h2 {
+            color: #101828;
+            font-size: 1.35rem;
+            margin-bottom: 12px;
+        }
+
+        .card p {
+            color: #475467;
+            margin-bottom: 12px;
+        }
+
         .feature-list {
             list-style: none;
-            margin: 1rem 0;
+            margin-top: 14px;
         }
-        
+
         .feature-list li {
-            margin: 0.5rem 0;
-            padding-left: 1.5rem;
+            margin: 8px 0;
+            padding-left: 18px;
             position: relative;
         }
-        
+
         .feature-list li::before {
-            content: "✨";
-            position: absolute;
+            color: #155eef;
+            content: "-";
+            font-weight: 700;
             left: 0;
-            top: 0;
+            position: absolute;
         }
-        
-        .highlight {
-            background: #3b82f6;
-            padding: 0.2rem 0.5rem;
-            border-radius: 5px;
-            font-weight: 600;
-            color: white;
+
+        .pipeline {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            margin-top: 16px;
         }
-        
-        .cta-section {
-            text-align: center;
-            background: white;
-            border-left: 4px solid #3b82f6;
-            border-radius: 15px;
-            padding: 2rem;
-            margin: 2rem 0;
-            box-shadow: 0 4px 15px rgba(59, 130, 246, 0.1);
-        }
-        
-        .cta-buttons {
-            display: flex;
-            justify-content: center;
-            gap: 1rem;
-            flex-wrap: wrap;
-            margin-top: 1.5rem;
-        }
-        
-        .btn {
-            padding: 0.8rem 2rem;
-            border: none;
-            border-radius: 25px;
-            font-size: 1rem;
-            font-weight: 600;
-            text-decoration: none;
-            display: inline-block;
-            transition: all 0.3s ease;
-            cursor: pointer;
-        }
-        
-        .btn-primary {
-            background: #1e40af;
-            color: white;
-            box-shadow: 0 4px 15px rgba(30, 64, 175, 0.4);
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
-        }
-        
-        .btn-secondary {
-            background: rgba(255,255,255,0.8);
-            color: #2c3e50;
-            border: 2px solid #667eea;
-        }
-        
-        .btn-secondary:hover {
-            background: #667eea;
-            color: white;
-            transform: translateY(-2px);
-        }
-        
-        .comparison-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 1rem 0;
-            background: white;
-            border-radius: 10px;
-            overflow: hidden;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        }
-        
-        .comparison-table th {
-            background: #2563eb;
-            color: white;
-            padding: 1rem;
-            text-align: left;
-            font-weight: 600;
-        }
-        
-        .comparison-table td {
-            padding: 0.8rem 1rem;
-            border-bottom: 1px solid #eee;
-        }
-        
-        .comparison-table tr:nth-child(even) {
-            background: #f8f9fa;
-        }
-        
-        .winner {
-            background: #f0f9ff !important;
-            font-weight: 600;
-            color: #1e40af;
-        }
-        
-        .comparison-table tr:nth-child(even) .winner {
-            background: #dbeafe !important;
-        }
-        
-        .footer {
-            text-align: center;
-            color: #1e40af;
-            padding: 2rem;
+
+        .pipeline-step {
             background: #eff6ff;
-            border-radius: 15px;
-            margin: 2rem 0;
-            border: 1px solid rgba(59, 130, 246, 0.1);
+            border: 1px solid #bfdbfe;
+            border-radius: 6px;
+            color: #1e3a8a;
+            font-weight: 700;
+            padding: 14px;
+            text-align: center;
         }
-        
-        @media (max-width: 768px) {
-            .header h1 {
-                font-size: 2rem;
+
+        .video-frame {
+            border: 0;
+            border-radius: 8px;
+            box-shadow: 0 10px 26px rgba(16, 24, 40, 0.18);
+            height: 100%;
+            left: 0;
+            position: absolute;
+            top: 0;
+            width: 100%;
+        }
+
+        .video-wrap {
+            height: 0;
+            margin-top: 16px;
+            overflow: hidden;
+            padding-bottom: 56.25%;
+            position: relative;
+        }
+
+        .requirements {
+            display: grid;
+            gap: 12px;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            margin-top: 12px;
+        }
+
+        .requirement {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 12px;
+        }
+
+        footer {
+            color: #667085;
+            font-size: 0.95rem;
+            padding: 24px 0 8px;
+            text-align: center;
+        }
+
+        @media (max-width: 720px) {
+            .container {
+                padding: 16px;
             }
-            
-            .content-grid {
-                grid-template-columns: 1fr;
+
+            .hero {
+                padding: 28px;
             }
-            
-            .cta-buttons {
-                flex-direction: column;
-                align-items: center;
+
+            h1 {
+                font-size: 2.1rem;
             }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header class="header">
-            <div class="hero-badge">🚀 World's First AI-OCR Game Translator</div>
+    <main class="container">
+        <section class="hero">
+            <div class="eyebrow">Real-time screen OCR translation</div>
             <h1>Game-Changing Translator</h1>
-            <p class="subtitle">Revolutionary AI-powered real-time screen translation with premium OCR at budget prices</p>
-            <p style="font-size: 0.95rem; margin-top: 0.8rem; opacity: 0.9; display: flex; align-items: center; justify-content: center; gap: 10px; background: rgba(30, 64, 175, 0.05); padding: 8px; border-radius: 10px; border: 1px dashed rgba(30, 64, 175, 0.2);">
-                Check out my other professional tool: 
-                <a href="https://github.com/tomkam1702/OHLC-Forge"><img src="https://raw.githubusercontent.com/tomkam1702/OHLC-Forge/main/images/OHLC_Forge_Logo.png" alt="OHLC Forge Logo" style="height: 24px; width: auto;"></a>
-                <a href="https://github.com/tomkam1702/OHLC-Forge" style="color: #1e40af; text-decoration: underline; font-weight: 600;">OHLC Forge (Crypto Data Tool)</a>
+            <p class="subtitle">
+                A Windows desktop app for translating text that cannot be copied directly. Select a screen region, run PaddleOCR or Custom AI OCR, translate through OpenAI-compatible Custom AI profiles, and display the result in a floating overlay.
             </p>
-        </header>
-
-        <div class="content-grid">
-            <div class="card">
-                <h2><span class="icon">🌍</span>Versatile Translation Options</h2>
-                <p>Supporting both <span class="highlight">premium API services</span> and <span class="highlight">offline neural translation</span>.</p>
-                <ul class="feature-list">
-                    <li><strong>Gemini API:</strong> Multiple AI models with context awareness - <span class="highlight">Gemini 3.1 Flash-Lite and Gemini 3 Flash recommended</span> for most idiomatic and natural translations <span class="highlight">at incredibly low cost</span> (translate entire games for under $10!)</li>
-                    <li><strong>OpenAI API:</strong> Powerful language models including GPT-5 Nano, GPT-4.1 Mini, and GPT-4.1 Nano - offering <span class="highlight">flexible high-quality translation</span> with advanced context understanding</li>
-                    <li><strong>DeepL API:</strong> Premium quality with <span class="highlight">revolutionary context-aware translation</span> 🎯 - intelligently remembers up to 3 previous subtitles for dramatically improved grammar and natural flow (context is <span class="highlight">completely FREE!</span> 🎁 doesn't count towards usage limits) with comprehensive usage tracking</li>
-                    <li><strong>Google Translate:</strong> Broad language support</li>
-                    <li><strong>MarianMT:</strong> Free offline neural translation with intelligent sentence splitting</li>
-                </ul>
+            <div class="hero-actions">
+                <a class="btn btn-primary" href="https://github.com/yun-666-666/OCR-Translator">View on GitHub</a>
+                <a class="btn btn-secondary" href="docs/user-manual.html">User Manual</a>
+                <a class="btn btn-secondary" href="docs/installation.html">Installation Guide</a>
             </div>
+        </section>
 
-            <div class="card">
-                <h2><span class="icon">🤖</span>Revolutionary AI OCR</h2>
-                <p><strong>Industry First:</strong> While competitors use traditional OCR engines, we integrate <span class="highlight">advanced AI OCR technology</span> for dramatically superior text recognition.</p>
+        <section class="grid">
+            <article class="card">
+                <h2>Current Runtime Path</h2>
+                <p>The active app is focused on PaddleOCR for local recognition and Custom AI profiles for translation and optional cloud OCR.</p>
                 <ul class="feature-list">
-                    <li><strong>Gemini AI OCR:</strong> Handles <strong>stylised fonts</strong> and <strong>low-contrast text</strong> that breaks traditional OCR - <span class="highlight">12.5x cheaper</span> than Google Cloud Vision API (~$0.00012 per screenshot)</li>
-                    <li><strong>OpenAI Vision OCR:</strong> Advanced vision-capable models (GPT-5 Nano, GPT-4.1 Mini, GPT-4.1 Nano) providing <span class="highlight">high-quality text recognition</span> with excellent accuracy on challenging gaming content</li>
-		    <li>Multiple AI models available: speed-optimized vs quality-optimized options</li>
-                    <li>Free offline <strong>Tesseract</strong> engine available as an option</li>
+                    <li>PaddleOCR is the supported local OCR backend.</li>
+                    <li>Custom AI profiles target OpenAI-compatible endpoints.</li>
+                    <li>Legacy local OCR runtime support has been removed.</li>
+                    <li>Older provider modules remain only for compatibility and history.</li>
                 </ul>
-                <div style="background: #f0f8ff; padding: 1rem; border-radius: 8px; margin-top: 1rem;">
-                    <strong>Example:</strong><br>
-                    <em>Traditional OCR:</em> "~ Trust me, OD tite WE loca mS"<br>
-                    <em>Our AI OCR:</em> "Trust me, Oakmonters know a newcomer when they see one."
+            </article>
+
+            <article class="card">
+                <h2>Translation Workflow</h2>
+                <p>The app keeps the capture, OCR, translation, cache, and overlay stages separate so each step can be tuned without changing the whole pipeline.</p>
+                <div class="pipeline">
+                    <div class="pipeline-step">Capture</div>
+                    <div class="pipeline-step">OCR</div>
+                    <div class="pipeline-step">Translate</div>
+                    <div class="pipeline-step">Cache</div>
+                    <div class="pipeline-step">Overlay</div>
                 </div>
-            </div>
+            </article>
 
-            <div class="card">
-                <h2><span class="icon">🧠</span>Context-Aware Intelligence</h2>
-                <p>Advanced <span class="highlight">sliding context window</span> (0-5 previous subtitles) ensures narrative coherence and superior translation quality.</p>
+            <article class="card">
+                <h2>Local OCR Controls</h2>
+                <p>PaddleOCR settings are exposed in the UI so users can balance speed and accuracy for subtitles, PDFs, games, and other screen content.</p>
                 <ul class="feature-list">
-                    <li>Character name consistency across dialogue</li>
-                    <li>Improved grammar flow and narrative understanding</li>
-                    <li>Especially powerful for Asian languages</li>
-                    <li>Configurable context depth for different content types</li>
+                    <li>Language, OCR version, model size, and CPU/GPU device settings.</li>
+                    <li>Minimum score and detection limit controls for noisy regions.</li>
+                    <li>Preview support for checking whether the selected area is clean.</li>
                 </ul>
-            </div>
+            </article>
 
-            <div class="card">
-                <h2><span class="icon">📊</span>Comprehensive Cost Monitoring</h2>
-                <p>Industry-leading <span class="highlight">API usage analytics</span> with real-time cost tracking and detailed logging.</p>
+            <article class="card">
+                <h2>Custom AI Profiles</h2>
+                <p>Custom AI profiles are the main way to connect translation and cloud OCR providers without hard-coding one vendor into the app.</p>
                 <ul class="feature-list">
-                    <li>Token-level cost analysis and cumulative tracking</li>
-                    <li>Export statistics in CSV/TXT formats</li>
-                    <li>Per-word, per-minute, per-hour cost breakdowns</li>
-                    <li>DeepL free quota monitoring (500K chars/month)</li>
+                    <li>OpenAI-compatible chat completion endpoints.</li>
+                    <li>Per-profile model, key, URL, and prompt configuration.</li>
+                    <li>Image payload options for Custom AI OCR: WebP, PNG, and JPEG.</li>
                 </ul>
-            </div>
+            </article>
 
-            <div class="card">
-                <h2><span class="icon">⚡</span>Performance Excellence</h2>
-                <p>Sophisticated <span class="highlight">unified caching system</span> and optimization features unmatched by competitors.</p>
+            <article class="card">
+                <h2>Built For Long Sessions</h2>
+                <p>The runtime includes queueing, stale-result handling, caching, and graceful shutdown so the overlay stays useful during repeated capture cycles.</p>
                 <ul class="feature-list">
-                    <li><strong>40-60% memory reduction</strong> from unified cache architecture</li>
-                    <li>Thread-safe two-tier caching (memory + file)</li>
-                    <li>Adaptive OCR preprocessing with configurable parameters</li>
-                    <li>Real-time OCR preview window for fine-tuning</li>
+                    <li>Unified translation cache for repeated text.</li>
+                    <li>Async OCR and translation worker threads.</li>
+                    <li>Settings and overlay geometry saved on shutdown.</li>
                 </ul>
-            </div>
+            </article>
 
-            <div class="card">
-                <h2><span class="icon">🎯</span>User-Friendly Excellence</h2>
-                <p>Ready-to-use with <span class="highlight">simple installation</span> - no complex Conda environments or CUDA requirements.</p>
+            <article class="card">
+                <h2>Common Uses</h2>
+                <p>Use it anywhere text is visible but not selectable.</p>
                 <ul class="feature-list">
-                    <li>One-click installer with compiled executable</li>
-                    <li>Multi-language UI (English/Polish) with full localization</li>
-                    <li>Comprehensive user manual and gallery</li>
-                    <li>Extensive troubleshooting and support documentation</li>
+                    <li>Games and visual novels with subtitle regions.</li>
+                    <li>Videos, streams, screenshots, and image-heavy documents.</li>
+                    <li>PDFs or apps that block normal copy and paste.</li>
                 </ul>
+            </article>
+        </section>
+
+        <section class="card">
+            <h2>Demo</h2>
+            <p>This demo shows the app translating game subtitles with a floating overlay.</p>
+            <div class="video-wrap">
+                <iframe
+                    class="video-frame"
+                    src="https://www.youtube.com/embed/0bMoL1pR7tM"
+                    allowfullscreen
+                    title="Game-Changing Translator demo">
+                </iframe>
             </div>
-        </div>
+        </section>
 
-        <div class="card">
-            <h2><span class="icon">🎬</span>Watch It In Action - Game Demonstrations</h2>
-            
-            <!-- Main Featured Video -->
-            <div style="text-align: center; margin: 1.5rem 0;">
-                <div style="position: relative; width: 100%; height: 0; padding-bottom: 56.25%; border-radius: 15px; overflow: hidden; box-shadow: 0 12px 40px rgba(0,0,0,0.3);">
-                    <iframe 
-                        src="https://www.youtube.com/embed/0bMoL1pR7tM" 
-                        style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;"
-                        allowfullscreen
-                        title="Game-Changing Translator Demo - The Witcher Real-Time Translation">
-                    </iframe>
-                </div>
-                <p style="text-align: center; font-weight: 600; color: #1e40af; margin-top: 1rem;">🧙‍♂️ <strong>The Witcher 3:</strong> Watch our revolutionary AI OCR translate challenging subtitles in real-time!</p>
+        <section class="card" style="margin-top: 24px;">
+            <h2>System Requirements</h2>
+            <div class="requirements">
+                <div class="requirement">Windows 10 or Windows 11</div>
+                <div class="requirement">Python 3.9-3.12 for source runs</div>
+                <div class="requirement">No separate OCR engine install for bundled builds</div>
+                <div class="requirement">API key required for online Custom AI translation</div>
             </div>
+        </section>
 
-            <!-- Additional Game Videos Grid -->
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; margin: 2rem 0;">
-                <div style="text-align: center;">
-                    <div style="position: relative; width: 100%; height: 0; padding-bottom: 56.25%; border-radius: 10px; overflow: hidden; box-shadow: 0 8px 20px rgba(0,0,0,0.2);">
-                        <iframe 
-                            src="https://www.youtube.com/embed/Iy4bIr06Ae4" 
-                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;"
-                            allowfullscreen
-                            title="Kingdom Come: Deliverance II Real-Time Translation Demo">
-                        </iframe>
-                    </div>
-                    <p style="font-weight: 600; color: #1e40af; margin-top: 0.8rem;">⚔️ <strong>Kingdom Come: Deliverance II</strong></p>
-                    <p style="font-size: 0.9rem; color: #666; margin-top: 0.2rem;">Czech to English Translation</p>
-                </div>
-                
-                <div style="text-align: center;">
-                    <div style="position: relative; width: 100%; height: 0; padding-bottom: 56.25%; border-radius: 10px; overflow: hidden; box-shadow: 0 8px 20px rgba(0,0,0,0.2);">
-                        <iframe 
-                            src="https://www.youtube.com/embed/rCsfY6Zsmps" 
-                            style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; border: 0;"
-                            allowfullscreen
-                            title="Star Wars: The Old Republic Real-Time Translation Demo">
-                        </iframe>
-                    </div>
-                    <p style="font-weight: 600; color: #1e40af; margin-top: 0.8rem;">🌌 <strong>Star Wars: The Old Republic</strong></p>
-                    <p style="font-size: 0.9rem; color: #666; margin-top: 0.2rem;">French to English Translation</p>
-                </div>
-            </div>
-
-            <div style="background: #f0f8ff; padding: 1.5rem; border-radius: 10px; margin: 1.5rem 0;">
-                <h3 style="color: #1e40af; margin-bottom: 1rem; text-align: center;">🚀 What These Demos Showcase:</h3>
-                <ul style="list-style: none; margin: 0; padding: 0;">
-                    <li style="margin: 0.5rem 0; padding-left: 1.5rem; position: relative;">
-                        <span style="position: absolute; left: 0;">✨</span>
-                        <strong>Advanced AI OCR Technology</strong> (Gemini AI & OpenAI Vision) handling complex backgrounds and stylised fonts that break traditional OCR engines
-                    </li>
-                    <li style="margin: 0.5rem 0; padding-left: 1.5rem; position: relative;">
-                        <span style="position: absolute; left: 0;">🧠</span>
-                        <strong>Context-aware translation</strong> maintaining narrative coherence across different game dialogues
-                    </li>
-                    <li style="margin: 0.5rem 0; padding-left: 1.5rem; position: relative;">
-                        <span style="position: absolute; left: 0;">⚡</span>
-                        <strong>Real-time performance</strong> with floating overlays that work seamlessly over any game interface
-                    </li>
-                    <li style="margin: 0.5rem 0; padding-left: 1.5rem; position: relative;">
-                        <span style="position: absolute; left: 0;">🎯</span>
-                        <strong>Superior accuracy</strong> where competitors fail on challenging subtitle scenarios
-                    </li>
-                    <li style="margin: 0.5rem 0; padding-left: 1.5rem; position: relative;">
-                        <span style="position: absolute; left: 0;">🌍</span>
-                        <strong>Multi-language support</strong> demonstrating various language pairs in gaming contexts
-                    </li>
-                </ul>
-            </div>
-        </div>
-
-        <div class="cta-section">
-            <h2>🎮 Perfect for Gamers & Language Learners</h2>
-            <p>Whether you're playing games with foreign subtitles, learning languages through entertainment, or translating any screen content - our revolutionary AI OCR delivers accuracy that traditional tools can't match.</p>
-            
-            <div class="cta-buttons">
-                <a href="https://github.com/tomkam1702/OCR-Translator/releases" class="btn btn-primary">
-                    📥 Download Now (Free)
-                </a>
-                <a href="https://tomkam1702.github.io/OCR-Translator/docs/user-manual.html" class="btn btn-secondary">
-                    📖 User Manual
-                </a>
-                <a href="https://tomkam1702.github.io/OCR-Translator/docs/gallery.html" class="btn btn-secondary">
-                    🖼️ Gallery
-                </a>
-                <a href="https://github.com/tomkam1702/OCR-Translator" class="btn btn-secondary">
-                    ⭐ Star on GitHub
-                </a>
-                <a href="https://github.com/tomkam1702/OCR-Translator" class="btn btn-secondary">
-                    👁️ View on GitHub
-                </a>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2><span class="icon">🏆</span>Competitive Advantage</h2>
-            <table class="comparison-table">
-                <thead>
-                    <tr>
-                        <th>Feature</th>
-                        <th>Game-Changing Translator</th>
-                        <th>Competitors</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>Translation Options</strong></td>
-                        <td class="winner">Multiple premium engines: Gemini AI (multiple models), OpenAI (GPT-5 Nano, GPT-4.1 Mini/Nano), DeepL, Google Translate, MarianMT offline</td>
-                        <td>Limited engines, often single provider dependency</td>
-                    </tr>
-                    <tr>
-                        <td><strong>OCR Technology</strong></td>
-                        <td class="winner">Revolutionary AI OCR: Gemini AI & OpenAI Vision models<br>Tesseract offline option also available</td>
-                        <td>Traditional OCR (Tesseract, EasyOCR, WindowsOCR)</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Setup Complexity</strong></td>
-                        <td class="winner">One-click installer</td>
-                        <td>Complex Conda/CUDA setup required</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Cost Monitoring</strong></td>
-                        <td class="winner">Real-time token-level tracking</td>
-                        <td>Basic or no cost tracking</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Context Awareness</strong></td>
-                        <td class="winner">Advanced 0-5 subtitle sliding window</td>
-                        <td>Limited or no context support</td>
-                    </tr>
-                    <tr>
-                        <td><strong>OCR Error Correction</strong></td>
-                        <td class="winner">AI-powered automatic correction</td>
-                        <td>Manual correction or none</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Offline Translation</strong></td>
-                        <td class="winner">MarianMT with intelligent splitting</td>
-                        <td>Basic or no offline support</td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <div class="card" style="margin-top: 2rem;">
-            <h2><span class="icon">⚙️</span>System Requirements</h2>
-            <p><strong>Minimal Requirements:</strong></p>
+        <section class="card" style="margin-top: 24px;">
+            <h2>Quick Start</h2>
             <ul class="feature-list">
-                <li>Windows 10/11 (any edition)</li>
-                <li>Tesseract OCR (free download)</li>
-                <li>No CUDA/GPU requirements</li>
-                <li>No complex Python environments needed</li>
+                <li>Launch the app and select the OCR source area.</li>
+                <li>Select the translation overlay area.</li>
+                <li>Choose PaddleOCR or configure a Custom AI OCR profile.</li>
+                <li>Configure a Custom AI translation profile.</li>
+                <li>Start translation and use the hotkey to pause or resume.</li>
             </ul>
-            <p style="margin-top: 1rem;"><strong>Quick Start:</strong> Download → Install → Select areas → Start translating!</p>
-        </div>
+        </section>
 
-        <footer class="footer">
-            <p>© 2025 Tomasz Kamiński | Licensed under GNU GPL v3 | Made with ❤️ and <a href="https://claude.ai/" style="color: #1e40af; text-decoration: underline; font-weight: 600;">built with Claude</a> for gamers and language learners worldwide</p>
-            <p style="margin-top: 0.5rem; opacity: 0.7;">🌟 If this tool helps you, please star it on GitHub to support development!</p>
-            <div style="margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid rgba(30, 64, 175, 0.1); display: flex; align-items: center; justify-content: center; gap: 10px; opacity: 0.8;">
-                <a href="https://github.com/tomkam1702/OHLC-Forge"><img src="https://raw.githubusercontent.com/tomkam1702/OHLC-Forge/main/images/OHLC_Forge_Logo.png" alt="OHLC Forge Logo" style="height: 60px; width: auto; margin-right: 15px;"></a>
-                <span style="font-size: 0.85rem;">Interested in crypto? Check out my other project: <a href="https://github.com/tomkam1702/OHLC-Forge" style="color: #1e40af; text-decoration: underline; font-weight: 600;">OHLC Forge</a></span>
-            </div>
+        <footer>
+            <p>Copyright 2025-2026 Tomasz Kaminski. Licensed under GNU GPL v3.</p>
+            <p>Modified with assistance from GPT-5.5. Attribution to the original author is required; see <a href="ATTRIBUTION.md">ATTRIBUTION.md</a>.</p>
         </footer>
-    </div>
+    </main>
 </body>
 </html>

@@ -3,7 +3,50 @@ from tkinter import ttk
 from logger import log_debug
 from modern_ui import style_tk_canvas
 
-def create_scrollable_tab(notebook, tab_name):
+
+_WHEEL_INPUT_WIDGET_CLASSES = frozenset({
+    "TCombobox",
+    "TSpinbox",
+    "Spinbox",
+    "TEntry",
+    "Entry",
+    "TScale",
+    "Scale",
+})
+
+
+def _mousewheel_scroll_units(event):
+    """Normalize Windows/macOS and X11 wheel events to canvas units."""
+    button_number = getattr(event, "num", None)
+    if button_number == 4:
+        return -1
+    if button_number == 5:
+        return 1
+
+    delta = int(getattr(event, "delta", 0) or 0)
+    if delta == 0:
+        return 0
+    steps = max(1, abs(delta) // 120)
+    return -steps if delta > 0 else steps
+
+
+def _bind_wheel_input_guards(root_widget, handler):
+    """Bind wheel routing before ttk class bindings on input descendants."""
+    stack = list(root_widget.winfo_children())
+    while stack:
+        widget = stack.pop()
+        stack.extend(widget.winfo_children())
+        if widget.winfo_class() not in _WHEEL_INPUT_WIDGET_CLASSES:
+            continue
+        if getattr(widget, "_scroll_wheel_guard_installed", False):
+            continue
+        widget.bind("<MouseWheel>", handler, add="+")
+        widget.bind("<Button-4>", handler, add="+")
+        widget.bind("<Button-5>", handler, add="+")
+        widget._scroll_wheel_guard_installed = True
+
+
+def create_scrollable_tab(notebook, tab_name, protect_wheel_inputs=False):
     """Create a scrollable tab with conditional scrollbar visibility"""
     # Create the tab frame
     tab = ttk.Frame(notebook)
@@ -61,13 +104,48 @@ def create_scrollable_tab(notebook, tab_name):
             # Widget might be destroyed, ignore
             pass
     
-    # Bind to content frame changes
-    content_frame.bind('<Configure>', lambda e: update_scrollbar())
-    
     # Mouse wheel scrolling
+    def _scroll_for_event(event):
+        units = _mousewheel_scroll_units(event)
+        if units and scrollbar.winfo_ismapped():
+            canvas.yview_scroll(units, "units")
+
     def _on_mousewheel(event):
-        if scrollbar.winfo_ismapped():  # Only scroll if scrollbar is visible
-            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        _scroll_for_event(event)
+
+    def _on_guarded_input_wheel(event):
+        _scroll_for_event(event)
+        return "break"
+
+    input_guard_install_scheduled = False
+
+    def schedule_input_wheel_guard():
+        nonlocal input_guard_install_scheduled
+        if not protect_wheel_inputs or input_guard_install_scheduled:
+            return
+        input_guard_install_scheduled = True
+
+        def install_input_wheel_guard():
+            nonlocal input_guard_install_scheduled
+            input_guard_install_scheduled = False
+            try:
+                if content_frame.winfo_exists():
+                    _bind_wheel_input_guards(
+                        content_frame,
+                        _on_guarded_input_wheel,
+                    )
+            except tk.TclError:
+                pass
+
+        canvas.after_idle(install_input_wheel_guard)
+
+    # Re-scan after layout changes so inputs created later receive the same
+    # Settings-page wheel behavior without duplicate callbacks.
+    def _on_content_configure(event):
+        update_scrollbar()
+        schedule_input_wheel_guard()
+
+    content_frame.bind('<Configure>', _on_content_configure)
     
     # Bind Enter/Leave to manage mousewheel event to avoid scroll conflicts
     def _on_enter(event):
@@ -88,14 +166,17 @@ def create_scrollable_tab(notebook, tab_name):
     
     # Schedule initial scrollbar check after everything is set up
     canvas.after(100, update_scrollbar)
+    schedule_input_wheel_guard()
     
     # Return the content frame where widgets should be placed
     return content_frame
 
 class ResizableMovableFrame(tk.Toplevel):
     """A simple movable and resizable Toplevel window without decorations."""
-    def __init__(self, parent, initial_geometry, bg_color, title="Movable Window"):
+    def __init__(self, parent, initial_geometry, bg_color, title="Movable Window", start_hidden=False):
         super().__init__(parent)
+        if start_hidden:
+            self.withdraw()
         self.overrideredirect(True)  # No window decorations (title bar, borders)
 
         # Set initial geometry
@@ -189,11 +270,28 @@ class ResizableMovableFrame(tk.Toplevel):
         self._resize_start_height = 0
         self._resize_direction = None
         self._resize_start_geometry = None
+        self._geometry_changed_callback = None
 
-        self.is_visible_during_ocr = True # Flag (though not actively used in capture logic now)
+        self.is_visible_during_ocr = not start_hidden # Flag (though not actively used in capture logic now)
+
+    def set_geometry_changed_callback(self, callback):
+        """Register a UI-thread callback after move/resize completes."""
+        self._geometry_changed_callback = callback
+
+    def _notify_geometry_changed(self):
+        callback = getattr(self, "_geometry_changed_callback", None)
+        if not callable(callback):
+            return
+        try:
+            callback()
+        except Exception as error:
+            log_debug(
+                "Geometry changed callback failed: "
+                f"{type(error).__name__} - {error}"
+            )
 
     def update_color(self, new_color):
-        """Updates the color of all components in the overlay with a workaround for transparency issues."""
+        """Update the color of all overlay components without changing window opacity."""
         if self.winfo_exists():
             try:
                 # Update all components
@@ -207,11 +305,7 @@ class ResizableMovableFrame(tk.Toplevel):
                                self.resize_nw, self.resize_ne, self.resize_sw, self.resize_se]:
                     widget.configure(bg=new_color)
 
-                # Force redraw by temporarily changing transparency
-                current_alpha = self.attributes("-alpha")
-                self.attributes("-alpha", max(0.01, current_alpha - 0.01))
-                self.update_idletasks()  # Force immediate UI update
-                self.after(50, lambda: self.attributes("-alpha", current_alpha))
+                self.update_idletasks()
             except tk.TclError:
                 pass  # Ignore errors if window is being destroyed
     def start_move(self, event):
@@ -223,6 +317,7 @@ class ResizableMovableFrame(tk.Toplevel):
         """Reset drag start position."""
         self._drag_start_x = 0
         self._drag_start_y = 0
+        self._notify_geometry_changed()
 
     def do_move(self, event):
         """Move window based on mouse drag."""
@@ -247,6 +342,7 @@ class ResizableMovableFrame(tk.Toplevel):
         """Reset resize state."""
         self._resize_direction = None
         self._resize_start_geometry = None
+        self._notify_geometry_changed()
 
     def do_resize_edge(self, event):
         """Resize window based on mouse drag from the active edge or corner."""

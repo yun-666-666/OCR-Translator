@@ -1,5 +1,6 @@
 """Lightweight styling helpers for the Tkinter UI."""
 
+import tkinter as tk
 from tkinter import ttk
 
 WHITE_CLEAN_PALETTE = {
@@ -26,6 +27,18 @@ def _safe_configure(widget, **kwargs):
         widget.configure(**kwargs)
     except Exception:
         pass
+
+
+def _configure_spinbox_style(style, palette):
+    style.configure(
+        "TSpinbox",
+        fieldbackground=palette["surface"],
+        foreground=palette["text"],
+        bordercolor=palette["outline"],
+        arrowcolor=palette["text_muted"],
+        arrowsize=16,
+        padding=(5, 3),
+    )
 
 
 def apply_white_clean_theme(root, palette=None):
@@ -67,6 +80,32 @@ def apply_white_clean_theme(root, palette=None):
     _configure_action_button_style(style, "ProfileSave.TButton", palette["primary"], "#1d4ed8")
     _configure_action_button_style(style, "ProfileDelete.TButton", palette["danger"], "#b91c1c")
     _configure_action_button_style(style, "ProfileTest.TButton", palette["warning"], "#b45309")
+    # Compact square refresh control for the model-list fetch action.
+    style.configure(
+        "ProfileRefresh.TButton",
+        background=palette["primary"],
+        foreground="#ffffff",
+        bordercolor=palette["primary"],
+        focuscolor="#1d4ed8",
+        padding=(0, 0),
+        relief="flat",
+        font=("Segoe UI Symbol", 13, "bold"),
+        anchor="center",
+    )
+    style.map(
+        "ProfileRefresh.TButton",
+        background=[
+            ("pressed", "#1d4ed8"),
+            ("active", "#1d4ed8"),
+            ("disabled", "#e5e7eb"),
+        ],
+        foreground=[("disabled", "#94a3b8"), ("!disabled", "#ffffff")],
+        bordercolor=[
+            ("pressed", "#1d4ed8"),
+            ("active", "#1d4ed8"),
+            ("!disabled", palette["primary"]),
+        ],
+    )
 
     style.configure("TNotebook", background=palette["window"], borderwidth=0, tabmargins=(0, 4, 0, 0))
     style.configure("TNotebook.Tab", background=palette["surface_variant"], foreground=palette["text_muted"],
@@ -77,8 +116,7 @@ def apply_white_clean_theme(root, palette=None):
 
     style.configure("TEntry", fieldbackground=palette["surface"], foreground=palette["text"],
                     bordercolor=palette["outline"], lightcolor=palette["outline"], darkcolor=palette["outline"])
-    style.configure("TSpinbox", fieldbackground=palette["surface"], foreground=palette["text"],
-                    bordercolor=palette["outline"], arrowcolor=palette["text_muted"])
+    _configure_spinbox_style(style, palette)
     style.configure("TCombobox", fieldbackground=palette["surface"], background=palette["surface"],
                     foreground=palette["text"], bordercolor=palette["outline"], arrowcolor=palette["text_muted"])
     style.map("TCombobox",
@@ -144,3 +182,118 @@ def style_selection_window(window, palette=None):
     palette = dict(WHITE_CLEAN_PALETTE if palette is None else palette)
     _safe_configure(window, bg=palette["window"])
     return palette
+
+
+class SquareIconButton(tk.Canvas):
+    """Fixed-size square icon button with optically centered glyph text."""
+
+    def __init__(
+        self,
+        master,
+        text="⟳",
+        command=None,
+        size=28,
+        background=None,
+        activebackground=None,
+        foreground="#ffffff",
+        disabledbackground="#e5e7eb",
+        disabledforeground="#94a3b8",
+        font=("Segoe UI Symbol", 14, "bold"),
+        # Many symbol-font refresh glyphs sit low in the em-box; nudge up by default.
+        text_offset_y=-1,
+        **kwargs,
+    ):
+        palette = WHITE_CLEAN_PALETTE
+        background = palette["primary"] if background is None else background
+        activebackground = "#1d4ed8" if activebackground is None else activebackground
+        super().__init__(
+            master,
+            width=int(size),
+            height=int(size),
+            highlightthickness=0,
+            bd=0,
+            bg=background,
+            cursor="hand2",
+            **kwargs,
+        )
+        self._command = command
+        self._size = int(size)
+        self._bg = background
+        self._active_bg = activebackground
+        self._fg = foreground
+        self._disabled_bg = disabledbackground
+        self._disabled_fg = disabledforeground
+        self._enabled = True
+        self._icon_id = self.create_text(
+            self._size / 2,
+            self._size / 2 + float(text_offset_y),
+            text=text,
+            fill=foreground,
+            font=font,
+            anchor="center",
+        )
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def configure(self, cnf=None, **kwargs):
+        if isinstance(cnf, str):
+            return super().configure(cnf)
+        options = {}
+        if isinstance(cnf, dict):
+            options.update(cnf)
+        options.update(kwargs)
+        if "state" in options:
+            state = str(options.pop("state")).lower()
+            self._set_enabled(state not in ("disabled", "0"))
+        if "command" in options:
+            self._command = options.pop("command")
+        if "text" in options:
+            self.itemconfigure(self._icon_id, text=options.pop("text"))
+        if options:
+            return super().configure(**options)
+        return None
+
+    config = configure
+
+    def _set_enabled(self, enabled):
+        self._enabled = bool(enabled)
+        if self._enabled:
+            super().configure(bg=self._bg, cursor="hand2")
+            self.itemconfigure(self._icon_id, fill=self._fg)
+        else:
+            super().configure(bg=self._disabled_bg, cursor="arrow")
+            self.itemconfigure(self._icon_id, fill=self._disabled_fg)
+
+    def _on_enter(self, _event=None):
+        if self._enabled:
+            super().configure(bg=self._active_bg)
+
+    def _on_leave(self, _event=None):
+        if self._enabled:
+            super().configure(bg=self._bg)
+
+    def _on_press(self, _event=None):
+        if self._enabled:
+            super().configure(bg=self._active_bg)
+
+    def _on_release(self, _event=None):
+        if not self._enabled:
+            return
+        try:
+            x = self.winfo_pointerx() - self.winfo_rootx()
+            y = self.winfo_pointery() - self.winfo_rooty()
+            inside = 0 <= x < self._size and 0 <= y < self._size
+        except Exception:
+            inside = True
+        if inside and callable(self._command):
+            self._command()
+        if self._enabled:
+            try:
+                px = self.winfo_pointerx() - self.winfo_rootx()
+                py = self.winfo_pointery() - self.winfo_rooty()
+                hovered = 0 <= px < self._size and 0 <= py < self._size
+            except Exception:
+                hovered = False
+            super().configure(bg=self._active_bg if hovered else self._bg)

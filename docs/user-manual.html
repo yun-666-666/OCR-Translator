@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
@@ -295,12 +295,12 @@
       <a href="#settings-configuration">Settings Configuration</a>
     </li>
     <li>
-      <a href="#ai-translation-and-ocr">AI-Powered Translation and OCR</a>
+      <a href="#ai-translation-and-ocr">Custom AI and Legacy AI Reference</a>
       <ul>
-        <li><a href="#gemini-ocr-premium-text-recognition">Gemini OCR - Premium Text Recognition</a></li>
-        <li><a href="#gemini-api-cost-effective-and-context-aware-translation">Gemini API - Cost-Effective and
+        <li><a href="#gemini-ocr-premium-text-recognition">Legacy Gemini OCR - Premium Text Recognition</a></li>
+        <li><a href="#gemini-api-cost-effective-and-context-aware-translation">Legacy Gemini API - Cost-Effective and
             Context-Aware Translation</a></li>
-        <li><a href="#openai-api-a-flexible-alternative">OpenAI API - A Flexible Alternative for Translation and OCR</a>
+        <li><a href="#openai-api-a-flexible-alternative">Legacy OpenAI API - A Flexible Alternative for Translation and OCR</a>
         </li>
       </ul>
     </li>
@@ -308,11 +308,11 @@
       <a href="#api-usage-monitoring">API Usage Monitoring</a>
     </li>
     <li>
-      <a href="#other-translation-methods">Other Translation Methods</a>
+      <a href="#other-translation-methods">Legacy Translation Methods</a>
       <ul>
-        <li><a href="#marianmt-offline-and-free">MarianMT (offline and free)</a></li>
-        <li><a href="#deepl-api">DeepL API</a></li>
-        <li><a href="#google-translate-api">Google Translate API</a></li>
+        <li><a href="#marianmt-offline-and-free">Legacy MarianMT (offline and free)</a></li>
+        <li><a href="#deepl-api">Legacy DeepL API</a></li>
+        <li><a href="#google-translate-api">Legacy Google Translate API</a></li>
       </ul>
     </li>
     <li>
@@ -330,14 +330,17 @@
     of your screen, performs optical character recognition (OCR), and translates the text in real-time. With its
     floating overlay windows, you can position the translation anywhere on your screen, making it perfect for
     translating games, videos, PDFs, or any application with text that you can't easily copy and paste.</p>
+  <p>The current runtime path uses local PaddleOCR or Custom AI OCR, then translates through Custom AI profiles that
+    point at OpenAI-compatible endpoints. Older Gemini, OpenAI, DeepL, Google Translate, and MarianMT sections are kept
+    as legacy reference material for forks or explicitly re-enabled code paths.</p>
   <h2 id="getting-started">Getting Started</h2>
   <h3 id="requirements">Requirements</h3>
   <p>Before using <strong>Game-Changing Translator</strong> , ensure you have:</p>
   <ul>
     <li>Windows operating system.</li>
     <li>
-      <a href="https://github.com/UB-Mannheim/tesseract/wiki">Tesseract OCR</a> installed (only required when using
-      Tesseract OCR, but recommended for standard scenarios with clear subtitles).
+      <a href="https://github.com/PaddlePaddle/PaddleOCR">PaddleOCR</a> installed (only required when using
+      PaddleOCR, but recommended for standard scenarios with clear subtitles).
     </li>
     <li>The application installed according to the <a href="installation.html">Installation Guide</a>.</li>
   </ul>
@@ -348,7 +351,7 @@
     <li>On first startup, the application loads with default settings and both source and target areas are hidden.</li>
     <li>Before starting translation, you need to:
       <ul>
-        <li>Verify the Tesseract path in the <strong>Settings</strong> tab.</li>
+        <li>Verify the PaddleOCR settings in the <strong>Settings</strong> tab.</li>
         <li>Select source and target areas.</li>
         <li>Configure your preferred translation method.</li>
       </ul>
@@ -403,35 +406,32 @@
   <p>Here you can configure:</p>
   <ol>
     <li>
-      <strong>Translation Model</strong> – Select between different translation providers (Gemini, OpenAI, MarianMT,
-      DeepL, etc.).
+      <strong>Translation Model</strong> – use Custom AI profiles for OpenAI-compatible translation endpoints.
     </li>
     <li>
-      <strong>OCR Model</strong> – Choose between <strong>Tesseract (offline)</strong>, <strong>Gemini API
-        (online)</strong>, or <strong>OpenAI API (online)</strong>.
+      <strong>OCR Model</strong> – choose between <strong>PaddleOCR (offline)</strong> or <strong>Custom AI OCR
+        (online)</strong>.
     </li>
     <li>
-      <strong>Source Language</strong> – The language to detect with OCR and translate from (DeepL and Google Translate
-      only).
+      <strong>Source Language</strong> – the OCR/translation source language for PaddleOCR or Custom AI.
     </li>
     <li>
-      <strong>Target Language</strong> – The language to translate into (DeepL and Google Translate only).
+      <strong>Target Language</strong> – the Custom AI translation target language.
     </li>
     <li>
-      <strong>API Key</strong> – For DeepL, Google Translate, Gemini, or OpenAI.
+      <strong>API Key</strong> – configured on Custom AI model profiles.
     </li>
     <li>
-      <strong>Quality</strong> – Choose between <strong>Classic</strong> (faster) or <strong>Next-gen</strong>
-      (potentially better quality) models (DeepL only).
+      <strong>Quality</strong> – legacy provider setting retained in the interface but not part of the current Custom AI path.
     </li>
     <li>
-      <strong>MarianMT Options</strong> – For offline neural translation (MarianMT-specific).
+      <strong>MarianMT Options</strong> – legacy settings retained for compatibility.
     </li>
     <li>
-      <strong>Gemini/OpenAI Options</strong> – For cost-effective AI translation with context awareness.
+      <strong>Custom AI Options</strong> – profile, latency, reasoning, OCR image format, and OpenAI-compatible endpoint settings.
     </li>
     <li>
-      <strong>Tesseract Path</strong> – Path to the Tesseract OCR executable (Tesseract only).
+      <strong>PaddleOCR Settings</strong> – Local PaddleOCR source, model, device, score, and detection settings.
     </li>
     <li>
       <strong>Scan Interval (ms)</strong> – How frequently to capture the screen.
@@ -440,23 +440,23 @@
       <strong>Clear Translation Timeout (s)</strong> – Time before clearing translations when source text disappears.
     </li>
     <li>
-      <strong>Text Stability Threshold</strong> – How many consistent readings needed before translation (Tesseract
+      <strong>Text Stability Threshold</strong> – How many consistent readings needed before translation (PaddleOCR
       only).
     </li>
     <li>
-      <strong>OCR Confidence Threshold</strong> – Minimum confidence for OCR text detection (Tesseract only).
+      <strong>PaddleOCR Minimum Score</strong> – Minimum confidence for OCR text detection (PaddleOCR only).
     </li>
     <li>
-      <strong>Image Preprocessing Mode</strong> – How to process images for OCR (Tesseract only).
+      <strong>PaddleOCR Detection Settings</strong> – How to process images for OCR (PaddleOCR only).
     </li>
     <li>
-      <strong>OCR Debugging</strong> – Option to show debug images and text in the Debugging tab (Tesseract only).
+      <strong>OCR Debugging</strong> – Option to show debug images and text in the Debugging tab (PaddleOCR only).
     </li>
     <li>
-      <strong>Preview</strong> button – Opens OCR Preview window (Tesseract only).
+      <strong>Preview</strong> button – Opens OCR Preview window (PaddleOCR only).
     </li>
     <li>
-      <strong>Remove Trailing Garbage</strong> – Option to remove text after the last punctuation mark (Tesseract only).
+      <strong>PaddleOCR Minimum Score</strong> – Filters low-score OCR detections (PaddleOCR only).
     </li>
     <li>
       <strong>Appearance Options</strong> – Colours and font sizes for overlays.
@@ -465,12 +465,12 @@
       <strong>File Caching Options</strong> – Settings to enable/disable caching for API services.
     </li>
   </ol>
-  <h3 id="ocr-preview">OCR Preview (Tesseract only)</h3>
+  <h3 id="ocr-preview">OCR Preview (PaddleOCR only)</h3>
   <p>
     <img src="screenshots/OCR_Preview_en.png" alt="OCR Preview" />
   </p>
   <p>Clicking the <strong>Preview</strong> button on the <strong>Settings</strong> tab opens a separate <strong>OCR
-      Preview</strong> window when using Tesseract OCR. This window displays:</p>
+      Preview</strong> window when using PaddleOCR. This window displays:</p>
   <ol>
     <li>
       <strong>Processed Image (1:1 scale)</strong> – The preprocessed image being used for OCR recognition.
@@ -487,7 +487,7 @@
     <img src="screenshots/Prompt_en.png" alt="Custom Prompt Tab" />
   </p>
   <p>This tab allows you to define a <strong>custom instruction</strong> that will be added to every translation
-    request sent to <strong>Gemini</strong>, <strong>OpenAI</strong>, and <strong>DeepL</strong> models. It is particularly useful for:</p>
+    request sent through <strong>Custom AI</strong> profiles. Legacy Gemini, OpenAI, and DeepL prompt paths may remain in older code or forks. It is particularly useful for:</p>
   <ol>
     <li>
       <strong>Defining Style</strong> – Instructing the AI to use a specific tone (e.g., "Use very informal language"
@@ -530,14 +530,14 @@
   <p>
     <img src="screenshots/API_Stats_en.png" alt="API Usage Tab" />
   </p>
-  <p>This tab provides comprehensive monitoring and analysis of your API usage for services like Gemini and OpenAI,
-    including:</p>
+  <p>This tab provides comprehensive monitoring and analysis of Custom AI usage, with legacy Gemini/OpenAI labels retained
+    where older logs or forks still use them, including:</p>
   <ol>
     <li>
-      <strong>Gemini/OpenAI OCR Statistics</strong> – Cost tracking and performance metrics for OCR operations.
+      <strong>Custom AI / legacy OCR statistics</strong> – Cost tracking and performance metrics for OCR operations.
     </li>
     <li>
-      <strong>Gemini/OpenAI Translation Statistics</strong> – Word counts, costs, and efficiency metrics for
+      <strong>Custom AI / legacy translation statistics</strong> – Word counts, costs, and efficiency metrics for
       translations.
     </li>
     <li>
@@ -562,7 +562,7 @@
       <strong>Original Image</strong> – The raw captured image.
     </li>
     <li>
-      <strong>Processed Image</strong> – The image after preprocessing for OCR.
+      <strong>Processed Image</strong> – The image after PaddleOCR tuning for OCR.
     </li>
     <li>
       <strong>OCR Results</strong> – Text detected by OCR.
@@ -621,25 +621,26 @@
       <p>
         <strong>Translation Model</strong>:
       </p>
-      <p>A variety of AI and traditional translation services are available:</p>
+      <p>The current runtime path uses Custom AI profiles for OpenAI-compatible translation endpoints. Legacy provider
+        settings may still appear in older configuration sections, but they are not the main active path in this fork.</p>
       <ul>
         <li>
-          <strong>Gemini models (various)</strong> – Multiple Gemini AI models. Requires API key, cost-effective AI
-          translation with context awareness.
+          <strong>Custom AI profiles</strong> – OpenAI-compatible translation endpoints with profile-specific model,
+          prompt, latency, reasoning, and structured-output settings.
         </li>
         <li>
-          <strong>OpenAI models (various)</strong> – Multiple OpenAI models (GPT-5, GPT-4.1). Provides a flexible
-          alternative for AI-powered translation.
+          <strong>Custom AI OCR</strong> – Online OCR through the selected Custom AI profile, with WebP, PNG, and JPEG
+          image payload options.
         </li>
         <li>
-          <strong>MarianMT (offline and free)</strong> – No API key needed, downloads models on first use, works
-          offline.
+          <strong>Legacy MarianMT</strong> – Retained in documentation and older code paths, but not the current main
+          translation route.
         </li>
         <li>
-          <strong>DeepL API</strong> – Requires API key, high-quality translations.
+          <strong>Legacy DeepL API</strong> – Retained for historical reference.
         </li>
         <li>
-          <strong>Google Translate API</strong> – Requires API key, supports many languages.
+          <strong>Legacy Google Translate API</strong> – Retained for historical reference.
         </li>
       </ul>
     </li>
@@ -669,41 +670,41 @@
       <p>
         <strong>OCR Model</strong>:
       </p>
-      <p>Choose between online AI-powered models and a traditional offline engine:</p>
+      <p>Choose between Custom AI OCR, local PaddleOCR, and retained legacy OCR providers:</p>
       <ul>
         <li>
-          <strong>Gemini models (various)</strong> – Premium AI-powered OCR with superior accuracy for challenging
-          subtitles. Requires API key and internet connection.
+          <strong>Custom AI OCR profiles</strong> – OpenAI-compatible online OCR with WebP, PNG, and JPEG image payload
+          options.
         </li>
         <li>
-          <strong>OpenAI models (various)</strong> - An alternative AI-powered OCR provider using models like GPT-4o,
-          offering very good quality.
+          <strong>Legacy Gemini/OpenAI OCR models</strong> – Retained for historical reference or explicitly re-enabled
+          forks.
         </li>
         <li>
-          <strong>Tesseract (offline)</strong> – Traditional OCR engine, free and works offline. Recommended for clear
+          <strong>PaddleOCR (offline)</strong> – Traditional OCR engine, free and works offline. Recommended for clear
           subtitles with good contrast.
         </li>
-        <li>When using Gemini or OpenAI OCR, you can select different models for OCR and translation operations.</li>
+        <li>When using Custom AI OCR, select the OCR profile and image format in the Custom AI settings.</li>
       </ul>
     </li>
     <li>
       <p>
-        <strong>Tesseract Path (Tesseract only)</strong>:
+        <strong>PaddleOCR Settings (PaddleOCR only)</strong>:
       </p>
       <ul>
-        <li>Should point to your Tesseract installation (e.g.,
-          <code>C:\Program Files\Tesseract-OCR\tesseract.exe</code>).
+        <li>Defaults to the local PaddleOCR source directory (for example,
+          <code>PaddleOCR-3.7.0</code>).
         </li>
         <li>Use the <strong>Browse</strong> button to locate it if needed.</li>
       </ul>
     </li>
     <li>
       <p>
-        <strong>Image Preprocessing Mode (Tesseract only)</strong>:
+        <strong>PaddleOCR Detection Settings (PaddleOCR only)</strong>:
       </p>
       <ul>
         <li>
-          <strong>None</strong> – No preprocessing, good for clear text.
+          <strong>None</strong> – No PaddleOCR tuning, good for clear text.
         </li>
         <li>
           <strong>Binary</strong> – Black and white conversion, good for high contrast text.
@@ -718,34 +719,34 @@
     </li>
     <li>
       <p>
-        <strong>Adaptive Mode (Tesseract only)</strong>:
+        <strong>PaddleOCR Detection Tuning (PaddleOCR only)</strong>:
       </p>
-      <p>When you select <strong>Adaptive</strong> preprocessing mode, the system unlocks sophisticated adaptive
+      <p>When you select <strong>Adaptive</strong> PaddleOCR tuning, the system unlocks sophisticated adaptive
         thresholding capabilities that excel in challenging visual environments. This mode is particularly valuable when
         dealing with difficult conditions such as small subtitle text overlaid on dynamic, flickering backgrounds with
         constantly changing colours and lighting.</p>
-      <p>Unlike the three standard preprocessing modes, Adaptive mode provides two adjustable parameters that allow you
+      <p>PaddleOCR detection tuning provides adjustable limit and orientation settings that allow you
         to fine-tune the OCR recognition process:</p>
       <ul>
-        <li><strong>Block Size</strong> – Controls the size of the neighbourhood area used for calculating the threshold
+        <li><strong>detection limit</strong> – Controls the size of the neighbourhood area used for calculating the threshold
           value. Larger values (e.g., 15–25) work better for text with gradual lighting changes, whilst smaller values
           (e.g., 7–13) are more effective for text with sharp contrast variations.</li>
         <li><strong>C Value</strong> – Acts as a constant subtracted from the mean threshold. Positive values make the
           thresholding more conservative (less text detected but higher accuracy), whilst negative values make it more
           aggressive (more text detected but potentially more noise).</li>
       </ul>
-      <p>This mode proves invaluable when standard preprocessing fails to produce reliable results. By experimenting
+      <p>This mode proves invaluable when standard PaddleOCR tuning fails to produce reliable results. By experimenting
         with these two parameters, you can often achieve superior OCR recognition compared to the ready-to-use modes,
         particularly in scenarios where backgrounds contain moving elements, varying illumination, or complex visual
         patterns that would otherwise interfere with text detection.</p>
-      <p>For optimal results, start with moderate values (<strong>Block Size</strong>: 11, <strong>C Value</strong>: 2)
-        and adjust based on your specific content. Increase <strong>Block Size</strong> for larger text or gradual
+      <p>For optimal results, start with moderate values (<strong>detection limit</strong>: 11, <strong>C Value</strong>: 2)
+        and adjust based on your specific content. Increase <strong>detection limit</strong> for larger text or gradual
         lighting changes, and adjust <strong>C Value</strong> to balance between capturing all text and reducing false
         positives.</p>
     </li>
     <li>
       <p>
-        <strong>OCR Confidence Threshold (Tesseract only)</strong>:
+        <strong>PaddleOCR Minimum Score (PaddleOCR only)</strong>:
       </p>
       <ul>
         <li>Higher values (e.g., 80) give fewer but more accurate results.</li>
@@ -754,7 +755,7 @@
     </li>
     <li>
       <p>
-        <strong>Text Stability Threshold (Tesseract only)</strong>:
+        <strong>Text Stability Threshold (PaddleOCR only)</strong>:
       </p>
       <ul>
         <li>How many identical OCR readings needed before translation.</li>
@@ -764,7 +765,7 @@
     </li>
     <li>
       <p>
-        <strong>OCR Debugging (Tesseract only)</strong>:
+        <strong>OCR Debugging (PaddleOCR only)</strong>:
       </p>
       <ul>
         <li>When enabled, shows captured images and OCR results in the <strong>Debugging</strong> tab.</li>
@@ -773,13 +774,12 @@
     </li>
     <li>
       <p>
-        <strong>Remove Trailing Garbage (Tesseract only)</strong>:
+        <strong>PaddleOCR Minimum Score (PaddleOCR only)</strong>:
       </p>
       <ul>
-        <li>When enabled, removes any text that appears after the last punctuation mark (period, exclamation point, or
-          question mark).</li>
-        <li>Useful for cleaning up OCR errors that often appear at the end of recognised text.</li>
-        <li>Helps improve translation quality by removing random characters or partial words.</li>
+        <li>Filters low-score PaddleOCR detections before they enter the translation pipeline.</li>
+        <li>Lower values capture more text; higher values reduce noisy OCR results.</li>
+        <li>Use OCR Preview and the Debugging tab to find a practical score for your source material.</li>
       </ul>
     </li>
   </ol>
@@ -824,8 +824,7 @@
         <strong>File Caching Options (API Translation Services Only)</strong>:
       </p>
       <ul>
-        <li>Enables saving translations to disk files to reduce API calls for Gemini, OpenAI, Google Translate, and
-          DeepL.</li>
+        <li>Enables configured persistent caching for Custom AI translations and retained legacy provider caches.</li>
         <li>The <strong>Clear File Caches</strong> button removes all cached translations stored in files.</li>
       </ul>
     </li>
@@ -859,16 +858,17 @@
     </li>
   </ol>
 
-  <h2 id="ai-translation-and-ocr">AI-Powered Translation and OCR</h2>
+  <h2 id="ai-translation-and-ocr">Custom AI and Legacy AI Reference</h2>
 
-  <p>Game-Changing Translator integrates state-of-the-art Large Language Models (LLMs) from Google (Gemini) and OpenAI
-    (GPT) to provide advanced capabilities for both OCR and translation. This gives you the choice between the highly
-    recommended, cost-effective Gemini models and the flexible, powerful alternatives from OpenAI.</p>
+  <p>The current runtime path uses Custom AI profiles backed by OpenAI-compatible endpoints for online OCR and
+    translation. The Gemini and OpenAI sections below are retained as legacy reference material for historical behavior
+    or forks that explicitly re-enable those provider paths.</p>
 
   <div class="disclaimer-note">
     <div class="disclaimer-note-icon">⚠️</div>
     <div class="disclaimer-note-content">
-      <strong>Model Deprecation Notice:</strong> Gemini 2.0 models are considered legacy as of March 2026. The
+      <strong>Legacy model note:</strong> The following Gemini recommendations apply only to the legacy Gemini path.
+      Gemini 2.0 models are considered legacy as of March 2026. The
       currently recommended combination for the best quality-to-cost ratio is <strong>Gemini 3.1 Flash-Lite (Low) for OCR</strong> and <strong>Gemini 3 Flash for translation</strong> (for premium quality) or <strong>Gemini 3.1 Flash-Lite for translation</strong> (for high efficiency).<br><br>
       <strong>Current pricing as of March 2026 (per 1 million tokens):</strong><br>
       • <strong>Gemini 3.1 Flash-Lite:</strong> $0.25 input / $1.50 output<br>
@@ -876,10 +876,10 @@
     </div>
   </div>
 
-  <h3 id="gemini-ocr-premium-text-recognition">Gemini OCR - Premium Text Recognition</h2>
+  <h3 id="gemini-ocr-premium-text-recognition">Legacy Gemini OCR - Premium Text Recognition</h2>
 
     <p>Gemini OCR represents a revolutionary advancement in text recognition technology, providing superior accuracy for
-      challenging subtitle scenarios where traditional OCR engines like Tesseract struggle. This premium feature
+      challenging subtitle scenarios where traditional OCR engines like PaddleOCR struggle. This premium feature
       leverages Google's advanced Gemini models to deliver exceptional OCR results with flexible model selection for
       optimal performance and cost efficiency.</p>
 
@@ -918,14 +918,14 @@
     <p>
       <img src="screenshots/ocr_1.png" alt="Challenging subtitle example 1" />
     </p>
-    <p><strong>Tesseract OCR Result:</strong> <code>~ Trust me, OD tite WE loca mS</code><br>
+    <p><strong>PaddleOCR Result:</strong> <code>~ Trust me, OD tite WE loca mS</code><br>
       <strong>Gemini OCR Result:</strong>
       <code>Trust me, Oakmonters know a newcomer when they see one. We locals can tell.</code>
     </p>
     <p>
       <img src="screenshots/ocr_2.png" alt="Challenging subtitle example 2" />
     </p>
-    <p><strong>Tesseract OCR Result:</strong>
+    <p><strong>PaddleOCR Result:</strong>
       <code>' Paulie: Driv: show, Tom. Next stop's Bi the motel. 7 jj ie</code><br>
       <strong>Gemini OCR Result:</strong>
       <code>Paulie: Drive before the cops show, Tom. Next stop's Bill at the motel.</code>
@@ -971,7 +971,7 @@
     <h4>Outstanding Cost-to-Quality Ratio</h4>
 
     <p>The available Gemini models deliver exceptionally fast and accurate OCR results that significantly surpass
-      Tesseract or Paddle OCR. With intelligent model selection, you can optimise the cost-to-quality ratio for your
+      PaddleOCR or Paddle OCR. With intelligent model selection, you can optimise the cost-to-quality ratio for your
       specific use case whilst maintaining superior performance compared to both free and paid OCR solutions.</p>
 
     <p><strong>Cost Comparison (using Gemini 3.1 Flash-Lite (Low) pricing):</strong></p>
@@ -995,7 +995,7 @@
         identical text displayed over several seconds.</li>
     </ul>
 
-    <h2 id="gemini-api-cost-effective-and-context-aware-translation">Gemini API - Cost-Effective and Context-Aware
+    <h2 id="gemini-api-cost-effective-and-context-aware-translation">Legacy Gemini API - Cost-Effective and Context-Aware
       Translation</h2>
 
     <p>Google's advanced Gemini models represent a breakthrough in AI translation technology, offering premium-quality
@@ -1313,7 +1313,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li>Use context window judiciously - higher settings provide better quality but increase token usage.</li>
       <li>Enable file caching for content with repeated elements.</li>
       <li>Position source areas precisely to improve OCR consistency.</li>
-      <li>Use adaptive preprocessing modes for challenging text.</li>
+      <li>Use adaptive PaddleOCR tuning settings for challenging text.</li>
       <li>Monitor the built-in cost tracker to understand usage patterns.</li>
     </ul>
 
@@ -1331,7 +1331,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         identification.</li>
     </ul>
 
-    <h3 id="openai-api-a-flexible-alternative">OpenAI API - A Flexible Alternative for Translation and OCR</h3>
+    <h3 id="openai-api-a-flexible-alternative">Legacy OpenAI API - A Flexible Alternative for Translation and OCR</h3>
     <div class="openai-note">
       <div class="openai-note-icon">💡</div>
       <div class="openai-note-content">
@@ -1387,13 +1387,13 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       translation.
     </p>
 
-    <p>Overall, OpenAI models should be considered a strong fallback or alternative if for any reason Gemini models
-      cannot be used. All OpenAI API usage can be tracked in the <strong>API Usage</strong> tab.</p>
+    <p>In the current runtime, configure OpenAI-compatible providers through Custom AI profiles. Legacy OpenAI API usage
+      can still be tracked in the <strong>API Usage</strong> tab when those paths are re-enabled.</p>
 
 
     <h2 id="api-usage-monitoring">API Usage Monitoring</h2>
-    <p>The <strong>API Usage</strong> tab provides comprehensive monitoring and cost analysis for both Gemini and OpenAI
-      API usage, helping you track expenses and optimise your API consumption for both OCR and translation services.</p>
+    <p>The <strong>API Usage</strong> tab provides comprehensive monitoring and cost analysis for Custom AI usage, while
+      older Gemini and OpenAI labels remain relevant to legacy logs and re-enabled provider paths.</p>
 
     <p>
       <img src="screenshots/API_Stats_en.png" alt="API Usage Tab" />
@@ -1401,7 +1401,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
 
     <p>This tab displays detailed statistics across several categories for each provider:</p>
 
-    <h3 id="ocr-statistics">📊 OCR Statistics (Gemini & OpenAI)</h3>
+    <h3 id="ocr-statistics">OCR Statistics (Custom AI / Legacy Gemini & OpenAI)</h3>
     <ul>
       <li><strong>Total OCR Cost</strong> – Cumulative cost of all OCR API calls.</li>
       <li><strong>Total OCR Calls</strong> – Number of OCR requests sent to the API.</li>
@@ -1409,7 +1409,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li><strong>Average Cost per Call/Minute/Hour</strong> – Cost projections for sustained usage.</li>
     </ul>
 
-    <h3 id="translation-statistics">🔄 Translation Statistics (Gemini & OpenAI)</h3>
+    <h3 id="translation-statistics">Translation Statistics (Custom AI / Legacy Gemini & OpenAI)</h3>
     <ul>
       <li><strong>Total Translation Calls</strong> – Number of translation requests sent.</li>
       <li><strong>Total Words Translated</strong> – Count of words processed through the API.</li>
@@ -1419,7 +1419,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li><strong>Total Translation Cost</strong> – Cumulative cost of all translation API calls.</li>
     </ul>
 
-    <h3 id="combined-api-statistics">💰 Combined API Statistics</h3>
+    <h3 id="combined-api-statistics">Combined API Statistics</h3>
     <ul>
       <li><strong>Total API Cost</strong> – Overall cost across all services for a provider.</li>
       <li><strong>Combined Cost per Minute/Hour</strong> – Unified cost projections.</li>
@@ -1450,13 +1450,15 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       </div>
     </div>
 
-    <h2 id="other-translation-methods">Other Translation Methods</h2>
-    <h3 id="marianmt-offline-and-free">MarianMT (offline and free)</h3>
+    <h2 id="other-translation-methods">Legacy Translation Methods</h2>
+    <p>These sections describe provider paths kept for compatibility or historical reference. The current runtime path
+      uses Custom AI profiles for OpenAI-compatible translation endpoints.</p>
+    <h3 id="marianmt-offline-and-free">Legacy MarianMT (offline and free)</h3>
     <ol>
       <li>No API key required – completely free to use.</li>
       <li>Works entirely offline once models are downloaded.</li>
       <li>Models are downloaded automatically when first used (~500MB per language pair).</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>MarianMT (offline and free)</strong> as Translation Model.</li>
           <li>Selecting a language pair from the <strong>MarianMT Model</strong> dropdown.</li>
@@ -1492,7 +1494,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       </div>
     </div>
 
-    <h3 id="deepl-api">DeepL API</h3>
+    <h3 id="deepl-api">Legacy DeepL API</h3>
     <ol>
       <li>Requires a DeepL account and API key.</li>
       <li>Offers premium-quality translations but supports fewer languages.</li>
@@ -1501,7 +1503,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         2025).</li>
       <li>DeepL usage is tracked in the <a href="#api-usage-monitoring">API Usage</a> tab for comprehensive monitoring
         alongside other API services.</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>DeepL API</strong> as Translation Model.</li>
           <li>Entering your API key in the <strong>Settings</strong> tab (DeepL-specific setting).</li>
@@ -1565,12 +1567,12 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
     <p>The cache persists between application sessions, but its practical benefit should be viewed as a helpful bonus
       rather than a major API-saving feature. The more consistent and clear the text presentation, the more likely you
       are to benefit from the caching system.</p>
-    <h3 id="google-translate-api">Google Translate API</h3>
+    <h3 id="google-translate-api">Legacy Google Translate API</h3>
     <ol>
       <li>Requires a Google Cloud account and API key.</li>
       <li>Supports the widest range of languages.</li>
       <li>Good for general purpose translation with broad language coverage.</li>
-      <li>Configure by:
+      <li>Legacy configuration was by:
         <ul>
           <li>Selecting <strong>Google Translate API</strong> as Translation Model.</li>
           <li>Entering your API key in the <strong>Settings</strong> tab (Google Translate-specific setting).</li>
@@ -1635,12 +1637,12 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       </li>
       <li>Adjust settings as needed:
         <ul>
-          <li>Try different preprocessing modes, including <strong>Adaptive mode</strong> for challenging environments.
+          <li>Try different PaddleOCR tuning settings, including PaddleOCR detection settings for challenging environments.
           </li>
-          <li>Adjust confidence and stability thresholds.</li>
+          <li>Adjust PaddleOCR minimum score and stability threshold.</li>
           <li>Verify source language is correct.</li>
-          <li>Enable <strong>Remove Trailing Garbage</strong> to clean up OCR errors.</li>
-          <li>Fine-tune <strong>Adaptive mode</strong> parameters if using challenging backgrounds.</li>
+          <li>Raise the <strong>PaddleOCR Minimum Score</strong> to filter low-confidence OCR results.</li>
+          <li>Fine-tune <strong>PaddleOCR detection tuning</strong> parameters if using challenging backgrounds.</li>
         </ul>
       </li>
       <li>Consult the <a href="troubleshooting.md">Troubleshooting Guide</a> for common issues and solutions.</li>
@@ -1651,14 +1653,14 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
     <ol>
       <li>Capture clean, high-contrast text.</li>
       <li>Select appropriate source language.</li>
-      <li>Adjust preprocessing mode to match text appearance – try <strong>Adaptive mode</strong> for difficult
+      <li>Adjust PaddleOCR tuning to match text appearance – adjust PaddleOCR detection settings for difficult
         backgrounds.</li>
       <li>Resize the capture area to frame text closely but completely.</li>
       <li>Use a larger source area for more context if OCR is struggling.</li>
-      <li>Enable <strong>Remove Trailing Garbage</strong> to clean up recognition artefacts.</li>
-      <li>Adjust the confidence threshold to balance between capturing all text (lower values) and reducing errors
+      <li>Raise the <strong>PaddleOCR Minimum Score</strong> to reduce recognition artefacts.</li>
+      <li>Adjust the PaddleOCR minimum score to balance between capturing all text (lower values) and reducing errors
         (higher values).</li>
-      <li>For small subtitles on changing backgrounds, experiment with <strong>Adaptive mode</strong>'s <strong>Block
+      <li>For small subtitles on changing backgrounds, experiment with <strong>PaddleOCR detection tuning</strong>'s <strong>detection limit
           Size</strong> and <strong>C Value</strong> parameters.</li>
     </ol>
     <h3 id="performance-optimization">Performance Optimisation</h3>
@@ -1667,7 +1669,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
       <li>Click <strong>Disable Debug Log</strong> in the <strong>Home</strong> tab.</li>
       <li>Increase <strong>Scan Interval</strong> in the <strong>Settings</strong> tab to reduce CPU usage.</li>
       <li>Disable <strong>OCR Debugging</strong> in the <strong>Settings</strong> tab.</li>
-      <li>Set the <strong>Image Preprocessing Mode</strong> to <strong>None</strong> in the <strong>Settings</strong>
+      <li>Reset PaddleOCR detection settings to their defaults in the <strong>Settings</strong>
         tab.</li>
       <li>For MarianMT:
         <ul>
@@ -1699,8 +1701,8 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
           <li>Place target overlay in a less intrusive area.</li>
           <li>Use the <strong>Clear Translation Timeout</strong> to keep translations visible as long as text is present
             on screen.</li>
-          <li>Enable <strong>Remove Trailing Garbage</strong> to clean up OCR errors common in game text.</li>
-          <li>For games with challenging subtitle backgrounds, experiment with <strong>Adaptive mode</strong> settings.
+          <li>Raise the <strong>PaddleOCR Minimum Score</strong> to reduce OCR errors common in game text.</li>
+          <li>For games with challenging subtitle backgrounds, experiment with <strong>PaddleOCR detection tuning</strong> settings.
           </li>
         </ul>
       </li>
@@ -1710,7 +1712,7 @@ CUMULATIVE TOTALS (INCLUDING THIS CALL, FROM LOG START):
         </p>
         <ul>
           <li>Capture subtitle area.</li>
-          <li>Adjust preprocessing if subtitles are embedded – <strong>Adaptive mode</strong> often works well for
+          <li>Adjust PaddleOCR tuning if subtitles are embedded – <strong>PaddleOCR detection tuning</strong> often works well for
             varying video backgrounds.</li>
           <li>For streaming content, set stability threshold lower (0–1) for faster response.</li>
         </ul>

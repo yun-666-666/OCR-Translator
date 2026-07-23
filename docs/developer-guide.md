@@ -1,8 +1,14 @@
 # Developer Guide
 
+> **ARCHIVED / LEGACY DOCUMENT** — Large parts of this guide describe removed Gemini, OpenAI, DeepL, Google Translate, and MarianMT provider modules. Treat those sections as historical only.
+>
+> **Current live path (authoritative):** PaddleOCR or Custom AI OCR → unified translation cache → Custom AI translation profiles (OpenAI-compatible endpoints) → PySide overlay display. See `tests/test_live_path_inventory.py` and `tests/test_custom_ai_startup.py` for the inventory contract.
+
 This guide provides information for developers who want to understand or modify the Game-Changing Translator application.
 
 > **IMPORTANT NOTE**: This project is considered complete. I won't be accepting pull requests, feature enhancements, or implementing new features that someone else has coded. You are welcome to fork the repository and develop it further as your own project. The code is shared under the GPL licence for others to use, update, and modify as they wish, but I consider my work on it complete and won't be actively engaged in future development.
+
+> **Current runtime note**: This fork routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local PaddleOCR or Custom AI OCR. Dedicated legacy provider modules and provider-only CSVs for Gemini, OpenAI, DeepL, and MarianMT have been removed from the live tree; remaining adapter stubs in `handlers/translation_results.py` are inert and must not be treated as a supported path.
 
 ## Architecture Overview
 
@@ -16,25 +22,20 @@ Game-Changing Translator follows a modular design with the following key compone
    - Delegates specialized tasks to handler classes
 
 2. **Handler Classes (in `handlers/` directory)**
-   - `CacheManager` - Manages translation file caching and persistence (Level 2)
    - `ConfigurationHandler` - Manages loading and saving of application settings
    - `DisplayManager` - Handles UI updates for overlays and debug information
-   - `GeminiModelsManager` - Manages Gemini model configurations from CSV file
-   - `OpenAIModelsManager` - Manages OpenAI model configurations from CSV file
    - `HotkeyHandler` - Manages keyboard shortcuts
-   - `StatisticsHandler` - API usage statistics parsing, cost monitoring, and export functionality
-   - `TranslationHandler` - Coordinates translation, OCR, and all provider systems
+   - `TranslationHandler` - Coordinates Custom AI translation/OCR and the unified cache
    - `UIInteractionHandler` - Manages UI interactions and settings
+   - *(archived)* `CacheManager`, `GeminiModelsManager`, `OpenAIModelsManager`, `StatisticsHandler` — removed from the live tree
 
-3. **LLM Translation Provider Architecture (in `handlers/` directory)**
-   - `LLMProviderBase` - Abstract base class for all LLM-based translation providers
-   - `GeminiProvider` - Gemini-specific translation implementation
-   - `OpenAIProvider` - OpenAI-specific translation implementation
+3. **Live translation path**
+   - Current translation requests are routed through `custom_ai.py` / `custom_ai_requests.py` and `TranslationHandler`
+   - *(archived)* `LLMProviderBase`, `GeminiProvider`, `OpenAIProvider` — removed; do not reintroduce without an explicit product decision
 
-4. **OCR Provider Architecture (in `handlers/` directory)** *[New Architecture]*
-   - `OCRProviderBase` - Abstract base class for all API-based OCR providers
-   - `GeminiOCRProvider` - Gemini-specific OCR implementation with Gemini-powered text recognition
-   - `OpenAIOCRProvider` - OpenAI-specific OCR implementation using GPT-enabled text recognition
+4. **Live OCR path**
+   - Local OCR via `paddle_ocr_backend.py`; API OCR via Custom AI OCR profiles
+   - *(archived)* `OCRProviderBase`, `GeminiOCRProvider`, `OpenAIOCRProvider` — removed
 
 5. **Worker Threads (`worker_threads.py`)**
    - `run_capture_thread` - Captures screenshots from selected screen areas
@@ -46,23 +47,20 @@ Game-Changing Translator follows a modular design with the following key compone
    - `ui_elements.py` - Custom UI components including the overlay windows
    - `overlay_manager.py` - Manages the creation and positioning of overlay windows
    - `language_ui.py` - Manages UI localization for multiple languages
+   - `pyside_overlay.py` - PySide6-based RTL translation overlays with native Qt RTL support
 
 7. **Specialized Modules**
-   - `marian_mt_translator.py` - Neural machine translation implementation
-   - `convert_marian.py` - HuggingFace conversion script for Tatoeba models (© 2020 The HuggingFace Team, Apache License 2.0)
-   - `unified_translation_cache.py` - Unified LRU cache system for all translation providers
-   - `ocr_utils.py` - OCR utility functions with adaptive preprocessing
+   - `unified_translation_cache.py` - Unified LRU cache system for Custom AI translation
+   - `ocr_utils.py` - Screen capture, API image encoding, OCR cache, and shared utility functions
    - `translation_utils.py` - Translation utility functions
    - `rtl_text_processor.py` - Right-to-Left text processing for tkinter widgets (fallback RTL support)
-   - `pyside_overlay.py` - PySide6-based RTL translation overlays with native Qt RTL support
-   - `language_manager.py` - Language code management and mappings for different translation services
-   - `config_manager.py` - Configuration file handling with OCR Preview geometry support
+   - `language_manager.py` - Language code management (live Custom AI lists; generic Google language CSVs reused for Custom AI)
+   - `config_manager.py` - Configuration file handling with app-data path and atomic saves
    - `resource_handler.py` - Resource path resolution for packaged applications
    - `resource_copier.py` - Resource management for compiled executables
-   - `update_checker.py` - GitHub API integration for automatic update checking
-   - `update_applier.py` - Simple update application system with batch file creation
    - `logger.py` - Logging functionality
    - `constants.py` - Application constants and language definitions
+   - *(archived)* `marian_mt_translator.py`, `convert_marian.py`, `update_checker.py`, `update_applier.py` — not part of the live path
 
 ### Data Flow
 
@@ -76,40 +74,31 @@ Data flows between stages through thread-safe queues:
 
 This design allows each stage to operate at its own pace without blocking other stages.
 
-## Code Structure
+## Code Structure (live path)
 
 ```
 ocr-translator/
-├── __init__.py                    # Package initialization
 ├── main.py                        # Application entry point
 ├── app_logic.py                   # Main application logic
-├── resource_copier.py             # Resource management for compiled executables
-├── config_manager.py              # Configuration handling
+├── config_manager.py              # Configuration handling (app-data path + atomic save)
 ├── constants.py                   # Constant definitions
+├── custom_ai.py                   # Custom AI provider facade
+├── custom_ai_profiles.py          # Profile store + credential refs
+├── custom_ai_requests.py          # HTTP request / usage parsing
+├── paddle_ocr_backend.py          # Local PaddleOCR backend
 ├── gui_builder.py                 # GUI building functions
 ├── handlers/                      # Specialized handler classes
-│   ├── __init__.py                # Package initialization
-│   ├── cache_manager.py           # Translation cache management
 │   ├── configuration_handler.py   # Settings and configuration
 │   ├── display_manager.py         # Display and UI updates
-│   ├── gemini_models_manager.py   # Gemini model configuration management
-│   ├── gemini_provider.py         # Gemini LLM translation provider
-│   ├── gemini_ocr_provider.py     # Gemini OCR provider *[NEW]*
 │   ├── hotkey_handler.py          # Keyboard shortcuts
-│   ├── llm_provider_base.py       # Abstract base class for LLM providers
-│   ├── ocr_provider_base.py       # Abstract base class for OCR providers *[NEW]*
-│   ├── openai_models_manager.py   # OpenAI model configuration management
-│   ├── openai_provider.py         # OpenAI LLM translation provider
-│   ├── openai_ocr_provider.py     # OpenAI OCR provider *[NEW]*
-│   ├── statistics_handler.py      # API usage statistics and cost monitoring
-│   ├── translation_handler.py     # Translation and OCR coordination *[REFACTORED]*
-│   ├── translation_handler_backup.py # Backup of original handler before refactoring
+│   ├── translation_handler.py     # Translation and OCR coordination
+│   ├── translation_context.py     # Context / usage helpers
+│   ├── translation_requests.py    # Live Custom AI request path
+│   ├── translation_results.py     # Short logs + archived inert legacy adapters
 │   └── ui_interaction_handler.py  # UI event handling
 ├── language_manager.py            # Language code management and mapping
 ├── language_ui.py                 # UI localization support
 ├── logger.py                      # Logging functionality
-├── marian_mt_translator.py        # Neural translation implementation
-├── convert_marian.py              # HuggingFace conversion script (© HuggingFace Team)
 ├── ocr_utils.py                   # OCR utility functions
 ├── overlay_manager.py             # Overlay window management
 ├── pyside_overlay.py              # PySide6 RTL translation overlays with native Qt support
@@ -117,54 +106,37 @@ ocr-translator/
 ├── rtl_text_processor.py          # RTL text processing for tkinter widgets
 ├── translation_utils.py           # Translation utilities
 ├── ui_elements.py                 # Custom UI components
-├── unified_translation_cache.py   # Unified LRU cache for all translation providers
-├── update_checker.py              # GitHub API integration for automatic update checking
-├── update_applier.py              # Simple update application system with batch file creation
+├── unified_translation_cache.py   # Unified LRU cache for Custom AI translation
 └── worker_threads.py              # Worker thread implementations
 ```
+
+> *(archived file-tree entries such as `marian_mt_translator.py`, `handlers/gemini_*.py`, `handlers/openai_*.py`, and provider-only CSVs are intentionally omitted — they are no longer in the live inventory.)*
 
 ### Configuration and Resource Files
 
 ```
 ocr-translator/
-├── ocr_translator_config.ini      # Application configuration file
+├── ocr_translator_config.example.ini  # Example settings (user config lives in app-data)
 └── resources/                     # Resource files directory
     ├── lang_codes.csv             # Generic language name to ISO code mappings
-    ├── google_trans_source.csv    # Source language codes for Google Translate API
-    ├── google_trans_target.csv    # Target language codes for Google Translate API
-    ├── deepl_trans_source.csv     # Source language codes for DeepL API
-    ├── deepl_trans_target.csv     # Target language codes for DeepL API
-    ├── gemini_trans_source.csv    # Source language codes for Gemini API
-    ├── gemini_trans_target.csv    # Target language codes for Gemini API
-    ├── gemini_models.csv          # Gemini model configurations (names, API names, costs, availability)
-    ├── openai_trans_source.csv    # Source language codes for OpenAI API
-    ├── openai_trans_target.csv    # Target language codes for OpenAI API
-    ├── openai_models.csv          # OpenAI model configurations (names, API names, costs, OCR availability) *[UPDATED]*
-    ├── MarianMT_select_models.csv # Available MarianMT translation models
-    ├── MarianMT_models_short_list.csv # Preferred/recommended MarianMT models
+    ├── google_trans_source.csv    # Language codes reused by Custom AI source lists
+    ├── google_trans_target.csv    # Language codes reused by Custom AI target lists
     ├── language_display_names.csv # Localized language display names
     ├── gui_eng.csv                # English UI translations
     └── gui_pol.csv                # Polish UI translations
 ```
 
-### Cache and Data Files
+### Cache and Data Files (live path)
 
 ```
 ocr-translator/
-├── deepl_cache.txt                # Cached translations from DeepL API
-├── googletrans_cache.txt          # Cached translations from Google Translate API
-├── gemini_cache.txt               # Cached translations from Gemini API
-├── openai_cache.txt               # Cached translations from OpenAI API
-├── custom_prompt.txt              # User-defined custom prompt prefix *[NEW]*
-├── Gemini_API_call_logs.txt       # Detailed Gemini API call logging with cost tracking
-├── OpenAI_API_call_logs.txt       # Detailed OpenAI API call logging with cost tracking
-├── GEMINI_API_OCR_short_log.txt   # Short log for Gemini OCR API usage statistics *[NEW]*
-├── GEMINI_API_TRA_short_log.txt   # Short log for Gemini Translation API usage statistics
-├── OpenAI_API_TRA_short_log.txt   # Short log for OpenAI Translation API usage statistics
-├── OpenAI_API_OCR_short_log.txt   # Short log for OpenAI OCR API usage statistics *[NEW]*
-├── marian_models_cache/           # Directory for cached MarianMT models
+├── custom_prompt.txt              # User-defined custom prompt prefix
+├── custom_ai_translation_cache.*  # Unified Custom AI translation cache (when enabled)
+├── CUSTOM_AI_*_short_log.txt      # Custom AI OCR/translation short logs (debug)
 └── translator_debug.log           # Application debug log file
 ```
+
+> *(archived)* Older per-provider cache/log filenames (`deepl_cache.txt`, `gemini_cache.txt`, `Gemini_API_call_logs.txt`, Marian model caches, etc.) are historical only.
 
 ### Build and Setup Files
 
@@ -189,9 +161,11 @@ ocr-translator/
 
 ## Key Features and Implementation Details
 
-### OCR Provider Architecture *[NEW MAJOR FEATURE]*
+> **ARCHIVED SECTION BELOW:** The Gemini/OpenAI OCR-provider architecture narrative is retained only as historical design notes. The live OCR path is PaddleOCR + Custom AI OCR profiles; those dedicated provider modules are not in the repository inventory.
 
-The application features a comprehensive OCR provider architecture that was introduced during a major refactoring to separate concerns and improve maintainability for API-based OCR services. This refactoring extracted OCR-specific functionality from the monolithic `TranslationHandler` into specialized provider classes, mirroring the successful LLM translation provider pattern.
+### OCR Provider Architecture *[ARCHIVED / LEGACY]*
+
+The application previously featured a dedicated OCR provider architecture that was introduced during a major refactoring to separate concerns for API-based OCR services. That design extracted OCR-specific functionality from the monolithic `TranslationHandler` into specialized provider classes.
 
 #### Architecture Overview
 
@@ -306,9 +280,9 @@ This refactoring makes it straightforward to add new OCR providers while maintai
 The application features a sophisticated two-tier caching system that was redesigned to eliminate memory waste and fix cache clearing bugs:
 
 #### Level 1: Unified In-Memory Cache (`unified_translation_cache.py`)
-- **Single LRU cache** for all translation providers (Google, DeepL, MarianMT)
+- **Single LRU cache** for Custom AI translation requests and retained legacy providers
 - **Thread-safe design** with proper RLock() mechanisms for concurrent access
-- **Smart cache key generation** using MD5 hashes and provider-specific parameters
+- **Smart cache key generation** using MD5 hashes and provider-specific parameters, including Custom AI endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, prompt, line-break mode, and context
 - **Configurable cache size** (default: 1000 entries) with automatic LRU eviction
 - **Provider-specific clearing** allows selective cache management
 
@@ -318,12 +292,9 @@ The application features a sophisticated two-tier caching system that was redesi
 - ✅ **Consistent behavior** across all translation providers
 - ✅ **Better performance** with reduced cache management overhead
 
-#### Level 2: Persistent File Cache (Existing)
-- **`deepl_cache.txt`** - DeepL API translations persisted to disk
-- **`googletrans_cache.txt`** - Google Translate API translations persisted to disk  
-- **`gemini_cache.txt`** - Gemini API translations persisted to disk
-- **`openai_cache.txt`** - OpenAI API translations persisted to disk
-- **MarianMT has no file cache** (offline model, no API costs to optimize)
+#### Level 2: Persistent Cache
+- **Configured unified cache persistence** - Current Custom AI cache persistence when enabled
+- **Legacy text cache files** - Old DeepL, Google Translate, Gemini, and OpenAI cache files may remain on disk for compatibility or migration history, but they are not the current main translation cache path
 - **Preserved compatibility** - existing user cache files remain intact
 
 #### Cache Flow:
@@ -332,11 +303,11 @@ Translation Request
     ↓
 🚀 Level 1: Check Unified In-Memory Cache (fast)
     ↓ (cache miss)
-💾 Level 2: Check File Cache (for Google/DeepL/Gemini/OpenAI only)
+💾 Level 2: Check persistent Custom AI cache when configured
     ↓ (cache miss)
 🌐 Level 3: Call Translation API/Model
     ↓
-📝 Store in BOTH Level 1 (unified) AND Level 2 (file cache)
+📝 Store in unified memory cache and configured persistence
 ```
 
 #### Previous Problems Solved:
@@ -345,9 +316,15 @@ Translation Request
 - **Memory waste**: Multiple caches storing the same translations
 - **Thread safety issues**: Inconsistent locking mechanisms across different cache implementations
 
-### LLM Provider Architecture
+### Custom AI Provider Runtime
 
-The application features a modular LLM provider architecture that was introduced to separate concerns and improve maintainability for language model-based translation services (Gemini, OpenAI). This refactoring extracted LLM-specific functionality from the monolithic `TranslationHandler` into specialized provider classes.
+The current runtime translation provider is `custom_ai.py`. `TranslationHandler` resolves the active Custom AI profile, builds cache and in-flight keys from profile ID, canonical endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, custom prompt, line-break mode, and context, then sends requests through `CustomAIProvider`.
+
+`CustomAIProvider` supports OpenAI-compatible Chat Completions and Responses APIs, optional streaming latency mode, race/adaptive latency behavior, structured-output fallback, reasoning-effort fallback, request-level timeout overrides, and Custom AI OCR payloads with WebP, PNG, or JPEG MIME metadata.
+
+### Legacy LLM Provider Architecture
+
+The application still contains a modular LLM provider architecture that was introduced to separate concerns and improve maintainability for language model-based translation services (Gemini, OpenAI). These files are retained for compatibility and reference, but they are not the active translation path in this fork unless re-enabled.
 
 #### Architecture Overview
 
@@ -430,7 +407,7 @@ def _get_active_llm_provider(self):
 #### Benefits of the New Architecture
 
 ✅ **Separation of Concerns**: Each provider focuses only on its specific implementation
-✅ **Code Reuse**: Common functionality is shared via inheritance 
+✅ **Code Reuse**: Common functionality is shared via inheritance
 ✅ **Maintainability**: Much easier to add new LLM providers or modify existing ones
 ✅ **Consistent Behavior**: All providers share identical session management, logging, and context handling
 ✅ **Backward Compatibility**: Public interface remains unchanged
@@ -455,7 +432,7 @@ The StatisticsHandler provides real-time monitoring and analysis of API usage:
 - **Real-time monitoring** of Gemini OCR and Translation API usage
 - **OpenAI OCR and Translation monitoring** (added with new OCR providers)
 - **Cost calculation** with proper currency formatting for different locales
-- **Export functionality** for statistics in CSV and TXT formats  
+- **Export functionality** for statistics in CSV and TXT formats
 - **Clipboard integration** for easy data sharing
 - **Multi-language support** with proper Polish number formatting
 
@@ -487,7 +464,7 @@ The system maintains multiple log levels for different use cases:
 - **Clipboard Copy**: Quick sharing with proper formatting for each language
 - **Automatic Currency Formatting**: Proper decimal separators and currency symbols for different locales
 
-### Gemini API Integration and Logging
+### Legacy Gemini API Integration and Logging
 
 The application features sophisticated Gemini API integration with comprehensive logging and cost tracking capabilities designed for the Gemini 3 Flash, Gemini 2.5 Flash-Lite, and other Gemini models.
 
@@ -575,7 +552,7 @@ Gemini(LANG_PAIR,timestamp):original_text:==:translated_text
 
 **Format Components:**
 - **Provider**: "Gemini" identifier
-- **Language Pair**: Source-target codes (e.g., "CS-PL", "FR-EN")  
+- **Language Pair**: Source-target codes (e.g., "CS-PL", "FR-EN")
 - **Timestamp**: Cache entry creation time
 - **Delimiter**: ":==:" separates original from translated text
 
@@ -596,7 +573,7 @@ The UpdateChecker class provides GitHub API integration for checking and downloa
 **Core Features:**
 - **GitHub API Integration** - Queries the latest release information from GitHub API
 - **Version Comparison** - Uses semantic version comparison to detect newer versions
-- **Asset Download** - Downloads the main executable installer from GitHub releases  
+- **Asset Download** - Downloads the main executable installer from GitHub releases
 - **Progress Monitoring** - Provides download progress callbacks for UI updates
 - **Staging System** - Downloads updates to a staging directory for safe application
 
@@ -666,7 +643,7 @@ Gemini 2.5 Flash-Lite,gemini-2.5-flash-lite,0.1,0.4,yes,yes,MEDIUM
 
 **Integration Points:**
 - **GUI Dropdowns**: Translation and OCR model dropdowns are populated from CSV data
-- **Cost Updates**: Token costs in configuration are updated when models change  
+- **Cost Updates**: Token costs in configuration are updated when models change
 - **API Calls**: Translation and OCR operations use the appropriate selected model
 - **Settings Persistence**: Model selections are saved to configuration file
 
@@ -711,7 +688,7 @@ GPT 4.1 Nano,gpt-4.1-nano,0.15,0.6,yes,no
 
 **Integration Points:**
 - **GUI Dropdowns**: Translation and OCR model dropdowns are populated from CSV data
-- **Cost Updates**: Token costs in configuration are updated when models change  
+- **Cost Updates**: Token costs in configuration are updated when models change
 - **API Calls**: Translation and OCR operations use the appropriate selected model with context window support
 - **Settings Persistence**: Model selections are saved to configuration file
 
@@ -915,17 +892,17 @@ To add a new API-based OCR provider (e.g., Azure Computer Vision, Google Cloud V
    ```python
    # handlers/azure_ocr_provider.py
    from .ocr_provider_base import AbstractOCRProvider
-   
+
    class AzureOCRProvider(AbstractOCRProvider):
        def __init__(self, app):
            super().__init__(app, "azure_ocr")
-       
+
        def _get_api_key(self):
            return self.app.azure_api_key_var.get().strip()
-       
+
        def _check_provider_availability(self):
            return AZURE_AVAILABLE
-       
+
        # Implement other abstract methods...
    ```
 
@@ -946,7 +923,7 @@ To add a new API-based OCR provider (e.g., Azure Computer Vision, Google Cloud V
        'openai': OpenAIOCRProvider(app),
        'azure': AzureOCRProvider(app)  # Add new provider
    }
-   
+
    # Update _get_active_ocr_provider() method
    def _get_active_ocr_provider(self):
        selected_ocr_model = self.app.ocr_model_var.get()
@@ -977,17 +954,17 @@ To add a new LLM-based translation provider (e.g., Claude, Llama):
    ```python
    # handlers/claude_provider.py
    from .llm_provider_base import AbstractLLMProvider
-   
+
    class ClaudeProvider(AbstractLLMProvider):
        def __init__(self, app):
            super().__init__(app, "claude")
-       
+
        def _get_api_key(self):
            return self.app.claude_api_key_var.get().strip()
-       
+
        def _check_provider_availability(self):
            return CLAUDE_AVAILABLE
-       
+
        # Implement other abstract methods...
    ```
 
@@ -1011,7 +988,7 @@ To add a new LLM-based translation provider (e.g., Claude, Llama):
        'openai': OpenAIProvider(app),
        'claude': ClaudeProvider(app)  # Add new provider
    }
-   
+
    # Update _get_active_llm_provider() method
    def _get_active_llm_provider(self):
        selected_model = self.app.translation_model_var.get()
@@ -1057,20 +1034,21 @@ For traditional translation services (like Google Translate, DeepL):
 
 4. **Update UI and configuration** as described above.
 
-### Adding New OCR Preprocessing Modes
+### Adding New Local OCR Tuning Controls
 
-1. Update `ocr_utils.py`:
-   - Add your preprocessing mode to the `preprocess_for_ocr` function
-   - Consider adding specialized OCR parameters for your mode
+1. Update `paddle_ocr_backend.py`:
+   - Extend `PaddleOCRSettings` and the engine/cache key when the new setting changes recognition output
+   - Normalize user-facing values before they reach the backend
 
-2. Add the mode to the UI in `gui_builder.py`:
-   - Add your mode to the preprocessing mode dropdown values
+2. Add the setting to the UI in `gui_builder.py`:
+   - Create a PaddleOCR-specific control and wire it through settings save/load
+   - Keep Custom AI OCR image request controls separate from local OCR controls
 
 ### Supporting New Languages
 
-1. Ensure Tesseract supports the language:
-   - Update language mapping in the `tesseract_to_iso` dictionary in `language_manager.py`
-   - Add language codes to `constants.py` if necessary
+1. Ensure PaddleOCR supports the language:
+   - Add or normalize the language value in PaddleOCR settings
+   - Add language codes to `constants.py` if the UI needs a new language constant
 
 2. For API-based translation services:
    - Update the appropriate language CSV files in `resources/` directory
@@ -1103,17 +1081,17 @@ The application can be packaged as a standalone executable:
    ```
 
 2. Use the appropriate spec file:
-   
+
    **For standard CPU-only builds:**
    ```
    pyinstaller GameChangingTranslator.spec
    ```
-   
+
    **For GPU/CUDA optimized builds:**
    ```
    pyinstaller GameChangingTranslator_GPU.spec
    ```
-   
+
    **Alternative compilation using batch script:**
    ```
    run_python_compiler.bat
@@ -1242,7 +1220,7 @@ When adding new functionality, be sure to:
 
 1. Test manually with different scenarios:
    - Different language pairs
-   - Various text complexities  
+   - Various text complexities
    - Different screen configurations
    - Edge cases (empty text, very long text, special characters)
 

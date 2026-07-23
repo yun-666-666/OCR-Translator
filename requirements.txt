@@ -1,12 +1,9 @@
 # Core dependencies
 numpy>=1.19.0
 opencv-python>=4.5.0
-pytesseract>=0.3.8
 Pillow>=8.0.0
-pyautogui>=0.9.53
 requests>=2.25.0
 mss>=9.0.0
-winsdk>=1.0.0; platform_system == "Windows"
 
 # GUI framework for RTL translation overlays
 # PINNED to 6.7.3 — Qt 6.8+ introduced a regression that breaks nativeEvent/WM_NCHITTEST

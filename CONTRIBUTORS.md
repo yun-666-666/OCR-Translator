@@ -1,30 +1,15 @@
-# Contributors
+# Contributors and Credits
 
-## Original Author & Maintainer
-- **Tomasz Kamiński** ([@tomkam1702](https://github.com/tomkam1702)) - Original creator and maintainer
+## Original Author
 
-## Development Support
-- **Claude 3.7 Sonnet** (Anthropic) - AI development assistant
-- **Claude Sonnet 4** (Anthropic) - AI development assistant  
-- **Gemini 2.5 Pro** (Google) - AI development assistant
+- **Tomasz Kamiński** ([@tomkam1702](https://github.com/tomkam1702)) — original creator and maintainer of [Game-Changing Translator](https://github.com/tomkam1702/OCR-Translator).
 
-## How to Contribute
+## This Modified Fork
 
-This project is considered feature-complete. If you wish to make substantial changes, please consider forking the repository.
+- **GPT** — primary AI collaborator for development work on this fork.
+- **Claude** — collaborating AI assistant for development and review.
+- **Grok** — collaborating AI assistant for development and review.
 
-### If You Fork This Project
-Please remember to:
-1. Give proper attribution to the original author (Tomasz Kamiński)
-2. Follow the requirements in [ATTRIBUTION.md](ATTRIBUTION.md)
-3. Comply with the GPL v3 license terms
-4. Update this contributors file with your own contributions
+## Contributor Guidance
 
-### Adding Your Contributions
-If you make meaningful contributions to a fork, add yourself here:
-```
-## Contributors (Forks & Modifications)
-- **Your Name** ([@yourusername](https://github.com/yourusername)) - Description of your contributions
-```
-
----
-**Remember**: This project uses GPL v3 license, which requires attribution to original authors in all derivative works.
+Contributors to this fork should add only their own, meaningful contributions and should not remove or obscure the original author credit. See [CONTRIBUTING.md](CONTRIBUTING.md), [ATTRIBUTION.md](ATTRIBUTION.md), and [LICENSE](LICENSE).

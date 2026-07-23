@@ -1,5 +1,5 @@
 Game-Changing Translator
-Copyright (C) 2025 Tomasz Kamiński
+Copyright (C) 2025-2026 Tomasz Kamiński
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -728,39 +728,31 @@ remain under their original licenses:
    Licence: Apache License 2.0 (Note: OpenCV has moved to Apache 2.0 for recent versions, though older parts might reference BSD 3-Clause. The LICENSE.txt provided used BSD 3-Clause, which is also GPL-compatible. Assuming Apache 2.0 for broader compatibility or latest versions.)
    Copyright (c) 2000-2023, Intel Corporation, et al. (see full list in original notice)
 
-3. pytesseract (https://github.com/madmaze/pytesseract)
-   Licence: Apache Licence 2.0
-   Copyright (c) 2017 Samuel Hoffstaetter
-
-4. Pillow (https://python-pillow.org/)
+3. Pillow (https://python-pillow.org/)
    Licence: HPND Licence (Historical Permission Notice and Disclaimer)
    Copyright (c) 2010-2023 by PIL Software and contributors.
 
-5. PyAutoGUI (https://github.com/asweigart/pyautogui)
-   Licence: BSD 3-Clause Licence
-   Copyright (c) 2014-2023, Al Sweigart
-
-6. Google Cloud Translate Python Client (https://cloud.google.com/translate)
+4. Google Cloud Translate Python Client (https://cloud.google.com/translate)
    Licence: Apache Licence 2.0
    Copyright (c) 2023 Google LLC
 
-7. DeepL Python Library (https://github.com/DeepLcom/deepl-python)
+5. DeepL Python Library (https://github.com/DeepLcom/deepl-python)
    Licence: MIT Licence
    Copyright (c) 2023 DeepL SE
 
-8. Transformers (https://huggingface.co/docs/transformers)
+6. Transformers (https://huggingface.co/docs/transformers)
    Licence: Apache Licence 2.0
    Copyright 2018- The Hugging Face team
 
-9. PyTorch (https://pytorch.org/)
+7. PyTorch (https://pytorch.org/)
    Licence: BSD-style License (similar to BSD 3-Clause)
    Copyright (c) Facebook, Inc. and its affiliates. (see full list in original notice)
 
-10. SentencePiece (https://github.com/google/sentencepiece)
+8. SentencePiece (https://github.com/google/sentencepiece)
     Licence: Apache Licence 2.0
     Copyright (c) 2018 Google Inc.
 
-11. keyboard (https://github.com/boppreh/keyboard)
+9. keyboard (https://github.com/boppreh/keyboard)
     Licence: MIT Licence
     Copyright (c) 2016 BoppreH
 
@@ -770,4 +762,4 @@ The combined work (Game-Changing Translator) is licensed under the GNU GPLv3.
 -------------------------------------------------------------------------------
 ACKNOWLEDGEMENT
 -------------------------------------------------------------------------------
-Game-Changing Translator was developed with the support of the following AI models: Claude 3.7 Sonnet, Claude Sonnet 4 and Gemini 2.5 Pro.
+This modified fork was developed with GPT as the primary AI collaborator, with Claude and Grok as collaborating AI assistants. The original author and original-project attribution remain retained above and in ATTRIBUTION.md.
