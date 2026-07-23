@@ -195,7 +195,9 @@ class CustomAICapabilitiesMixin:
             str(profile.get("model") or "").strip(),
         )
 
-    def _prompt_cache_key_capability_key(self, profile):
+    def _wire_endpoint_model_capability_key(self, profile):
+        # Shared key construction only; prompt-cache-key and structured-output
+        # keep separate unsupported state sets.
         profile = profile if isinstance(profile, dict) else {}
         return (
             normalize_custom_ai_wire_api(profile.get("wire_api")),
@@ -204,12 +206,12 @@ class CustomAICapabilitiesMixin:
         )
 
     def _prompt_cache_key_is_known_unsupported(self, profile):
-        capability_key = self._prompt_cache_key_capability_key(profile)
+        capability_key = self._wire_endpoint_model_capability_key(profile)
         with self._capability_lock:
             return capability_key in self._unsupported_prompt_cache_key_keys
 
     def _remember_unsupported_prompt_cache_key(self, profile):
-        capability_key = self._prompt_cache_key_capability_key(profile)
+        capability_key = self._wire_endpoint_model_capability_key(profile)
         with self._capability_lock:
             self._unsupported_prompt_cache_key_keys.add(capability_key)
 
@@ -236,14 +238,6 @@ class CustomAICapabilitiesMixin:
         except Exception:
             endpoint = base_url
         return self._base_url_cache_key(endpoint)
-
-    def _structured_output_capability_key(self, profile):
-        profile = profile if isinstance(profile, dict) else {}
-        return (
-            normalize_custom_ai_wire_api(profile.get("wire_api")),
-            self._canonical_wire_endpoint_cache_key(profile),
-            str(profile.get("model") or "").strip(),
-        )
 
     def _reasoning_effort_mode(self, profile):
         profile = profile if isinstance(profile, dict) else {}
@@ -324,12 +318,12 @@ class CustomAICapabilitiesMixin:
         return effort
 
     def _structured_output_is_known_unsupported(self, profile):
-        capability_key = self._structured_output_capability_key(profile)
+        capability_key = self._wire_endpoint_model_capability_key(profile)
         with self._capability_lock:
             return capability_key in self._unsupported_structured_output_keys
 
     def _remember_unsupported_structured_output(self, profile):
-        capability_key = self._structured_output_capability_key(profile)
+        capability_key = self._wire_endpoint_model_capability_key(profile)
         with self._capability_lock:
             self._unsupported_structured_output_keys.add(capability_key)
 
