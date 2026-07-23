@@ -355,10 +355,338 @@ class AppLifecycleMixin:
         )
         return False
 
+    def _get_paddleocr_start_wait_state(self):
+        return getattr(self, "_paddleocr_start_wait", None)
+
+    def _is_waiting_for_paddleocr_start(self):
+        wait_state = self._get_paddleocr_start_wait_state()
+        return bool(wait_state) and wait_state.get("state") == "waiting"
+
+    def _format_paddleocr_loading_status(self, waited_s):
+        seconds = max(0, int(float(waited_s or 0.0)))
+        template = self.ui_lang.get_label(
+            "status_paddleocr_loading",
+            "Status: Local OCR loading… waited {seconds}s",
+        )
+        try:
+            return template.format(seconds=seconds)
+        except Exception:
+            return f"Status: Local OCR loading… waited {seconds}s"
+
+    def _clear_paddleocr_start_wait(self, reason="cleared"):
+        wait_state = self._get_paddleocr_start_wait_state()
+        if not wait_state:
+            return
+        after_id = wait_state.get("after_id")
+        if after_id is not None and hasattr(self, "root"):
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+        self._paddleocr_start_wait = None
+
+    def _cancel_paddleocr_start_wait(self, reason="cancelled"):
+        wait_state = self._get_paddleocr_start_wait_state()
+        if not wait_state:
+            return False
+        generation = wait_state.get("generation")
+        token = wait_state.get("token")
+        wait_state["state"] = "cancelled"
+        self._clear_paddleocr_start_wait(reason=reason)
+        _log_debug(
+            "PaddleOCR start wait cancelled "
+            f"generation={generation} token={token} reason={reason}"
+        )
+        try:
+            self.start_stop_btn.config(
+                text=self.ui_lang.get_label("start_btn", "Start"),
+                state=tk.NORMAL,
+            )
+            self.status_label.config(
+                text=self.ui_lang.get_label(
+                    "status_paddleocr_loading_cancelled",
+                    "Status: Local OCR loading cancelled",
+                )
+            )
+        except Exception:
+            pass
+        self.toggle_in_progress = False
+        return True
+
+    def _fail_paddleocr_start_wait(self, reason="failed"):
+        wait_state = self._get_paddleocr_start_wait_state()
+        if not wait_state:
+            return False
+        generation = wait_state.get("generation")
+        token = wait_state.get("token")
+        wait_state["state"] = "failed"
+        self._clear_paddleocr_start_wait(reason=reason)
+        _log_debug(
+            "PaddleOCR start wait failed "
+            f"generation={generation} token={token} reason={reason}"
+        )
+        try:
+            self.start_stop_btn.config(
+                text=self.ui_lang.get_label("start_btn", "Start"),
+                state=tk.NORMAL,
+            )
+            self.status_label.config(
+                text=self.ui_lang.get_label(
+                    "status_paddleocr_loading_failed",
+                    "Status: Local OCR loading failed",
+                )
+            )
+        except Exception:
+            pass
+        self.toggle_in_progress = False
+        return True
+
+    def _begin_paddleocr_start_wait(self, settings, generation):
+        token = time.monotonic_ns()
+        wait_state = {
+            "state": "waiting",
+            "token": token,
+            "generation": int(generation or 0),
+            "settings": settings,
+            "started_monotonic": time.monotonic(),
+            "after_id": None,
+            "last_logged_second": -1,
+        }
+        self._paddleocr_start_wait = wait_state
+        _log_debug(
+            "PaddleOCR start deferred; waiting for ready "
+            f"generation={wait_state['generation']} token={token}"
+        )
+        try:
+            self.start_stop_btn.config(
+                text=self.ui_lang.get_label("stop_btn", "Stop"),
+                state=tk.NORMAL,
+            )
+            self.status_label.config(text=self._format_paddleocr_loading_status(0))
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        # Keep toggle_in_progress False so the user can cancel via Start/Stop.
+        self.toggle_in_progress = False
+        self._schedule_paddleocr_start_wait_poll(token, delay_ms=200)
+        return wait_state
+
+    def _schedule_paddleocr_start_wait_poll(self, token, delay_ms=250):
+        wait_state = self._get_paddleocr_start_wait_state()
+        if not wait_state or wait_state.get("token") != token:
+            return
+        if wait_state.get("state") != "waiting":
+            return
+        if getattr(self, "_app_is_closing", False):
+            self._clear_paddleocr_start_wait(reason="app closing")
+            return
+
+        def _poll():
+            self._poll_paddleocr_start_wait(token)
+
+        try:
+            after_id = self.root.after(max(50, int(delay_ms)), _poll)
+        except Exception as schedule_error:
+            _log_debug(
+                "PaddleOCR start wait schedule failed "
+                f"token={token}: {type(schedule_error).__name__}"
+            )
+            self._fail_paddleocr_start_wait(reason="schedule_failed")
+            return
+        wait_state["after_id"] = after_id
+
+    def _poll_paddleocr_start_wait(self, token):
+        wait_state = self._get_paddleocr_start_wait_state()
+        if not wait_state or wait_state.get("token") != token:
+            return
+        if wait_state.get("state") != "waiting":
+            return
+        if getattr(self, "_app_is_closing", False):
+            self._clear_paddleocr_start_wait(reason="app closing")
+            return
+        if self.is_running:
+            self._clear_paddleocr_start_wait(reason="already running")
+            return
+
+        waited_s = time.monotonic() - float(wait_state.get("started_monotonic") or time.monotonic())
+        try:
+            self.status_label.config(text=self._format_paddleocr_loading_status(waited_s))
+        except Exception:
+            pass
+
+        second = int(waited_s)
+        if second != wait_state.get("last_logged_second") and second % 5 == 0:
+            wait_state["last_logged_second"] = second
+            _log_debug_coalesced(
+                "paddleocr_start_wait_progress",
+                (
+                    "PaddleOCR start wait still pending "
+                    f"generation={wait_state.get('generation')} "
+                    f"token={token} waited={waited_s:.1f}s"
+                ),
+                interval_seconds=4.5,
+            )
+
+        settings = wait_state.get("settings")
+        try:
+            current_settings = None
+            getter = getattr(self, "get_current_paddleocr_settings", None)
+            if callable(getter):
+                current_settings = getter()
+        except Exception:
+            current_settings = None
+
+        if current_settings is not None and settings is not None and current_settings != settings:
+            self._fail_paddleocr_start_wait(reason="settings_changed")
+            return
+
+        metrics = {}
+        snapshot_getter = getattr(self, "get_paddleocr_prewarm_metrics_snapshot", None)
+        if callable(snapshot_getter):
+            try:
+                metrics = snapshot_getter() or {}
+            except Exception:
+                metrics = {}
+
+        status = str(metrics.get("status") or "")
+        if status == "failed":
+            self._fail_paddleocr_start_wait(reason="prewarm_failed")
+            return
+
+        ready_checker = getattr(self, "is_paddleocr_ready_for_settings", None)
+        ready = False
+        if callable(ready_checker):
+            try:
+                ready = bool(ready_checker(settings))
+            except Exception:
+                ready = False
+        elif metrics.get("ready"):
+            ready = True
+
+        if ready:
+            generation = wait_state.get("generation")
+            self._clear_paddleocr_start_wait(reason="ready")
+            _log_debug(
+                "PaddleOCR start resumed after ready "
+                f"generation={generation} token={token} waited={waited_s:.2f}s"
+            )
+            if self.toggle_in_progress or self.is_running:
+                return
+            self.toggle_in_progress = True
+            try:
+                self._start_translation_workers()
+            finally:
+                if not self.is_running:
+                    self.toggle_in_progress = False
+            return
+
+        # A different prewarm may have been active when Start was pressed.
+        # Once it finishes, request one matching prewarm instead of waiting
+        # forever for settings that were never initialized.
+        if (
+            status == "completed"
+            and not metrics.get("active")
+            and not wait_state.get("matching_prewarm_retry_requested")
+        ):
+            wait_state["matching_prewarm_retry_requested"] = True
+            ensure = getattr(self, "ensure_paddleocr_ready_if_selected", None)
+            if callable(ensure):
+                try:
+                    started = bool(ensure("start wait matching settings retry"))
+                except Exception as ensure_error:
+                    started = False
+                    _log_debug(
+                        "PaddleOCR matching prewarm retry failed: "
+                        f"{type(ensure_error).__name__}"
+                    )
+                if started:
+                    wait_state["generation"] = int(
+                        getattr(self, "_paddleocr_prewarm_generation", 0) or 0
+                    )
+                    _log_debug(
+                        "PaddleOCR start wait requested matching prewarm "
+                        f"generation={wait_state['generation']} token={token}"
+                    )
+
+        self._schedule_paddleocr_start_wait_poll(token, delay_ms=250)
+
+    def _start_translation_workers(self):
+        """Shared path that actually starts capture/OCR/translation workers."""
+        _log_debug("Pre-start checks passed. Preparing to start threads...")
+        self.text_stability_counter = 0
+        self.previous_text = ""
+        self.last_image_hash = None
+        self.last_screenshot = None
+        self.last_processed_image = None
+
+        self._reset_gemini_batch_state()
+
+        try:
+            if self.target_overlay and self.target_overlay.winfo_exists() and not self.target_overlay.winfo_viewable():
+                self.target_overlay.show()
+        except tk.TclError:
+            _log_debug("Warning: Error ensuring target overlay visibility at start (likely closed).")
+
+        if hasattr(self, "publish_capture_ui_snapshot"):
+            self.publish_capture_ui_snapshot(
+                bump_generation=True,
+                reason="translation starting",
+            )
+
+        self._clear_queue(self.ocr_queue)
+        self._clear_queue(self.translation_queue)
+        self._reset_translation_scheduler_session_state(
+            "translation starting"
+        )
+        self.last_local_ocr_submitted_text = None
+        self.last_local_ocr_submitted_norm = None
+        self.last_local_ocr_submitted_scope = None
+        self.clear_ocr_stability_gate("translation starting")
+
+        self._app_is_closing = False
+        self._shutdown_finalized = False
+        self.is_running = True
+        start_capture_refresh = getattr(
+            self,
+            "start_capture_ui_snapshot_refresh",
+            None,
+        )
+        if callable(start_capture_refresh):
+            start_capture_refresh()
+
+        if hasattr(self, 'translation_handler'):
+            if self.is_api_based_ocr_model():
+                self.translation_handler.start_ocr_session()
+            self.translation_handler.start_translation_session()
+
+        self.start_stop_btn.config(text="Stop", state=tk.NORMAL)
+        status_text_running = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
+        self.status_label.config(text=status_text_running)
+        self.root.update_idletasks()
+
+        from worker_threads import run_capture_thread, run_ocr_thread, run_translation_thread
+
+        capture_thread_instance = threading.Thread(target=run_capture_thread, args=(self,), name="CaptureThread", daemon=True)
+        ocr_thread_instance = threading.Thread(target=run_ocr_thread, args=(self,), name="OCRThread", daemon=True)
+        translation_thread_instance = threading.Thread(target=run_translation_thread, args=(self,), name="TranslationThread", daemon=True)
+
+        self.threads = [capture_thread_instance, ocr_thread_instance, translation_thread_instance]
+        for t_obj in self.threads:
+            t_obj.start()
+        _log_debug(f"Threads started: {[t.name for t in self.threads]}")
+
+        # Release lock after successful start
+        self.toggle_in_progress = False
+
     def toggle_translation(self):
         # Add re-entrancy lock
         if self.toggle_in_progress:
             _log_debug("Toggle translation already in progress, ignoring call.")
+            return
+
+        # Cancel an in-progress local OCR ready-wait without starting workers.
+        if self._is_waiting_for_paddleocr_start() and not self.is_running:
+            self._cancel_paddleocr_start_wait(reason="user_cancel")
             return
 
         self.toggle_in_progress = True
@@ -457,75 +785,69 @@ class AppLifecycleMixin:
                     _log_debug("Start aborted due to failed pre-start validation checks.")
                     return
 
-                _log_debug("Pre-start checks passed. Preparing to start threads...")
-                self.text_stability_counter = 0
-                self.previous_text = ""
-                self.last_image_hash = None
-                self.last_screenshot = None
-                self.last_processed_image = None
-
-                self._reset_gemini_batch_state()
-
+                # Local PaddleOCR must be ready before worker threads start.
+                selected_ocr = None
                 try:
-                    if self.target_overlay and self.target_overlay.winfo_exists() and not self.target_overlay.winfo_viewable():
-                        self.target_overlay.show()
-                except tk.TclError:
-                    _log_debug("Warning: Error ensuring target overlay visibility at start (likely closed).")
+                    selected_ocr = self.get_ocr_model_setting()
+                except Exception:
+                    selected_ocr = None
+                if selected_ocr == "paddleocr":
+                    settings = None
+                    try:
+                        settings_getter = getattr(self, "get_current_paddleocr_settings", None)
+                        if callable(settings_getter):
+                            settings = settings_getter()
+                    except Exception as settings_error:
+                        _log_debug(
+                            "PaddleOCR start wait settings unavailable: "
+                            f"{type(settings_error).__name__}"
+                        )
+                        settings = None
 
-                if hasattr(self, "publish_capture_ui_snapshot"):
-                    self.publish_capture_ui_snapshot(
-                        bump_generation=True,
-                        reason="translation starting",
-                    )
+                    if settings is None:
+                        _log_debug(
+                            "PaddleOCR start aborted because matching settings "
+                            "could not be captured"
+                        )
+                        self.start_stop_btn.config(
+                            text=self.ui_lang.get_label("start_btn", "Start"),
+                            state=tk.NORMAL,
+                        )
+                        self.status_label.config(
+                            text=self.ui_lang.get_label(
+                                "status_paddleocr_loading_failed",
+                                "Status: Local OCR loading failed",
+                            )
+                        )
+                        return
 
-                self._clear_queue(self.ocr_queue)
-                self._clear_queue(self.translation_queue)
-                self._reset_translation_scheduler_session_state(
-                    "translation starting"
-                )
-                self.last_local_ocr_submitted_text = None
-                self.last_local_ocr_submitted_norm = None
-                self.last_local_ocr_submitted_scope = None
-                self.clear_ocr_stability_gate("translation starting")
+                    ready = False
+                    ready_checker = getattr(self, "is_paddleocr_ready_for_settings", None)
+                    if callable(ready_checker) and settings is not None:
+                        try:
+                            ready = bool(ready_checker(settings))
+                        except Exception:
+                            ready = False
 
-                self._app_is_closing = False
-                self._shutdown_finalized = False
-                self.is_running = True
-                start_capture_refresh = getattr(
-                    self,
-                    "start_capture_ui_snapshot_refresh",
-                    None,
-                )
-                if callable(start_capture_refresh):
-                    start_capture_refresh()
+                    if not ready:
+                        ensure = getattr(self, "ensure_paddleocr_ready_if_selected", None)
+                        if callable(ensure):
+                            try:
+                                ensure("start requested")
+                            except Exception as ensure_error:
+                                _log_debug(
+                                    "PaddleOCR ensure on start failed: "
+                                    f"{type(ensure_error).__name__}"
+                                )
+                        generation = int(getattr(self, "_paddleocr_prewarm_generation", 0) or 0)
+                        self._begin_paddleocr_start_wait(settings, generation)
+                        return
 
-                if hasattr(self, 'translation_handler'):
-                    if self.is_api_based_ocr_model():
-                        self.translation_handler.start_ocr_session()
-                    self.translation_handler.start_translation_session()
-
-                self.start_stop_btn.config(text="Stop", state=tk.NORMAL)
-                status_text_running = "Status: " + self.ui_lang.get_label("status_running", "Running (Press ~ to Stop)")
-                self.status_label.config(text=status_text_running)
-                self.root.update_idletasks()
-
-                from worker_threads import run_capture_thread, run_ocr_thread, run_translation_thread
-
-                capture_thread_instance = threading.Thread(target=run_capture_thread, args=(self,), name="CaptureThread", daemon=True)
-                ocr_thread_instance = threading.Thread(target=run_ocr_thread, args=(self,), name="OCRThread", daemon=True)
-                translation_thread_instance = threading.Thread(target=run_translation_thread, args=(self,), name="TranslationThread", daemon=True)
-
-                self.threads = [capture_thread_instance, ocr_thread_instance, translation_thread_instance]
-                for t_obj in self.threads:
-                    t_obj.start()
-                _log_debug(f"Threads started: {[t.name for t in self.threads]}")
-
-                # Release lock after successful start
-                self.toggle_in_progress = False
+                self._start_translation_workers()
 
             finally:
-                # Release lock if start failed before threads were launched
-                if not self.is_running:
+                # Release lock if start failed/deferred before threads were launched.
+                if not self.is_running and not self._is_waiting_for_paddleocr_start():
                     self.toggle_in_progress = False
 
     def _validate_area_coords(self, area_coordinates, area_type_str):
@@ -556,6 +878,8 @@ class AppLifecycleMixin:
     def on_closing(self):
         _log_debug("Main window close requested. Initiating shutdown...")
         self._app_is_closing = True
+        if self._is_waiting_for_paddleocr_start():
+            self._clear_paddleocr_start_wait(reason="app closing")
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)

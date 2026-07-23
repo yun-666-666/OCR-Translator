@@ -23,6 +23,9 @@ shortcut_clear_log,Clear Debug Log
 status_running,Running (Press ~ to Stop)
 status_provider_transient,Translation service temporarily unavailable
 status_stopped,Stopped (Press ~ to Start)
+status_paddleocr_loading,Status: Local OCR loading… waited {seconds}s
+status_paddleocr_loading_cancelled,Status: Local OCR loading cancelled
+status_paddleocr_loading_failed,Status: Local OCR loading failed
 settings_tab_title,Settings
 translation_model_label,Translation Model:
 ocr_model_label,OCR Model:

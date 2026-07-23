@@ -23,6 +23,9 @@ shortcut_clear_log,Wyczyść dziennik debugowania
 status_running,"program uruchomiony (naciśnij ~, aby zatrzymać)"
 status_provider_transient,Usługa tłumaczenia tymczasowo niedostępna
 status_stopped,"program zatrzymany (naciśnij ~, aby rozpocząć)"
+status_paddleocr_loading,"Status: lokalne OCR ładuje się… czekano {seconds}s"
+status_paddleocr_loading_cancelled,"Status: anulowano oczekiwanie na lokalne OCR"
+status_paddleocr_loading_failed,"Status: ładowanie lokalnego OCR nie powiodło się"
 settings_tab_title,Ustawienia
 translation_model_label,Model tłumaczenia:
 ocr_model_label,Model OCR:

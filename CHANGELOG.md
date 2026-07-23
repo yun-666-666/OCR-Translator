@@ -5,6 +5,25 @@ All notable changes to the Game-Changing Translator project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.10.6] - 2026-07-23
+
+### Added
+- PaddleOCR start-wait path that defers worker start until local OCR is ready, with status feedback while loading.
+- Square icon button control for the modern UI toolbar surface.
+- Loading status strings for English, Polish, and Chinese UI resources.
+
+### Changed
+- Reduced redundant Custom AI / API OCR work by coalescing stale requests and skipping obsolete encode, reasoning, and translation sends.
+- Hardened subtitle and translation latency paths, including bounded Custom AI OCR output tokens.
+- Shared Paddle numeric coercion helpers and wire endpoint model capability keys to remove equivalent duplicated logic.
+
+### Fixed
+- Guard delayed UI scheduling for display manager, OCR stability flush, pending translation flush, profile refresh, and inactivity clear.
+- Keep capture workers on immutable UI snapshots and refresh capture snapshots on the UI thread.
+- Fail closed for Custom AI credential store writes, block legacy plaintext credential rewrites, and keep short diagnostic logs free of secret field values.
+- Persist translation failover as an opt-in profile setting and stop superseded failover once a newer result is already shown.
+- Honor PySide overlay lifecycle checks and keep Preview OCR completions off the Tk worker path.
+
 ## [3.10.5] - 2026-07-16
 
 ### Fixed

@@ -14,7 +14,7 @@ ROOT_PY_MODULES = sorted(
 
 setup(
     name="ocr_translator",
-    version="3.10.5",
+    version="3.10.6",
     packages=find_packages(),
     py_modules=ROOT_PY_MODULES,
     install_requires=[

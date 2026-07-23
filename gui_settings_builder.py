@@ -19,6 +19,7 @@ from gui_builder import (
 )
 from gui_profile_controls import persist_translation_failover_choice
 from logger import log_debug
+from modern_ui import SquareIconButton
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 from ui_elements import create_scrollable_tab
 
@@ -448,7 +449,9 @@ def create_settings_tab(app):
     ttk.Label(app.ai_profiles_frame, text=app.ui_lang.get_label("ai_profile_model_label", "model")).grid(row=3, column=0, padx=5, pady=3, sticky="w")
     model_frame = ttk.Frame(app.ai_profiles_frame)
     model_frame.grid(row=3, column=1, padx=5, pady=3, sticky="ew")
+    # Combobox expands so icon+field matches name/URL/KEY width; icon stays compact.
     model_frame.columnconfigure(0, weight=1)
+    model_frame.columnconfigure(1, weight=0)
     app.ai_profile_model_combobox = ttk.Combobox(model_frame, textvariable=app.ai_profile_model_var)
     app.ai_profile_model_combobox.grid(row=0, column=0, sticky="ew")
     app.ai_profile_model_combobox.bind("<KeyRelease>", filter_model_list_form)
@@ -460,8 +463,28 @@ def create_settings_tab(app):
         "<Return>",
         lambda _event: apply_custom_ai_profile_model_selection(app),
     )
-    app.ai_profile_fetch_models_button = ttk.Button(model_frame, text=app.ui_lang.get_label("fetch_model_list_btn", "Fetch Models"), command=fetch_model_list_form)
-    app.ai_profile_fetch_models_button.grid(row=0, column=1, padx=(5, 0))
+    # Fixed square host + canvas icon keeps the glyph optically centered.
+    refresh_size = 28
+    refresh_host = ttk.Frame(model_frame, width=refresh_size, height=refresh_size)
+    refresh_host.grid(row=0, column=1, padx=(4, 0), sticky="")
+    refresh_host.grid_propagate(False)
+    palette = getattr(app.root, "md3_palette", None) or getattr(app.root, "white_clean_palette", None)
+    primary = (palette or {}).get("primary", "#2563eb")
+    app.ai_profile_fetch_models_button = SquareIconButton(
+        refresh_host,
+        text="⟳",
+        command=fetch_model_list_form,
+        size=refresh_size,
+        background=primary,
+        activebackground="#1d4ed8",
+        # Glyph sits low in Segoe UI Symbol; small upward nudge centers it optically.
+        text_offset_y=-2,
+    )
+    app.ai_profile_fetch_models_button.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+    app.ai_profile_fetch_models_button_label = app.ui_lang.get_label(
+        "fetch_model_list_btn",
+        "Fetch Models",
+    )
 
     ttk.Label(
         app.ai_profiles_frame,

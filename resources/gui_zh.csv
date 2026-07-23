@@ -23,6 +23,9 @@ shortcut_clear_log,清空调试日志
 status_running,运行中（按 ~ 停止）
 status_provider_transient,翻译服务暂时不可用
 status_stopped,已停止（按 ~ 开始）
+status_paddleocr_loading,状态：本地 OCR 加载中… 已等待 {seconds}s
+status_paddleocr_loading_cancelled,状态：已取消本地 OCR 加载等待
+status_paddleocr_loading_failed,状态：本地 OCR 加载失败
 settings_tab_title,设置
 translation_model_label,翻译模型：
 ocr_model_label,OCR 模型：

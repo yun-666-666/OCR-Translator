@@ -42,7 +42,42 @@ class ModernUiThemeTests(unittest.TestCase):
             self.assertEqual(style.lookup("ProfileSave.TButton", "background"), "#2563eb")
             self.assertEqual(style.lookup("ProfileDelete.TButton", "background"), "#dc2626")
             self.assertEqual(style.lookup("ProfileTest.TButton", "background"), "#d97706")
+            self.assertEqual(style.lookup("ProfileRefresh.TButton", "background"), "#2563eb")
+            self.assertEqual(style.lookup("ProfileRefresh.TButton", "foreground"), "#ffffff")
             self.assertEqual(style.lookup("TNotebook", "tabmargins"), "0 4 0 0")
+        finally:
+            root.destroy()
+
+    def test_square_icon_button_centers_glyph_and_supports_state(self):
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        try:
+            clicked = {"count": 0}
+            button = modern_ui.SquareIconButton(
+                root,
+                text="⟳",
+                command=lambda: clicked.__setitem__("count", clicked["count"] + 1),
+                size=28,
+                text_offset_y=-2,
+            )
+            button.pack()
+            root.update_idletasks()
+
+            self.assertEqual(int(button.cget("width")), 28)
+            self.assertEqual(int(button.cget("height")), 28)
+            x, y = button.coords(button._icon_id)
+            self.assertAlmostEqual(x, 14.0, places=1)
+            self.assertAlmostEqual(y, 12.0, places=1)
+
+            button.configure(state="disabled")
+            button.event_generate("<ButtonRelease-1>")
+            self.assertEqual(clicked["count"], 0)
+
+            button.configure(state="normal")
+            button._command()
+            self.assertEqual(clicked["count"], 1)
         finally:
             root.destroy()
 

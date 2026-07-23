@@ -221,6 +221,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self._paddleocr_prewarm_event = threading.Event()
         self._paddleocr_prewarm_metrics = self._new_paddleocr_prewarm_metrics()
         self._paddleocr_first_ocr_wait_generation = 0
+        self._paddleocr_start_wait = None
 
         # Adaptive Scan Interval Infrastructure
         self.base_scan_interval = 500  # User's preferred setting (will be updated from config)
@@ -710,7 +711,25 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarm_metrics = self._new_paddleocr_prewarm_metrics()
         if not hasattr(self, '_paddleocr_first_ocr_wait_generation'):
             self._paddleocr_first_ocr_wait_generation = 0
+        if not hasattr(self, '_paddleocr_start_wait'):
+            self._paddleocr_start_wait = None
         return self._paddleocr_prewarm_lock
+
+    def get_current_paddleocr_settings(self):
+        """Return normalized PaddleOCR settings for the current UI/config selection."""
+        from worker_threads import get_paddleocr_settings_from_app
+
+        return get_paddleocr_settings_from_app(self)
+
+    def is_paddleocr_ready_for_settings(self, settings=None):
+        """True when the matching local PaddleOCR engines have completed prewarm."""
+        try:
+            target = settings if settings is not None else self.get_current_paddleocr_settings()
+        except Exception:
+            return False
+        lock = self._ensure_paddleocr_prewarm_state()
+        with lock:
+            return self._paddleocr_prewarmed_settings == target
 
     def _paddleocr_prewarm_trigger_code(self, reason):
         text = str(reason or "").strip().lower()
@@ -813,6 +832,21 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         if snapshot.get("total_s") is not None:
             safe_call("set_gauge", "paddleocr_prewarm_total_s", snapshot.get("total_s"))
 
+        # TextRecognition phase breakdown (import / probe / construct).
+        # Always publish explicit values when the phase payload is present so
+        # cache-hit zeros do not inherit a previous cold-start gauge sample.
+        if text_phase:
+            for metric_key, phase_key in (
+                ("paddleocr_prewarm_text_recognition_import_s", "import_s"),
+                (
+                    "paddleocr_prewarm_text_recognition_model_files_probe_s",
+                    "model_files_probe_s",
+                ),
+                ("paddleocr_prewarm_text_recognition_construct_s", "construct_s"),
+            ):
+                if phase_key in text_phase and text_phase.get(phase_key) is not None:
+                    safe_call("set_gauge", metric_key, text_phase.get(phase_key))
+
         safe_call("set_label", "paddleocr_prewarm_status", status or "-")
         safe_call("set_label", "paddleocr_prewarm_outcome", outcome or "-")
         safe_call("set_label", "paddleocr_prewarm_reason", snapshot.get("reason") or "-")
@@ -889,6 +923,25 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     "paddleocr_prewarm_total_duration",
                     snapshot.get("total_s"),
                 )
+            if text_phase:
+                if text_phase.get("import_s") is not None:
+                    safe_call(
+                        "record_timing",
+                        "paddleocr_prewarm_text_recognition_import_duration",
+                        text_phase.get("import_s"),
+                    )
+                if text_phase.get("model_files_probe_s") is not None:
+                    safe_call(
+                        "record_timing",
+                        "paddleocr_prewarm_text_recognition_model_files_probe_duration",
+                        text_phase.get("model_files_probe_s"),
+                    )
+                if text_phase.get("construct_s") is not None:
+                    safe_call(
+                        "record_timing",
+                        "paddleocr_prewarm_text_recognition_construct_duration",
+                        text_phase.get("construct_s"),
+                    )
         if (
             snapshot.get("wait_path") == "worker_wait"
             and snapshot.get("waited_for_ready")
@@ -1279,6 +1332,21 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 f"kind={text_phase_metrics.get('build_kind', 'unknown')} "
                 f"generation={generation}"
             )
+            try:
+                log_debug(
+                    "PaddleOCR prewarm phase=text_recognition_breakdown "
+                    f"generation={generation} "
+                    f"import_s={float(text_phase_metrics.get('import_s', 0.0) or 0.0):.4f} "
+                    f"probe_s={float(text_phase_metrics.get('model_files_probe_s', 0.0) or 0.0):.4f} "
+                    f"construct_s={float(text_phase_metrics.get('construct_s', 0.0) or 0.0):.4f} "
+                    f"total_s={float(text_phase_metrics.get('total_s', text_recognition_duration) or 0.0):.4f} "
+                    f"kind={text_phase_metrics.get('build_kind', 'unknown')} "
+                    f"files_before={text_phase_metrics.get('model_files_before', 'unknown')} "
+                    f"files_after={text_phase_metrics.get('model_files_after', 'unknown')}"
+                )
+            except Exception:
+                # Breakdown logging must never break prewarm readiness.
+                pass
             self._update_paddleocr_prewarm_metrics(
                 generation=generation,
                 reason=str(reason or ""),
