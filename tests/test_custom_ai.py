@@ -2975,6 +2975,335 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(result, "Recovered translation")
         self.assertEqual(provider.http_client.stream_flags, [True, False])
 
+    def test_single_stream_transport_error_does_not_long_disable_stream(self):
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+                self.calls = 0
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                self.calls += 1
+                if stream:
+                    raise ValueError(
+                        "Connection aborted: ConnectionResetError(10054)"
+                    )
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                )
+
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        provider = CustomAIProvider(http_client=Client())
+        result, _usage, _duration = provider.translate(
+            profile,
+            "Hello",
+            "en",
+            "zh-CN",
+            latency_mode="stream",
+        )
+        self.assertEqual(result, "ok")
+        self.assertEqual(provider.http_client.stream_flags, [True, False])
+        # Single failure should not open the temporary bypass.
+        self.assertFalse(provider._should_bypass_stream_for_route(profile))
+
+    def test_non_transport_stream_fallback_breaks_transport_failure_streak(self):
+        class EmptyStreamResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def iter_lines(self, decode_unicode=False):
+                return iter(["data: [DONE]"])
+
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+                self.stream_attempt = 0
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                if stream:
+                    self.stream_attempt += 1
+                    if self.stream_attempt in (1, 3):
+                        raise ValueError(
+                            "Connection aborted: ConnectionResetError(10054)"
+                        )
+                    return EmptyStreamResponse()
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                )
+
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        provider = CustomAIProvider(http_client=Client())
+        for _ in range(3):
+            provider.translate(profile, "Hello", "en", "zh-CN", latency_mode="stream")
+
+        state = provider._get_stream_transport_bypass_state(
+            provider._stream_transport_bypass_route_key(profile)
+        )
+        self.assertEqual(provider.http_client.stream_flags, [True, False] * 3)
+        self.assertEqual(state["failure_streak"], 1)
+        self.assertFalse(provider._should_bypass_stream_for_route(profile))
+
+    def test_connect_timeout_retries_non_stream_and_counts_toward_bypass(self):
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                if stream:
+                    raise ValueError("Connect timeout while opening stream")
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                )
+
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        provider = CustomAIProvider(http_client=Client())
+        for _ in range(2):
+            result, _usage, _duration = provider.translate(
+                profile,
+                "Hello",
+                "en",
+                "zh-CN",
+                latency_mode="stream",
+            )
+            self.assertEqual(result, "ok")
+
+        self.assertEqual(provider.http_client.stream_flags, [True, False] * 2)
+        self.assertTrue(provider._should_bypass_stream_for_route(profile))
+
+    def test_consecutive_stream_transport_errors_open_route_scoped_bypass(self):
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                if stream:
+                    raise ValueError(
+                        "Connection aborted: ConnectionResetError(10054)"
+                    )
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                )
+
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        provider = CustomAIProvider(http_client=Client())
+        for _ in range(2):
+            provider.translate(
+                profile,
+                "Hello",
+                "en",
+                "zh-CN",
+                latency_mode="stream",
+            )
+        self.assertTrue(provider._should_bypass_stream_for_route(profile))
+        # Next request should go non-stream directly (no stream attempt).
+        before = list(provider.http_client.stream_flags)
+        provider.translate(
+            profile,
+            "World",
+            "en",
+            "zh-CN",
+            latency_mode="stream",
+        )
+        self.assertEqual(provider.http_client.stream_flags[len(before):], [False])
+        self.assertGreaterEqual(
+            provider._stream_transport_bypass_metrics[
+                "stream_transport_bypass_entered"
+            ],
+            1,
+        )
+        self.assertGreaterEqual(
+            provider._stream_transport_bypass_metrics[
+                "stream_transport_bypass_requests"
+            ],
+            1,
+        )
+
+    def test_stream_transport_bypass_is_route_isolated(self):
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append((url, stream))
+                if stream and "api.x.ai" in str(url):
+                    raise ValueError(
+                        "Connection aborted: ConnectionResetError(10054)"
+                    )
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                    iter_lines=lambda decode_unicode=False: iter(
+                        [
+                            'data: {"choices":[{"delta":{"content":"ok"}}]}',
+                            "data: [DONE]",
+                        ]
+                    ),
+                )
+
+        provider = CustomAIProvider(http_client=Client())
+        slow = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        other = {
+            "id": "other",
+            "base_url": "https://other.example/v1",
+            "api_key": "other-secret",
+            "model": "demo",
+        }
+        for _ in range(2):
+            provider.translate(slow, "Hello", "en", "zh-CN", latency_mode="stream")
+        self.assertTrue(provider._should_bypass_stream_for_route(slow))
+        self.assertFalse(provider._should_bypass_stream_for_route(other))
+
+    def test_stream_transport_bypass_recovers_after_success(self):
+        class Client:
+            def __init__(self):
+                self.stream_flags = []
+
+            def post(self, url, headers=None, json=None, timeout=None, stream=False):
+                self.stream_flags.append(stream)
+                if stream:
+                    raise ValueError("Read timed out. (read timeout=10.0)")
+                return types.SimpleNamespace(
+                    status_code=200,
+                    raise_for_status=lambda: None,
+                    json=lambda: {
+                        "choices": [
+                            {"message": {"content": '{"translation":"ok"}'}}
+                        ]
+                    },
+                )
+
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        provider = CustomAIProvider(http_client=Client())
+        for _ in range(2):
+            provider.translate(profile, "Hello", "en", "zh-CN", latency_mode="stream")
+        self.assertTrue(provider._should_bypass_stream_for_route(profile))
+        # One successful non-stream request recovers the route.
+        provider.translate(profile, "Hello", "en", "zh-CN", latency_mode="stream")
+        self.assertFalse(provider._should_bypass_stream_for_route(profile))
+        self.assertGreaterEqual(
+            provider._stream_transport_bypass_metrics[
+                "stream_transport_bypass_recovered"
+            ],
+            1,
+        )
+
+    def test_auth_and_rate_limit_errors_do_not_open_stream_transport_bypass(self):
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        for err in (
+            ValueError("Chat completions request failed (HTTP 401): unauthorized"),
+            ValueError("Chat completions request failed (HTTP 429): rate limit"),
+            ValueError("model_not_found"),
+            ValueError("structured translation response was empty"),
+        ):
+            self.assertFalse(provider._is_stream_transport_error(err))
+            self.assertFalse(provider._note_stream_transport_failure(profile, err))
+        self.assertFalse(provider._should_bypass_stream_for_route(profile))
+
+    def test_stream_transport_bypass_expires_by_ttl(self):
+        provider = CustomAIProvider(http_client=object())
+        profile = {
+            "id": "xai",
+            "base_url": "https://api.x.ai/v1",
+            "api_key": "super-secret",
+            "model": "grok",
+        }
+        now = 1000.0
+        provider._note_stream_transport_failure(
+            profile,
+            ValueError("Connection aborted: ConnectionResetError(10054)"),
+            now=now,
+        )
+        provider._note_stream_transport_failure(
+            profile,
+            ValueError("Connection aborted: ConnectionResetError(10054)"),
+            now=now + 1.0,
+        )
+        self.assertTrue(
+            provider._should_bypass_stream_for_route(profile, now=now + 2.0)
+        )
+        self.assertFalse(
+            provider._should_bypass_stream_for_route(
+                profile,
+                now=now + 2.0 + provider.STREAM_TRANSPORT_BYPASS_TTL_SECONDS,
+            )
+        )
+        self.assertGreaterEqual(
+            provider._stream_transport_bypass_metrics[
+                "stream_transport_bypass_expired"
+            ],
+            1,
+        )
+
     def test_stream_post_preserves_original_payload_while_adding_stream_flag(self):
         class Response:
             status_code = 200
@@ -5045,6 +5374,34 @@ class CustomAIProviderTests(unittest.TestCase):
 
         self.assertEqual(translation_payload["reasoning_effort"], "low")
         self.assertEqual(ocr_payload["reasoning_effort"], "low")
+
+    def test_grok_none_reasoning_fallback_remembers_the_wire_effort(self):
+        provider = CustomAIProvider()
+        profile = {
+            "model": "grok-4.20-0309-non-reasoning",
+            "reasoning_effort": "none",
+        }
+        provider._remember_unsupported_reasoning_effort(
+            profile,
+            "translation",
+            "low",
+        )
+
+        payload = provider.build_translation_payload(
+            profile,
+            "Hi",
+            "en",
+            "zh-CN",
+        )
+
+        self.assertEqual(
+            provider.reasoning_effort_request_contract(
+                profile,
+                "translation",
+            ),
+            "none",
+        )
+        self.assertNotIn("reasoning_effort", payload)
 
     def test_responses_translation_and_ocr_payloads_include_reasoning_effort(self):
         provider = CustomAIProvider()

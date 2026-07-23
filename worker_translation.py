@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from urllib.parse import urlsplit, urlunsplit
 
 from logger import summarize_text_for_log
 from translation_utils import post_process_translation_text
@@ -15,6 +16,17 @@ ROUTE_SUPERSEDE_MIN_SAMPLES = 8
 ROUTE_SUPERSEDE_LEARNING_SECONDS = 3.0
 ROUTE_SUPERSEDE_P90_FRACTION = 0.5
 ROUTE_SUPERSEDE_MAX_SECONDS = 4.0
+# Adaptive overflow protection for proven-slow routes.
+# Run A (healthy): worker avg ~1.3s. Run B (slow): worker avg ~2.6s, p90 ~3.6s+.
+OVERFLOW_PROTECTION_MIN_SAMPLES = ROUTE_SUPERSEDE_MIN_SAMPLES
+OVERFLOW_PROTECTION_ENTER_P90_SECONDS = 3.0
+OVERFLOW_PROTECTION_RECOVER_P90_SECONDS = 2.5
+OVERFLOW_PROTECTION_SLOW_WORKER_SECONDS = 5.0
+OVERFLOW_PROTECTION_SLOW_STREAK_ENTER = 2
+OVERFLOW_PROTECTION_FAST_WORKER_SECONDS = 2.0
+OVERFLOW_PROTECTION_FAST_STREAK_RECOVER = 3
+OVERFLOW_PROTECTION_MAX_ROUTES = 16
+_OVERFLOW_PROTECTION_LOCK_INIT = threading.Lock()
 TRANSIENT_FAILURE_STATUS_STREAK = 3
 TRANSIENT_FAILURE_STATUS_DURATION_SECONDS = 8.0
 TRANSIENT_FAILURE_STATUS_THROTTLE_SECONDS = 30.0
@@ -498,6 +510,293 @@ def _get_translation_supersede_after_seconds(app, request_snapshot=None):
     return max(configured, route_threshold)
 
 
+def _translation_overflow_protection_route_key(request_snapshot):
+    """Return a stable route key without logging secrets or full URLs."""
+    if not isinstance(request_snapshot, dict):
+        return ("default",)
+    profile = request_snapshot.get("profile")
+    if isinstance(profile, dict):
+        profile_id = str(profile.get("id") or "").strip() or "profile"
+        model = str(profile.get("model") or "").strip() or "model"
+        wire_api = str(profile.get("wire_api") or "").strip().lower() or "default"
+        base = str(profile.get("base_url") or "").strip()
+        try:
+            parts = urlsplit(base)
+            scheme = str(parts.scheme or "").lower()
+            host = str(parts.hostname or "").lower()
+            if scheme and host:
+                if ":" in host:
+                    host = f"[{host}]"
+                port = parts.port
+                default_port = (
+                    (scheme == "https" and port == 443)
+                    or (scheme == "http" and port == 80)
+                )
+                netloc = host if port is None or default_port else f"{host}:{port}"
+                endpoint = urlunsplit(
+                    (scheme, netloc, str(parts.path or "").rstrip("/"), "", "")
+                )
+            else:
+                endpoint = "endpoint"
+        except (TypeError, ValueError):
+            endpoint = "endpoint"
+        return (profile_id, model, endpoint, wire_api)
+    inflight = request_snapshot.get("inflight_key")
+    if isinstance(inflight, tuple) and inflight:
+        return tuple(str(part) for part in inflight[:3])
+    latency_mode = str(request_snapshot.get("latency_mode") or "").strip() or "mode"
+    return ("snapshot", latency_mode)
+
+
+def _get_translation_overflow_protection_map(app):
+    state_map = getattr(app, "_translation_overflow_protection_by_route", None)
+    if not isinstance(state_map, dict):
+        state_map = {}
+        app._translation_overflow_protection_by_route = state_map
+    return state_map
+
+
+def _get_translation_overflow_protection_lock(app):
+    """Return the app-scoped lock shared by UI scheduling and worker completion."""
+    lock = getattr(app, "_translation_overflow_protection_lock", None)
+    if lock is None or not hasattr(lock, "__enter__"):
+        # A worker can complete while the UI scheduler evaluates overflow.
+        # Serialize first-time setup so both threads share the same lock.
+        with _OVERFLOW_PROTECTION_LOCK_INIT:
+            lock = getattr(app, "_translation_overflow_protection_lock", None)
+            if lock is None or not hasattr(lock, "__enter__"):
+                lock = threading.RLock()
+                app._translation_overflow_protection_lock = lock
+    return lock
+
+
+def _get_translation_overflow_protection_state(app, request_snapshot):
+    route_key = _translation_overflow_protection_route_key(request_snapshot)
+    state_map = _get_translation_overflow_protection_map(app)
+    state = state_map.get(route_key)
+    if not isinstance(state, dict):
+        state = {
+            "active": False,
+            "slow_streak": 0,
+            "fast_streak": 0,
+            "last_p90": None,
+            "last_samples": 0,
+            "entered_reason": "",
+        }
+        state_map[route_key] = state
+        while len(state_map) > OVERFLOW_PROTECTION_MAX_ROUTES:
+            try:
+                state_map.pop(next(iter(state_map)))
+            except Exception:
+                break
+    return route_key, state
+
+
+def _read_route_latency_stats(request_snapshot):
+    if not isinstance(request_snapshot, dict):
+        return 0, 0.0
+    try:
+        sample_count = int(
+            request_snapshot.get(
+                "route_sample_count",
+                request_snapshot.get("timeout_sample_count", 0),
+            )
+            or 0
+        )
+    except (TypeError, ValueError):
+        sample_count = 0
+    try:
+        p90_seconds = float(
+            request_snapshot.get(
+                "route_p90_seconds",
+                request_snapshot.get("timeout_p90_seconds", 0.0),
+            )
+            or 0.0
+        )
+    except (OverflowError, TypeError, ValueError):
+        p90_seconds = 0.0
+    if not math.isfinite(p90_seconds) or p90_seconds < 0.0:
+        p90_seconds = 0.0
+    return max(0, sample_count), float(p90_seconds)
+
+
+def _enter_translation_overflow_protection(app, route_key, state, reason, p90_seconds, sample_count):
+    if state.get("active"):
+        return False
+    state["active"] = True
+    state["entered_reason"] = str(reason or "slow_route")
+    state["last_p90"] = p90_seconds
+    state["last_samples"] = sample_count
+    state["fast_streak"] = 0
+    _increment_metric(app, "translation_overflow_protection_entered")
+    _log_debug_coalesced(
+        f"translation-overflow-protection-entered:{route_key[0]}",
+        "LATENCY: overflow protection entered "
+        f"reason={state['entered_reason']} "
+        f"p90={float(p90_seconds or 0.0):.3f}s "
+        f"samples={int(sample_count or 0)}",
+        interval_seconds=5.0,
+    )
+    return True
+
+
+def _recover_translation_overflow_protection(app, route_key, state, reason, p90_seconds, sample_count):
+    if not state.get("active"):
+        return False
+    state["active"] = False
+    state["entered_reason"] = ""
+    state["slow_streak"] = 0
+    state["fast_streak"] = 0
+    state["last_p90"] = p90_seconds
+    state["last_samples"] = sample_count
+    _increment_metric(app, "translation_overflow_protection_recovered")
+    _log_debug_coalesced(
+        f"translation-overflow-protection-recovered:{route_key[0]}",
+        "LATENCY: overflow protection recovered "
+        f"reason={reason} "
+        f"p90={float(p90_seconds or 0.0):.3f}s "
+        f"samples={int(sample_count or 0)}",
+        interval_seconds=5.0,
+    )
+    return True
+
+
+def note_translation_overflow_route_sample(
+    app,
+    request_snapshot,
+    worker_seconds,
+    *,
+    success=True,
+):
+    """Update route-scoped overflow protection from a completed worker sample."""
+    try:
+        worker_seconds = float(worker_seconds or 0.0)
+    except (TypeError, ValueError):
+        worker_seconds = 0.0
+    if not math.isfinite(worker_seconds) or worker_seconds < 0.0:
+        worker_seconds = 0.0
+
+    with _get_translation_overflow_protection_lock(app):
+        route_key, state = _get_translation_overflow_protection_state(app, request_snapshot)
+        sample_count, p90_seconds = _read_route_latency_stats(request_snapshot)
+        state["last_p90"] = p90_seconds
+        state["last_samples"] = sample_count
+
+        if success and worker_seconds >= OVERFLOW_PROTECTION_SLOW_WORKER_SECONDS:
+            state["slow_streak"] = int(state.get("slow_streak") or 0) + 1
+            state["fast_streak"] = 0
+            if state["slow_streak"] >= OVERFLOW_PROTECTION_SLOW_STREAK_ENTER:
+                _enter_translation_overflow_protection(
+                    app,
+                    route_key,
+                    state,
+                    reason="slow_worker_streak",
+                    p90_seconds=p90_seconds,
+                    sample_count=sample_count,
+                )
+            return state
+
+        if success and worker_seconds > 0.0 and worker_seconds < OVERFLOW_PROTECTION_FAST_WORKER_SECONDS:
+            state["fast_streak"] = int(state.get("fast_streak") or 0) + 1
+            state["slow_streak"] = 0
+        elif success:
+            # Medium samples neither prove recovery nor escalate.
+            state["slow_streak"] = 0
+            state["fast_streak"] = 0
+
+        if state.get("active"):
+            recovered_by_p90 = (
+                sample_count >= OVERFLOW_PROTECTION_MIN_SAMPLES
+                and 0.0 < p90_seconds < OVERFLOW_PROTECTION_RECOVER_P90_SECONDS
+            )
+            recovered_by_fast_streak = (
+                int(state.get("fast_streak") or 0) >= OVERFLOW_PROTECTION_FAST_STREAK_RECOVER
+            )
+            if recovered_by_p90 or recovered_by_fast_streak:
+                reason = "route_p90_recovered" if recovered_by_p90 else "fast_worker_streak"
+                _recover_translation_overflow_protection(
+                    app,
+                    route_key,
+                    state,
+                    reason=reason,
+                    p90_seconds=p90_seconds,
+                    sample_count=sample_count,
+                )
+        return state
+
+
+def should_block_translation_overflow_for_slow_route(app, request_snapshot):
+    """Return True when bounded overflow should stay closed for a slow route."""
+    with _get_translation_overflow_protection_lock(app):
+        route_key, state = _get_translation_overflow_protection_state(app, request_snapshot)
+        sample_count, p90_seconds = _read_route_latency_stats(request_snapshot)
+        state["last_p90"] = p90_seconds
+        state["last_samples"] = sample_count
+
+        if not state.get("active"):
+            if (
+                sample_count >= OVERFLOW_PROTECTION_MIN_SAMPLES
+                and p90_seconds >= OVERFLOW_PROTECTION_ENTER_P90_SECONDS
+            ):
+                _enter_translation_overflow_protection(
+                    app,
+                    route_key,
+                    state,
+                    reason="route_p90_high",
+                    p90_seconds=p90_seconds,
+                    sample_count=sample_count,
+                )
+            elif int(state.get("slow_streak") or 0) >= OVERFLOW_PROTECTION_SLOW_STREAK_ENTER:
+                _enter_translation_overflow_protection(
+                    app,
+                    route_key,
+                    state,
+                    reason="slow_worker_streak",
+                    p90_seconds=p90_seconds,
+                    sample_count=sample_count,
+                )
+
+        if state.get("active"):
+            # Allow auto-exit if snapshot already shows recovery before next sample.
+            if (
+                sample_count >= OVERFLOW_PROTECTION_MIN_SAMPLES
+                and 0.0 < p90_seconds < OVERFLOW_PROTECTION_RECOVER_P90_SECONDS
+            ):
+                _recover_translation_overflow_protection(
+                    app,
+                    route_key,
+                    state,
+                    reason="route_p90_recovered",
+                    p90_seconds=p90_seconds,
+                    sample_count=sample_count,
+                )
+                return False
+            _increment_metric(app, "translation_overflow_protection_blocked")
+            _log_debug_coalesced(
+                f"translation-overflow-protection-blocked:{route_key[0]}",
+                "LATENCY: overflow blocked by slow-route protection "
+                f"reason={state.get('entered_reason') or 'active'} "
+                f"p90={float(p90_seconds or 0.0):.3f}s "
+                f"samples={int(sample_count or 0)}",
+                interval_seconds=5.0,
+            )
+            return True
+        return False
+
+
+def clear_translation_overflow_protection_state(app, reason="session reset"):
+    with _get_translation_overflow_protection_lock(app):
+        state_map = getattr(app, "_translation_overflow_protection_by_route", None)
+        if isinstance(state_map, dict):
+            state_map.clear()
+        elif state_map is not None:
+            app._translation_overflow_protection_by_route = {}
+    _log_debug(
+        "LATENCY: cleared translation overflow protection state "
+        f"reason={reason}"
+    )
+
+
 def _get_translation_latency_mode(app, latency_mode=None):
     if latency_mode:
         return str(latency_mode).strip().lower()
@@ -567,6 +866,7 @@ def reset_translation_scheduler_session_state(app, reason):
         getattr(app, "translation_profile_refresh_generation", 0) or 0
     ) + 1
     app.last_translation_submit_monotonic = 0.0
+    clear_translation_overflow_protection_state(app, reason=reason)
     reset_translation_failure_visibility(
         app,
         clear_status=False,

@@ -639,6 +639,17 @@ class CustomAITransportMixin:
         timeout_seconds=None,
     ):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
+        # Temporary route-scoped non-stream bypass after repeated stream
+        # transport failures. Leaves configured latency mode semantics intact.
+        used_stream_transport_bypass = False
+        if (
+            latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM
+            and self._should_bypass_stream_for_route(profile)
+        ):
+            latency_mode = CUSTOM_AI_LATENCY_MODE_SAFE
+            used_stream_transport_bypass = True
+            stream_callback = None
+
         payload = self.build_translation_payload(
             profile,
             text,
@@ -689,6 +700,7 @@ class CustomAITransportMixin:
         response_latency_mode = latency_mode
         response_stream = latency_mode == CUSTOM_AI_LATENCY_MODE_STREAM
         used_stream_to_non_stream_fallback = False
+        stream_transport_fallback = False
         try:
             response_json, duration = active_request(active_payload)
         except Exception as stream_error:
@@ -697,6 +709,14 @@ class CustomAITransportMixin:
                 or not self._stream_error_should_fallback_to_non_stream(stream_error)
             ):
                 raise
+            # Same-request retry path. Transport failures also update the
+            # route-scoped temporary bypass streak for subsequent requests.
+            try:
+                stream_transport_fallback = bool(
+                    self._note_stream_transport_failure(profile, stream_error)
+                )
+            except Exception:
+                pass
             _log_debug(
                 "LATENCY: custom_ai stream translation failed transiently; "
                 "retrying non-stream request: "
@@ -823,6 +843,14 @@ class CustomAITransportMixin:
                     )
                 ),
             )
+        try:
+            self._note_stream_transport_success(
+                profile,
+                used_bypass=used_stream_transport_bypass,
+                from_stream_transport_fallback=stream_transport_fallback,
+            )
+        except Exception:
+            pass
         return result, self._extract_usage(response_json), duration
 
     def recognize(

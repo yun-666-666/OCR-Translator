@@ -3,6 +3,9 @@
 import base64
 import hashlib
 import json
+import sys
+import threading
+import time
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from ocr_utils import normalize_api_ocr_image_detail
@@ -30,6 +33,15 @@ from custom_ai_policy import (
     normalize_custom_ai_structured_output_mode,
     normalize_custom_ai_wire_api,
 )
+
+
+def _log_debug(message):
+    facade = sys.modules.get("custom_ai")
+    if facade is not None:
+        logger = getattr(facade, "log_debug", None)
+        if callable(logger):
+            return logger(message)
+    return None
 
 
 class CustomAICapabilitiesMixin:
@@ -258,7 +270,10 @@ class CustomAICapabilitiesMixin:
             self._canonical_wire_endpoint_cache_key(profile),
             str(profile.get("model") or "").strip(),
             self._reasoning_effort_payload_field(profile),
-            normalize_custom_ai_reasoning_effort(effort),
+            self._reasoning_effort_for_payload(
+                profile,
+                normalize_custom_ai_reasoning_effort(effort),
+            ),
         )
 
     def _reasoning_effort_is_known_unsupported(
@@ -436,6 +451,16 @@ class CustomAICapabilitiesMixin:
             profile,
             request_kind,
         )
+        configured_effort = self._reasoning_effort_mode(profile)
+        if (
+            effort == CUSTOM_AI_REASONING_EFFORT_NONE
+            and self._reasoning_effort_is_known_unsupported(
+                profile,
+                request_kind,
+                configured_effort,
+            )
+        ):
+            return self._without_reasoning_effort(payload)
         payload_effort = self._reasoning_effort_for_payload(profile, effort)
         if (
             payload_effort == CUSTOM_AI_REASONING_EFFORT_NONE
@@ -845,6 +870,8 @@ class CustomAICapabilitiesMixin:
             "streaming api response did not contain message content",
             "streaming responses api response did not contain output text",
             "read timed out",
+            "connect timeout",
+            "connection timed out",
             "connectionreseterror",
             "connection aborted",
             "remote end closed connection",
@@ -854,6 +881,250 @@ class CustomAICapabilitiesMixin:
             "unexpected_eof_while_reading",
         )
         return any(marker in message for marker in transient_markers)
+
+    # Temporary non-stream bypass after repeated stream *transport* failures.
+    # Thresholds are intentionally short: first failure still uses the existing
+    # same-request non-stream retry; a second consecutive transport failure on
+    # the same route opens a short bypass so later requests skip doomed stream
+    # attempts. This is not permanent "stream unsupported" memory.
+    STREAM_TRANSPORT_BYPASS_ENTER_STREAK = 2
+    STREAM_TRANSPORT_BYPASS_TTL_SECONDS = 30.0
+    STREAM_TRANSPORT_BYPASS_SUCCESS_RECOVER = 1
+    STREAM_TRANSPORT_BYPASS_MAX_ROUTES = 16
+
+    def _stream_transport_bypass_route_key(self, profile):
+        # Endpoint + credential scope + wire + model + translation kind.
+        return self._request_cooldown_cache_key(profile, "translation")
+
+    def _is_stream_transport_error(self, error):
+        """True only for transport-class stream failures (not 401/429/content)."""
+        message = str(error or "").casefold()
+        if not message:
+            return False
+        # Explicitly exclude auth/rate-limit/model content failures.
+        excluded = (
+            "http 401",
+            "http 403",
+            "http 404",
+            "http 429",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "rate limit",
+            "too many requests",
+            "insufficient_balance",
+            "model_not_found",
+            "does not exist",
+            "structured translation response",
+            "api response did not contain message content",
+            "streaming api response did not contain message content",
+            "streaming responses api response did not contain output text",
+        )
+        if any(marker in message for marker in excluded):
+            return False
+        transport_markers = (
+            "connectionreseterror",
+            "connection aborted",
+            "connection reset",
+            "remote end closed connection",
+            "read timed out",
+            "connect timeout",
+            "connection timed out",
+            "timed out",
+            "ssleoferror",
+            "unexpected_eof_while_reading",
+            "tls/ssl connection was closed",
+            "chunkedencodingerror",
+            "protocol violation",
+        )
+        return any(marker in message for marker in transport_markers)
+
+    def _get_stream_transport_bypass_state(self, route_key):
+        if not hasattr(self, "_stream_transport_bypass_lock"):
+            self._stream_transport_bypass_lock = threading.RLock()
+        if not hasattr(self, "_stream_transport_bypass_states"):
+            self._stream_transport_bypass_states = {}
+        if not hasattr(self, "_stream_transport_bypass_metrics"):
+            self._stream_transport_bypass_metrics = {
+                "stream_transport_failure_streak_max": 0,
+                "stream_transport_bypass_entered": 0,
+                "stream_transport_bypass_requests": 0,
+                "stream_transport_bypass_recovered": 0,
+                "stream_transport_bypass_expired": 0,
+            }
+        with self._stream_transport_bypass_lock:
+            state = self._stream_transport_bypass_states.get(route_key)
+            if state is None:
+                state = {
+                    "failure_streak": 0,
+                    "success_streak": 0,
+                    "active_until": 0.0,
+                    "entered": False,
+                    "last_error_type": "",
+                }
+                self._stream_transport_bypass_states[route_key] = state
+                while (
+                    len(self._stream_transport_bypass_states)
+                    > self.STREAM_TRANSPORT_BYPASS_MAX_ROUTES
+                ):
+                    try:
+                        self._stream_transport_bypass_states.pop(
+                            next(iter(self._stream_transport_bypass_states))
+                        )
+                    except Exception:
+                        break
+            return state
+
+    def _stream_transport_bypass_metric_inc(self, name, amount=1):
+        metrics = getattr(self, "_stream_transport_bypass_metrics", None)
+        if not isinstance(metrics, dict):
+            return
+        lock = getattr(self, "_stream_transport_bypass_lock", None)
+        if lock is None:
+            return
+        with lock:
+            try:
+                metrics[name] = int(metrics.get(name, 0) or 0) + int(amount)
+            except Exception:
+                pass
+
+    def _clear_stream_transport_bypass_state(self, reason="reset"):
+        if not hasattr(self, "_stream_transport_bypass_states"):
+            return
+        lock = getattr(self, "_stream_transport_bypass_lock", None)
+        if lock is None:
+            self._stream_transport_bypass_states = {}
+            return
+        with lock:
+            self._stream_transport_bypass_states.clear()
+        _log_debug(
+            "LATENCY: cleared stream transport bypass state "
+            f"reason={reason}"
+        )
+
+    def _should_bypass_stream_for_route(self, profile, now=None):
+        route_key = self._stream_transport_bypass_route_key(profile)
+        if now is None:
+            now = time.monotonic()
+        expired = False
+        with self._stream_transport_bypass_lock:
+            state = self._get_stream_transport_bypass_state(route_key)
+            active_until = float(state.get("active_until") or 0.0)
+            if active_until <= 0.0:
+                return False
+            if now >= active_until:
+                if float(state.get("active_until") or 0.0) <= now:
+                    state["active_until"] = 0.0
+                    state["entered"] = False
+                    state["failure_streak"] = 0
+                    state["success_streak"] = 0
+                    self._stream_transport_bypass_metric_inc(
+                        "stream_transport_bypass_expired"
+                    )
+                    expired = True
+            else:
+                self._stream_transport_bypass_metric_inc(
+                    "stream_transport_bypass_requests"
+                )
+        if expired:
+            _log_debug(
+                "LATENCY: stream transport bypass expired "
+                f"route={route_key[0] if route_key else 'unknown'}"
+            )
+            return False
+        _log_debug(
+            "LATENCY: stream transport bypass active; using non-stream "
+            f"route={route_key[0] if route_key else 'unknown'} "
+            f"remaining={max(0.0, active_until - now):.1f}s"
+        )
+        return True
+
+    def _note_stream_transport_failure(self, profile, error, now=None):
+        if not self._is_stream_transport_error(error):
+            return False
+        route_key = self._stream_transport_bypass_route_key(profile)
+        if now is None:
+            now = time.monotonic()
+        with self._stream_transport_bypass_lock:
+            state = self._get_stream_transport_bypass_state(route_key)
+            state["failure_streak"] = int(state.get("failure_streak") or 0) + 1
+            state["success_streak"] = 0
+            state["last_error_type"] = type(error).__name__
+            streak = state["failure_streak"]
+            metrics = self._stream_transport_bypass_metrics
+            metrics["stream_transport_failure_streak_max"] = max(
+                int(metrics.get("stream_transport_failure_streak_max", 0) or 0),
+                streak,
+            )
+            entered = False
+            if streak >= self.STREAM_TRANSPORT_BYPASS_ENTER_STREAK:
+                state["active_until"] = float(now) + float(
+                    self.STREAM_TRANSPORT_BYPASS_TTL_SECONDS
+                )
+                if not state.get("entered"):
+                    state["entered"] = True
+                    entered = True
+                    self._stream_transport_bypass_metric_inc(
+                        "stream_transport_bypass_entered"
+                    )
+        _log_debug(
+            "LATENCY: stream transport failure streak "
+            f"route={route_key[0] if route_key else 'unknown'} "
+            f"streak={streak} error={type(error).__name__}"
+        )
+        if entered:
+            _log_debug(
+                "LATENCY: stream transport bypass entered "
+                f"route={route_key[0] if route_key else 'unknown'} "
+                f"ttl={float(self.STREAM_TRANSPORT_BYPASS_TTL_SECONDS):.1f}s "
+                f"streak={streak}"
+            )
+        return True
+
+    def _note_stream_transport_success(
+        self,
+        profile,
+        *,
+        used_bypass=False,
+        from_stream_transport_fallback=False,
+        now=None,
+    ):
+        route_key = self._stream_transport_bypass_route_key(profile)
+        if now is None:
+            now = time.monotonic()
+        recovered = False
+        with self._stream_transport_bypass_lock:
+            state = self._get_stream_transport_bypass_state(route_key)
+            # Same-request non-stream recovery after a transport stream failure
+            # must not wipe the streak or immediately cancel a just-opened
+            # bypass; that would recreate the "stream fail then retry" loop.
+            if from_stream_transport_fallback:
+                return False
+
+            state["failure_streak"] = 0
+            if used_bypass or float(state.get("active_until") or 0.0) > float(now):
+                state["success_streak"] = int(state.get("success_streak") or 0) + 1
+            else:
+                state["success_streak"] = 0
+            if (
+                float(state.get("active_until") or 0.0) > 0.0
+                and int(state.get("success_streak") or 0)
+                >= self.STREAM_TRANSPORT_BYPASS_SUCCESS_RECOVER
+            ):
+                state["active_until"] = 0.0
+                state["entered"] = False
+                state["success_streak"] = 0
+                state["failure_streak"] = 0
+                recovered = True
+                self._stream_transport_bypass_metric_inc(
+                    "stream_transport_bypass_recovered"
+                )
+        if recovered:
+            _log_debug(
+                "LATENCY: stream transport bypass recovered "
+                f"route={route_key[0] if route_key else 'unknown'}"
+            )
+        return recovered
 
     def _prepare_payload_for_profile(self, profile, payload, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE, stream=False):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)

@@ -36,6 +36,9 @@ from app_capture_ocr import CUSTOM_AI_OCR_CONCURRENCY_LIMIT
 DEFAULT_TRANSLATION_SUPERSEDE_AFTER_SECONDS = 1.5
 DEFAULT_TRANSLATION_REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_SUPERSEDED_TRANSLATION_CONCURRENCY = 2
+# Only for bounded overflow: require the newest OCR candidate to stay unchanged
+# briefly so rapidly mutating subtitles do not each spawn a throwaway HTTP call.
+OVERFLOW_CANDIDATE_STABILITY_SECONDS = 0.25
 OCR_STABILITY_GATE_MIN_WAIT_SECONDS = 0.12
 OCR_STABILITY_GATE_MAX_WAIT_SECONDS = 0.25
 OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH = 12
@@ -124,6 +127,9 @@ from worker_translation import (
     reset_translation_failure_visibility,
     note_transient_translation_failure,
     clear_transient_translation_failure_status,
+    note_translation_overflow_route_sample,
+    should_block_translation_overflow_for_slow_route,
+    clear_translation_overflow_protection_state,
     _flush_pending_translation_request,
     _queue_pending_translation_request,
     _expedite_pending_translation_request,
@@ -1226,6 +1232,8 @@ def start_async_translation(
             queue_reasons.append(f"submit interval {remaining_interval:.3f}s")
 
         may_supersede_stale_call = False
+        oldest_active_age = None
+        supersede_after = None
         if active_translation_count >= concurrency_limit:
             oldest_active_age = _get_oldest_active_translation_age(app, now)
             supersede_after = _get_translation_supersede_after_seconds(
@@ -1241,6 +1249,17 @@ def start_async_translation(
                     or oldest_active_age is not None
                 )
             )
+            # Slow-route protection never applies to configuration_refresh or
+            # race mode; it only blocks the optional second overflow slot.
+            if (
+                may_use_overflow_slot
+                and not configuration_refresh
+                and should_block_translation_overflow_for_slow_route(
+                    app,
+                    request_snapshot,
+                )
+            ):
+                may_use_overflow_slot = False
             if may_use_overflow_slot and (
                 configuration_refresh
                 or oldest_active_age >= supersede_after
@@ -1258,6 +1277,37 @@ def start_async_translation(
                 queue_reasons.append(
                     f"active calls {active_translation_count}/"
                     f"{MAX_SUPERSEDED_TRANSLATION_CONCURRENCY if concurrency_limit == 1 else concurrency_limit}"
+                )
+
+        # Overflow-only stability gate: never delay the free-slot first request.
+        # When concurrency is full and we would otherwise open the bounded
+        # overflow slot, require the newest candidate text to remain unchanged
+        # for a short window so OCR jitter does not bill throwaway HTTP calls.
+        if may_supersede_stale_call and not configuration_refresh:
+            try:
+                candidate_started = float(requested_at_monotonic or now)
+            except (TypeError, ValueError):
+                candidate_started = float(now)
+            candidate_age = max(0.0, float(now) - candidate_started)
+            stability_seconds = float(OVERFLOW_CANDIDATE_STABILITY_SECONDS)
+            if candidate_age < stability_seconds:
+                remaining_stability = max(
+                    0.001,
+                    stability_seconds - candidate_age,
+                )
+                may_supersede_stale_call = False
+                queue_delay = max(queue_delay, remaining_stability)
+                queue_reasons.append(
+                    f"overflow candidate stability {remaining_stability:.3f}s"
+                )
+                _increment_metric(app, "translation_overflow_stability_blocked")
+                log_debug_coalesced(
+                    "translation-overflow-stability-blocked",
+                    "LATENCY: overflow deferred for candidate stability "
+                    f"for OCR batch {ocr_sequence_number} "
+                    f"candidate_age={candidate_age:.3f}s "
+                    f"need={stability_seconds:.3f}s",
+                    interval_seconds=5.0,
                 )
 
         if queue_reasons:
@@ -1278,11 +1328,17 @@ def start_async_translation(
                 if oldest_active_age is not None
                 else "unknown"
             )
+            threshold_text = (
+                f"{supersede_after:.3f}s"
+                if supersede_after is not None
+                else "n/a"
+            )
+            _increment_metric(app, "translation_overflow_sent")
             log_debug(
                 "LATENCY: newest translation using one bounded overflow slot "
                 f"for OCR batch {ocr_sequence_number} "
                 f"age={oldest_active_age_text} "
-                f"threshold={supersede_after:.3f}s"
+                f"threshold={threshold_text}"
             )
 
         _submit_async_translation_request(
@@ -1437,6 +1493,15 @@ def process_translation_async(
         _record_metric_timing(app, "translation_queue_time", queue_time)
         _record_metric_timing(app, "translation_worker_time", elapsed_time)
         _record_metric_timing(app, "translation_total_latency", total_time)
+        try:
+            note_translation_overflow_route_sample(
+                app,
+                request_snapshot,
+                elapsed_time,
+                success=True,
+            )
+        except Exception:
+            pass
         if elapsed_time > 5.0:
             log_debug(f"Translation {translation_sequence} took {elapsed_time:.1f}s, may be stale but will attempt display")
 
@@ -1460,6 +1525,15 @@ def process_translation_async(
         _record_metric_timing(app, "translation_queue_time", queue_time)
         _record_metric_timing(app, "translation_worker_time", elapsed_time)
         _record_metric_timing(app, "translation_total_latency", total_time)
+        try:
+            note_translation_overflow_route_sample(
+                app,
+                request_snapshot,
+                elapsed_time,
+                success=False,
+            )
+        except Exception:
+            pass
         log_debug(f"Error in async translation {translation_sequence} after {elapsed_time:.2f}s: {type(e).__name__} - {e}")
 
         error_msg = f"Translation error: {str(e)}"

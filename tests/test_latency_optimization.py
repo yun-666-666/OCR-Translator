@@ -4366,10 +4366,17 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
             initialize_async_translation_infrastructure=lambda: None,
             last_translation_submit_monotonic=100.0,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
         )
 
+        # Candidate must already be stable long enough for overflow.
         with patch.object(worker_threads.time, "monotonic", return_value=101.6):
-            worker_threads.start_async_translation(app, "Latest", 2)
+            worker_threads.start_async_translation(
+                app,
+                "Latest",
+                2,
+                requested_at_monotonic=101.3,
+            )
 
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(app.active_translation_calls, {1, 2})
@@ -4377,6 +4384,655 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             app.active_translation_started_monotonic,
             {1: 100.0, 2: 101.6},
         )
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_sent",
+                0,
+            ),
+            1,
+        )
+
+    def test_overflow_unstable_candidate_replaces_pending_without_http(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+        )
+
+        # Active call is old enough for overflow, but candidate just appeared.
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(app, "UnstableA", 2)
+
+        self.assertEqual(len(pool.submissions), 0)
+        self.assertEqual(app.pending_translation_request["text"], "UnstableA")
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_stability_blocked",
+                0,
+            ),
+            1,
+        )
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_sent",
+                0,
+            ),
+            0,
+        )
+        self.assertTrue(scheduled)
+        self.assertLessEqual(scheduled[0][0], 300)
+
+        # Candidate changes before stability window ends: only pending updates.
+        with patch.object(worker_threads.time, "monotonic", return_value=101.7):
+            worker_threads.start_async_translation(app, "UnstableB", 3)
+
+        self.assertEqual(len(pool.submissions), 0)
+        self.assertEqual(app.pending_translation_request["text"], "UnstableB")
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_stability_blocked",
+                0,
+            ),
+            2,
+        )
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_sent",
+                0,
+            ),
+            0,
+        )
+
+    def test_overflow_stable_candidate_can_use_overflow_slot(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "scope")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            is_running=True,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(app, "StableCandidate", 2)
+
+        self.assertEqual(len(pool.submissions), 0)
+        self.assertEqual(app.pending_translation_request["text"], "StableCandidate")
+        delay, callback, args = scheduled[0]
+
+        # After the stability window, the same candidate may overflow once.
+        with patch.object(worker_threads.time, "monotonic", return_value=101.9):
+            callback(*args)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "StableCandidate")
+        self.assertIsNone(app.pending_translation_request)
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_sent",
+                0,
+            ),
+            1,
+        )
+
+    def test_no_concurrency_pressure_path_is_not_delayed_by_overflow_stability(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_inflight_translation_key(self, text):
+                return ("custom_ai", text, "scope")
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=0,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=0.0,
+            pending_translation_request=None,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=50.0):
+            worker_threads.start_async_translation(app, "Immediate", 1)
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "Immediate")
+        self.assertIsNone(app.pending_translation_request)
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_stability_blocked",
+                0,
+            ),
+            0,
+        )
+
+    def test_healthy_route_can_still_use_bounded_overflow(self):
+        worker_threads = import_worker_threads_for_tests()
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(self, text, commit=False):
+                return {
+                    "inflight_key": ("custom_ai", text, "healthy"),
+                    "latency_mode": "safe",
+                    "route_p90_seconds": 1.4,
+                    "route_sample_count": 12,
+                    "profile": {
+                        "id": "healthy-profile",
+                        "model": "fast",
+                        "base_url": "https://healthy.example/v1",
+                    },
+                }
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **_kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "healthy")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(after=lambda *args, **kwargs: None),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(
+                app,
+                "LatestHealthy",
+                2,
+                requested_at_monotonic=101.3,
+            )
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "LatestHealthy")
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_protection_blocked",
+                0,
+            ),
+            0,
+        )
+
+    def test_slow_route_blocks_overflow_and_keeps_pending_latest(self):
+        worker_threads = import_worker_threads_for_tests()
+        scheduled = []
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(self, text, commit=False):
+                return {
+                    "inflight_key": ("custom_ai", text, "slow"),
+                    "latency_mode": "stream",
+                    "route_p90_seconds": 3.7,
+                    "route_sample_count": 10,
+                    "profile": {
+                        "id": "slow-profile",
+                        "model": "slow",
+                        "base_url": "https://slow.example/v1",
+                    },
+                }
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **_kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app = types.SimpleNamespace(
+            translation_sequence_counter=1,
+            active_translation_calls={1},
+            active_translation_inflight_keys={("custom_ai", "Old", "slow")},
+            active_translation_started_monotonic={1: 100.0},
+            translation_thread_pool=pool,
+            translation_handler=Handler(),
+            enable_instant_cache_display_var=types.SimpleNamespace(get=lambda: False),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                )
+            ),
+            initialize_async_translation_infrastructure=lambda: None,
+            last_translation_submit_monotonic=100.0,
+            pending_translation_request=None,
+            pending_translation_flush_scheduled=False,
+            pending_translation_flush_deadline_monotonic=0.0,
+            pending_translation_flush_generation=0,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+        )
+
+        with patch.object(worker_threads.time, "monotonic", return_value=102.0):
+            worker_threads.start_async_translation(
+                app,
+                "LatestSlow",
+                2,
+                requested_at_monotonic=101.5,
+            )
+            worker_threads.start_async_translation(
+                app,
+                "EvenLaterSlow",
+                3,
+                requested_at_monotonic=101.8,
+            )
+
+        self.assertEqual(pool.submissions, [])
+        self.assertEqual(app.pending_translation_request["text"], "EvenLaterSlow")
+        self.assertGreaterEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_protection_entered",
+                0,
+            ),
+            1,
+        )
+        self.assertGreaterEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_protection_blocked",
+                0,
+            ),
+            1,
+        )
+        self.assertEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_sent",
+                0,
+            ),
+            0,
+        )
+
+    def test_overflow_protection_recovers_after_fast_route_samples(self):
+        worker_threads = import_worker_threads_for_tests()
+        import worker_translation
+
+        snapshot = {
+            "inflight_key": ("custom_ai", "x", "recover"),
+            "latency_mode": "stream",
+            "route_p90_seconds": 3.5,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "recover-profile",
+                "model": "recover",
+                "base_url": "https://recover.example/v1",
+            },
+        }
+        app = types.SimpleNamespace(runtime_metrics=RuntimeMetrics(max_age_seconds=0))
+
+        self.assertTrue(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                snapshot,
+            )
+        )
+
+        recovered_snapshot = dict(snapshot)
+        recovered_snapshot["route_p90_seconds"] = 1.6
+        recovered_snapshot["route_sample_count"] = 12
+        for _ in range(3):
+            worker_translation.note_translation_overflow_route_sample(
+                app,
+                recovered_snapshot,
+                1.2,
+                success=True,
+            )
+
+        self.assertFalse(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                recovered_snapshot,
+            )
+        )
+        self.assertGreaterEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_protection_recovered",
+                0,
+            ),
+            1,
+        )
+
+        class Pool:
+            def __init__(self):
+                self.submissions = []
+
+            def submit(self, fn, *args):
+                self.submissions.append((fn, args))
+                return object()
+
+        class Handler:
+            def get_cached_translation_for_display(self, text):
+                return None
+
+            def get_custom_ai_translation_request_snapshot(self, text, commit=False):
+                return dict(recovered_snapshot, inflight_key=("custom_ai", text, "recover"))
+
+            def get_translation_submit_interval_seconds(self, text_content=None):
+                return 0.0
+
+            def get_translation_provider_cooldown_seconds(self, **_kwargs):
+                return 0.0
+
+            def get_translation_concurrency_limit(self):
+                return 1
+
+        pool = Pool()
+        app.translation_sequence_counter = 1
+        app.active_translation_calls = {1}
+        app.active_translation_inflight_keys = {("custom_ai", "Old", "recover")}
+        app.active_translation_started_monotonic = {1: 100.0}
+        app.translation_thread_pool = pool
+        app.translation_handler = Handler()
+        app.enable_instant_cache_display_var = types.SimpleNamespace(get=lambda: False)
+        app.root = types.SimpleNamespace(after=lambda *args, **kwargs: None)
+        app.initialize_async_translation_infrastructure = lambda: None
+        app.last_translation_submit_monotonic = 100.0
+
+        with patch.object(worker_threads.time, "monotonic", return_value=101.6):
+            worker_threads.start_async_translation(
+                app,
+                "RecoveredLatest",
+                2,
+                requested_at_monotonic=101.3,
+            )
+
+        self.assertEqual(len(pool.submissions), 1)
+        self.assertEqual(pool.submissions[0][1][1], "RecoveredLatest")
+
+    def test_overflow_protection_is_route_isolated(self):
+        import worker_translation
+
+        app = types.SimpleNamespace(runtime_metrics=RuntimeMetrics(max_age_seconds=0))
+        slow = {
+            "inflight_key": ("custom_ai", "a", "slow"),
+            "route_p90_seconds": 4.0,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "slow",
+                "model": "slow",
+                "base_url": "https://slow.example/v1",
+            },
+        }
+        healthy = {
+            "inflight_key": ("custom_ai", "b", "healthy"),
+            "route_p90_seconds": 1.3,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "healthy",
+                "model": "fast",
+                "base_url": "https://healthy.example/v1",
+            },
+        }
+
+        self.assertTrue(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                slow,
+            )
+        )
+        self.assertFalse(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                healthy,
+            )
+        )
+
+    def test_overflow_protection_distinguishes_endpoint_path_and_wire_api(self):
+        import worker_translation
+
+        app = types.SimpleNamespace(runtime_metrics=RuntimeMetrics(max_age_seconds=0))
+        slow = {
+            "route_p90_seconds": 4.0,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "shared-profile",
+                "model": "same-model",
+                "base_url": "https://relay.example/v1/slow",
+                "wire_api": "chat_completions",
+            },
+        }
+        different_endpoint = {
+            "route_p90_seconds": 1.2,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "shared-profile",
+                "model": "same-model",
+                "base_url": "https://relay.example/v1/healthy",
+                "wire_api": "responses",
+            },
+        }
+
+        self.assertTrue(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                slow,
+            )
+        )
+        self.assertFalse(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                different_endpoint,
+            )
+        )
+        self.assertEqual(
+            len(app._translation_overflow_protection_by_route),
+            2,
+        )
+
+    def test_overflow_protection_state_uses_an_app_scoped_lock(self):
+        import worker_translation
+
+        app = types.SimpleNamespace(runtime_metrics=RuntimeMetrics(max_age_seconds=0))
+        slow = {
+            "route_p90_seconds": 4.0,
+            "route_sample_count": 10,
+            "profile": {
+                "id": "slow",
+                "model": "slow",
+                "base_url": "https://slow.example/v1",
+            },
+        }
+
+        self.assertTrue(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                slow,
+            )
+        )
+        self.assertTrue(
+            hasattr(app, "_translation_overflow_protection_lock")
+        )
+        worker_translation.note_translation_overflow_route_sample(
+            app,
+            slow,
+            1.0,
+            success=True,
+        )
+
+    def test_session_reset_clears_overflow_protection_state(self):
+        import worker_translation
+
+        app = types.SimpleNamespace(
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
+            pending_translation_request={"text": "x"},
+            pending_translation_flush_scheduled=True,
+            pending_translation_flush_deadline_monotonic=1.0,
+            pending_translation_flush_generation=3,
+            latest_translation_candidate={"text": "x"},
+            translation_profile_refresh_generation=1,
+            last_translation_submit_monotonic=12.0,
+            last_displayed_translation_sequence=5,
+            latest_translation_sequence_started=5,
+            translation_sequence_counter=5,
+            active_translation_calls=set(),
+            active_translation_inflight_keys=set(),
+            active_translation_started_monotonic={},
+        )
+        slow = {
+            "route_p90_seconds": 4.2,
+            "route_sample_count": 9,
+            "profile": {
+                "id": "slow",
+                "model": "slow",
+                "base_url": "https://slow.example/v1",
+            },
+        }
+        self.assertTrue(
+            worker_translation.should_block_translation_overflow_for_slow_route(
+                app,
+                slow,
+            )
+        )
+        worker_translation.reset_translation_scheduler_session_state(
+            app,
+            "translation stopped",
+        )
+        self.assertEqual(app._translation_overflow_protection_by_route, {})
 
     def test_submit_invalidates_stale_pending_translation_request(self):
         worker_threads = import_worker_threads_for_tests()
@@ -4430,7 +5086,12 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         )
 
         with patch.object(worker_threads.time, "monotonic", return_value=101.6):
-            worker_threads.start_async_translation(app, "Latest", 3)
+            worker_threads.start_async_translation(
+                app,
+                "Latest",
+                3,
+                requested_at_monotonic=101.3,
+            )
 
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(pool.submissions[0][1][1], "Latest")
@@ -4511,7 +5172,12 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         # Later supersede starts the true latest request and must drop pending.
         with patch.object(worker_threads.time, "monotonic", return_value=101.6):
-            worker_threads.start_async_translation(app, "Latest", 3)
+            worker_threads.start_async_translation(
+                app,
+                "Latest",
+                3,
+                requested_at_monotonic=101.3,
+            )
         self.assertEqual(len(pool.submissions), 1)
         self.assertEqual(pool.submissions[0][1][1], "Latest")
         self.assertIsNone(app.pending_translation_request)
@@ -4608,6 +5274,11 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                     "latency_mode": "safe",
                     "route_p90_seconds": 8.0,
                     "route_sample_count": 8,
+                    "profile": {
+                        "id": "slow-route",
+                        "model": "slow",
+                        "base_url": "https://slow.example/v1",
+                    },
                 }
 
             def get_translation_submit_interval_seconds(self, text_content=None):
@@ -4642,16 +5313,26 @@ class LatencyTranslationCacheTests(unittest.TestCase):
             pending_translation_flush_scheduled=False,
             pending_translation_flush_deadline_monotonic=0.0,
             pending_translation_flush_generation=0,
+            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
         )
 
         with patch.object(worker_threads.time, "monotonic", return_value=102.0):
             worker_threads.start_async_translation(app, "Latest", 2)
 
+        # High route p90 enters overflow protection: do not open a second slot
+        # after waiting; keep only the latest pending request.
         app.translation_thread_pool.submit.assert_not_called()
         self.assertEqual(app.pending_translation_request["text"], "Latest")
         self.assertEqual(len(scheduled), 1)
-        self.assertGreaterEqual(scheduled[0][0], 1999)
-        self.assertLessEqual(scheduled[0][0], 2001)
+        self.assertGreaterEqual(scheduled[0][0], 250)
+        self.assertLessEqual(scheduled[0][0], 251)
+        self.assertGreaterEqual(
+            app.runtime_metrics.snapshot()["counters"].get(
+                "translation_overflow_protection_blocked",
+                0,
+            ),
+            1,
+        )
 
     def test_stale_translation_supersession_never_exceeds_two_active_calls(self):
         worker_threads = import_worker_threads_for_tests()

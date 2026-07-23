@@ -264,6 +264,42 @@ class PaddleOCRBackendTests(unittest.TestCase):
         self.assertEqual(lines[0].text, "Here, kitty kitty!")
         fake_engine.predict.assert_called_once()
 
+    def test_low_confidence_fast_path_lines_still_reject_and_fallback(self):
+        from paddle_ocr_backend import PaddleOCRSettings, recognize_subtitle_with_paddleocr
+
+        image = Image.new("RGB", (720, 96), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((230, 32, 490, 60), fill="white")
+        fake_text_engine = Mock()
+        fake_text_engine.predict.return_value = [{
+            "rec_text": "xx",
+            "rec_score": 0.20,
+        }]
+        full_engine = Mock()
+        full_engine.predict.return_value = [{
+            "rec_texts": ["safe fallback"],
+            "rec_scores": [0.93],
+        }]
+
+        with patch(
+            "paddle_ocr_backend.get_paddleocr_text_recognition_engine",
+            return_value=fake_text_engine,
+        ):
+            with patch(
+                "paddle_ocr_backend.get_paddleocr_engine",
+                return_value=full_engine,
+            ):
+                text, lines = recognize_subtitle_with_paddleocr(
+                    image,
+                    PaddleOCRSettings(upscale=1.0, min_score=0.45),
+                    keep_linebreaks=False,
+                )
+
+        self.assertEqual(text, "safe fallback")
+        self.assertEqual(lines[0].text, "safe fallback")
+        fake_text_engine.predict.assert_called_once()
+        full_engine.predict.assert_called_once()
+
     def test_subtitle_recognition_batches_multiple_line_crops(self):
         from paddle_ocr_backend import PaddleOCRSettings, recognize_subtitle_with_paddleocr
 
@@ -338,12 +374,13 @@ class PaddleOCRBackendTests(unittest.TestCase):
 
         self.assertEqual(text, "First line\nSecond line")
         self.assertEqual(len(lines), 2)
-        log_coalesced.assert_called_once_with(
-            "paddle-subtitle-fast-path-success",
-            "PaddleOCR subtitle fast path recognized lines=2 chars=22",
-            interval_seconds=5.0,
-        )
+        self.assertEqual(log_coalesced.call_args.args[0], "paddle-subtitle-fast-path-success")
         logged_message = log_coalesced.call_args.args[1]
+        self.assertIn(
+            "PaddleOCR subtitle fast path recognized lines=2 chars=22",
+            logged_message,
+        )
+        self.assertEqual(log_coalesced.call_args.kwargs.get("interval_seconds"), 5.0)
         self.assertNotIn("First line", logged_message)
         self.assertNotIn("Second line", logged_message)
 
@@ -410,11 +447,153 @@ class PaddleOCRBackendTests(unittest.TestCase):
 
         self.assertEqual(text, "Fallback text")
         direct_log.assert_not_called()
-        log_coalesced.assert_called_once_with(
+        self.assertEqual(
+            log_coalesced.call_args_list[0].args[0],
             "paddle-subtitle-fast-path-no-line-crop",
-            "PaddleOCR subtitle fast path found no line crop; "
-            "falling back to full OCR",
-            interval_seconds=5.0,
+        )
+        self.assertIn(
+            "PaddleOCR subtitle fast path found no line crop; falling back to full OCR",
+            log_coalesced.call_args_list[0].args[1],
+        )
+        # Full fallback result is also classified content-free.
+        event_names = [call.args[0] for call in log_coalesced.call_args_list]
+        self.assertIn("paddle-subtitle-full-fallback-text", event_names)
+        full_fallback_log = next(
+            call.args[1]
+            for call in log_coalesced.call_args_list
+            if call.args[0] == "paddle-subtitle-full-fallback-text"
+        )
+        self.assertIn("outcome=full_fallback_text", full_fallback_log)
+        for call in log_coalesced.call_args_list:
+            self.assertNotIn("Fallback text", call.args[1])
+
+    def test_subtitle_diagnostics_classifies_fullwidth_short_reject(self):
+        import paddle_ocr_backend
+        from paddle_ocr_backend import (
+            PaddleOCRSettings,
+            prepare_paddleocr_subtitle_line_images,
+            reset_subtitle_fastpath_diagnostics,
+        )
+
+        reset_subtitle_fastpath_diagnostics()
+        # Nearly full-width short band under the 14% height rule.
+        # Edge fallback may still crop; diagnostics must still record that the
+        # bright path rejected via fullwidth_short.
+        image = Image.new("RGB", (1658, 188), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((20, 84, 1638, 104), fill="white")  # h=20 / 188 ≈ 10.6%
+        diagnostics = {}
+        prepare_paddleocr_subtitle_line_images(
+            image,
+            PaddleOCRSettings(upscale=1.0),
+            diagnostics=diagnostics,
+        )
+        fullwidth_hits = int(diagnostics.get("bright_reject_fullwidth_short", 0) or 0)
+        fullwidth_hits += sum(
+            int(v or 0)
+            for k, v in diagnostics.items()
+            if str(k).startswith("bright_reject_fullwidth_short_")
+        )
+        self.assertGreaterEqual(fullwidth_hits, 1)
+        self.assertTrue(
+            any(
+                str(k).startswith("no_crop_reason_bright_reject_fullwidth_short")
+                for k in diagnostics
+            )
+            or int(diagnostics.get("bright_no_crop", 0) or 0) >= 1
+        )
+
+    def test_subtitle_diagnostics_classifies_low_confidence_then_full_fallback(self):
+        import paddle_ocr_backend
+        from paddle_ocr_backend import (
+            PaddleOCRSettings,
+            recognize_subtitle_with_paddleocr,
+            reset_subtitle_fastpath_diagnostics,
+            get_subtitle_fastpath_diagnostics_snapshot,
+        )
+
+        reset_subtitle_fastpath_diagnostics()
+        image = Image.new("RGB", (720, 96), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((230, 32, 490, 60), fill="white")
+        fake_text = Mock()
+        fake_text.predict.return_value = [{
+            "rec_text": "secret-subtitle",
+            "rec_score": 0.10,
+        }]
+        with patch.object(
+            paddle_ocr_backend,
+            "get_paddleocr_text_recognition_engine",
+            return_value=fake_text,
+        ):
+            with patch.object(
+                paddle_ocr_backend,
+                "recognize_with_paddleocr",
+                return_value=("", []),
+            ):
+                with patch.object(
+                    paddle_ocr_backend,
+                    "log_debug_coalesced",
+                ) as log_coalesced:
+                    text, lines = recognize_subtitle_with_paddleocr(
+                        image,
+                        PaddleOCRSettings(upscale=1.0, min_score=0.45),
+                    )
+        self.assertEqual(text, "")
+        self.assertEqual(lines, [])
+        snap = get_subtitle_fastpath_diagnostics_snapshot()
+        self.assertEqual(int(snap.get("rec_low_confidence", 0) or 0), 1)
+        self.assertEqual(int(snap.get("fast_path_no_usable_text", 0) or 0), 1)
+        self.assertEqual(int(snap.get("full_fallback_empty", 0) or 0), 1)
+        for call in log_coalesced.call_args_list:
+            self.assertNotIn("secret-subtitle", str(call.args[1]))
+
+    def test_subtitle_diagnostics_edge_fallback_success_is_counted(self):
+        import paddle_ocr_backend
+        from paddle_ocr_backend import (
+            PaddleOCRSettings,
+            prepare_paddleocr_subtitle_line_images,
+            reset_subtitle_fastpath_diagnostics,
+        )
+
+        reset_subtitle_fastpath_diagnostics()
+        # Dark background + mid-gray band: bright mask fails, edge fallback crops.
+        image = Image.new("RGB", (640, 128), "black")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((150, 88, 490, 108), fill=(120, 120, 120))
+        diagnostics = {}
+        crops = prepare_paddleocr_subtitle_line_images(
+            image,
+            PaddleOCRSettings(upscale=1.0),
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(len(crops), 1)
+        self.assertGreaterEqual(int(diagnostics.get("edge_fallback_attempted", 0) or 0), 1)
+        self.assertGreaterEqual(int(diagnostics.get("edge_fallback_crop_success", 0) or 0), 1)
+
+    def test_subtitle_diagnostics_empty_frame_has_no_crop_reason(self):
+        import paddle_ocr_backend
+        from paddle_ocr_backend import (
+            PaddleOCRSettings,
+            prepare_paddleocr_subtitle_line_images,
+            reset_subtitle_fastpath_diagnostics,
+        )
+
+        reset_subtitle_fastpath_diagnostics()
+        image = Image.new("RGB", (640, 128), "black")
+        diagnostics = {}
+        crops = prepare_paddleocr_subtitle_line_images(
+            image,
+            PaddleOCRSettings(upscale=1.0),
+            diagnostics=diagnostics,
+        )
+        self.assertEqual(crops, [])
+        # Empty/near-empty frames should land in bright/edge no-candidate path,
+        # not invent OCR text.
+        self.assertTrue(
+            int(diagnostics.get("bright_mask_empty", 0) or 0) >= 1
+            or int(diagnostics.get("edge_fallback_no_crop", 0) or 0) >= 1
+            or any(str(k).startswith("no_crop_reason_") for k in diagnostics)
         )
 
     def test_subtitle_recognition_falls_back_to_full_ocr_without_line_crop(self):
@@ -930,9 +1109,181 @@ class PaddleOCRPrewarmTests(unittest.TestCase):
         self.assertFalse(cold["cache_hit"])
         self.assertEqual(cold["build_kind"], "model_download_and_build")
         self.assertEqual(cold["engine_kind"], "text_recognition")
+        self.assertIn("import_s", cold)
+        self.assertIn("model_files_probe_s", cold)
+        self.assertIn("construct_s", cold)
+        self.assertIn("total_s", cold)
         self.assertTrue(hot["cache_hit"])
         self.assertEqual(hot["build_kind"], "cache_hit")
+        self.assertEqual(hot["import_s"], 0.0)
+        self.assertEqual(hot["model_files_probe_s"], 0.0)
+        self.assertEqual(hot["construct_s"], 0.0)
         clear_paddleocr_engines()
+
+    def test_prewarm_publishes_text_recognition_breakdown_metrics_and_log(self):
+        import app_logic
+        import worker_threads
+        from runtime_metrics import RuntimeMetrics
+
+        app = self._paddle_app()
+        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+        logs = []
+
+        def text_engine(settings_arg, phase_metrics=None, clock=None):
+            if phase_metrics is not None:
+                phase_metrics.update(
+                    {
+                        "engine_kind": "text_recognition",
+                        "cache_hit": False,
+                        "build_kind": "model_build_cached_files",
+                        "import_s": 12.5,
+                        "model_files_probe_s": 0.01,
+                        "construct_s": 3.25,
+                        "total_s": 15.76,
+                        "model_files_before": "present",
+                        "model_files_after": "present",
+                    }
+                )
+
+        def full_engine(settings_arg, phase_metrics=None, clock=None):
+            if phase_metrics is not None:
+                phase_metrics.update(
+                    {
+                        "engine_kind": "full",
+                        "cache_hit": True,
+                        "build_kind": "cache_hit",
+                        "import_s": 0.0,
+                        "model_files_probe_s": 0.0,
+                        "construct_s": 0.0,
+                        "total_s": 0.0,
+                        "model_files_before": "present",
+                        "model_files_after": "present",
+                    }
+                )
+
+        with patch.object(
+            app_logic.threading,
+            "Thread",
+            side_effect=self._inline_thread_factory(),
+        ):
+            with patch.object(
+                app_logic,
+                "get_paddleocr_text_recognition_engine",
+                side_effect=text_engine,
+            ):
+                with patch.object(
+                    app_logic,
+                    "get_paddleocr_engine",
+                    side_effect=full_engine,
+                ):
+                    with patch.object(app_logic, "log_debug", side_effect=logs.append):
+                        app_logic.GameChangingTranslator.start_paddleocr_prewarm(
+                            app,
+                            settings,
+                            "application startup",
+                        )
+
+        snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
+        text_phase = snapshot["text_recognition"]
+        self.assertEqual(text_phase["import_s"], 12.5)
+        self.assertEqual(text_phase["model_files_probe_s"], 0.01)
+        self.assertEqual(text_phase["construct_s"], 3.25)
+        self.assertEqual(text_phase["total_s"], 15.76)
+        gauges = app.runtime_metrics.snapshot()["gauges"]
+        self.assertEqual(
+            gauges["paddleocr_prewarm_text_recognition_import_s"],
+            12.5,
+        )
+        self.assertEqual(
+            gauges["paddleocr_prewarm_text_recognition_model_files_probe_s"],
+            0.01,
+        )
+        self.assertEqual(
+            gauges["paddleocr_prewarm_text_recognition_construct_s"],
+            3.25,
+        )
+        breakdown_logs = [
+            message
+            for message in logs
+            if "phase=text_recognition_breakdown" in str(message)
+        ]
+        self.assertTrue(breakdown_logs)
+        self.assertIn("import_s=12.5", breakdown_logs[-1])
+        self.assertIn("probe_s=0.01", breakdown_logs[-1])
+        self.assertIn("construct_s=3.25", breakdown_logs[-1])
+        self.assertIn("files_before=present", breakdown_logs[-1])
+
+    def test_prewarm_cache_hit_breakdown_metrics_are_zeroed(self):
+        import app_logic
+        import worker_threads
+        from runtime_metrics import RuntimeMetrics
+
+        app = self._paddle_app()
+        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+
+        def text_engine(settings_arg, phase_metrics=None, clock=None):
+            if phase_metrics is not None:
+                phase_metrics.update(
+                    {
+                        "engine_kind": "text_recognition",
+                        "cache_hit": True,
+                        "build_kind": "cache_hit",
+                        "import_s": 0.0,
+                        "model_files_probe_s": 0.0,
+                        "construct_s": 0.0,
+                        "total_s": 0.0,
+                        "model_files_before": "present",
+                        "model_files_after": "present",
+                    }
+                )
+
+        def full_engine(settings_arg, phase_metrics=None, clock=None):
+            if phase_metrics is not None:
+                phase_metrics.update(
+                    {
+                        "engine_kind": "full",
+                        "cache_hit": True,
+                        "build_kind": "cache_hit",
+                        "import_s": 0.0,
+                        "model_files_probe_s": 0.0,
+                        "construct_s": 0.0,
+                        "total_s": 0.0,
+                    }
+                )
+
+        with patch.object(
+            app_logic.threading,
+            "Thread",
+            side_effect=self._inline_thread_factory(),
+        ):
+            with patch.object(
+                app_logic,
+                "get_paddleocr_text_recognition_engine",
+                side_effect=text_engine,
+            ):
+                with patch.object(
+                    app_logic,
+                    "get_paddleocr_engine",
+                    side_effect=full_engine,
+                ):
+                    app_logic.GameChangingTranslator.start_paddleocr_prewarm(
+                        app,
+                        settings,
+                        "application startup",
+                    )
+
+        gauges = app.runtime_metrics.snapshot()["gauges"]
+        self.assertEqual(gauges["paddleocr_prewarm_text_recognition_import_s"], 0.0)
+        self.assertEqual(
+            gauges["paddleocr_prewarm_text_recognition_model_files_probe_s"],
+            0.0,
+        )
+        self.assertEqual(
+            gauges["paddleocr_prewarm_text_recognition_construct_s"],
+            0.0,
+        )
 
     def test_prewarm_metrics_cover_cold_hot_ready_settings_change_and_failure(self):
         import app_logic

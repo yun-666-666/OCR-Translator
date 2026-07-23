@@ -16,6 +16,66 @@ from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 PADDLEOCR_MODEL_CODE = "paddleocr"
 PADDLEOCR_DISPLAY_NAME = "PaddleOCR PP-OCRv6 (offline)"
 
+# Content-free, aggregated subtitle fast-path diagnostics.
+# These counters never store OCR text, pixels, paths, or absolute coordinates.
+_SUBTITLE_DIAG_LOCK = threading.Lock()
+_SUBTITLE_DIAG_COUNTERS = {}
+
+
+def _inc_subtitle_diag(name, amount=1):
+    key = str(name or "").strip()
+    if not key:
+        return
+    try:
+        delta = int(amount)
+    except (TypeError, ValueError):
+        return
+    if delta == 0:
+        return
+    with _SUBTITLE_DIAG_LOCK:
+        _SUBTITLE_DIAG_COUNTERS[key] = int(_SUBTITLE_DIAG_COUNTERS.get(key, 0) or 0) + delta
+
+
+def get_subtitle_fastpath_diagnostics_snapshot():
+    """Return a copy of aggregated subtitle fast-path diagnostic counters."""
+    with _SUBTITLE_DIAG_LOCK:
+        return dict(_SUBTITLE_DIAG_COUNTERS)
+
+
+def reset_subtitle_fastpath_diagnostics():
+    """Clear aggregated subtitle fast-path diagnostic counters (tests/tools)."""
+    with _SUBTITLE_DIAG_LOCK:
+        _SUBTITLE_DIAG_COUNTERS.clear()
+
+
+def _ratio_bucket(ratio):
+    try:
+        value = float(ratio)
+    except (TypeError, ValueError):
+        return "unknown"
+    if value < 0.05:
+        return "lt05"
+    if value < 0.10:
+        return "05_10"
+    if value < 0.14:
+        return "10_14"
+    if value < 0.20:
+        return "14_20"
+    if value < 0.40:
+        return "20_40"
+    if value < 0.80:
+        return "40_80"
+    return "ge80"
+
+
+def _diag_note(diagnostics, key, amount=1):
+    if diagnostics is None:
+        return
+    try:
+        diagnostics[key] = int(diagnostics.get(key, 0) or 0) + int(amount)
+    except Exception:
+        pass
+
 
 class PaddleOCRUnavailableError(RuntimeError):
     """Raised when PaddleOCR cannot be imported or initialized."""
@@ -475,8 +535,9 @@ def prepare_paddleocr_image(pil_image, settings):
     return image
 
 
-def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
+def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3, diagnostics=None):
     if raw_mask is None or not bool(raw_mask.any()):
+        _diag_note(diagnostics, "mask_empty", 1)
         return []
 
     mask = (raw_mask.astype(np.uint8) * 255)
@@ -494,19 +555,38 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
     component_count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, 8)
     components = []
     image_area = max(1, image.width * image.height)
+    reject_counts = {
+        "tiny": 0,
+        "tall_block": 0,
+        "huge_block": 0,
+        "fullwidth_short": 0,
+        "large_area": 0,
+    }
     for label_index in range(1, component_count):
         x, y, width, height, area = (int(value) for value in stats[label_index])
         if width < 8 or height < 6 or area < 20:
+            reject_counts["tiny"] += 1
             continue
         aspect_ratio = width / max(1, height)
         area_ratio = area / image_area
         if height > image.height * 0.55 and aspect_ratio < 2.5:
+            reject_counts["tall_block"] += 1
             continue
         if width > image.width * 0.80 and height > image.height * 0.40:
+            reject_counts["huge_block"] += 1
             continue
         if width > image.width * 0.90 and height < image.height * 0.14:
+            reject_counts["fullwidth_short"] += 1
+            width_bucket = _ratio_bucket(width / max(1, image.width))
+            height_bucket = _ratio_bucket(height / max(1, image.height))
+            _diag_note(
+                diagnostics,
+                f"reject_fullwidth_short_w{width_bucket}_h{height_bucket}",
+                1,
+            )
             continue
         if area_ratio > 0.35 and height > image.height * 0.30:
+            reject_counts["large_area"] += 1
             continue
         components.append({
             "x1": x,
@@ -516,6 +596,11 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
             "height": height,
             "center_y": y + (height / 2.0),
         })
+
+    for reject_name, count in reject_counts.items():
+        if count:
+            _diag_note(diagnostics, f"reject_{reject_name}", count)
+    _diag_note(diagnostics, "components_kept", len(components))
 
     line_groups = []
     for component in sorted(components, key=lambda item: item["center_y"]):
@@ -539,6 +624,13 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
         matched_group["center_y"] = matched_group["y1"] + (matched_group["height"] / 2.0)
 
     candidates = []
+    line_reject = {
+        "narrow_line": 0,
+        "bad_height": 0,
+        "low_aspect": 0,
+        "small_crop": 0,
+        "portrait_crop": 0,
+    }
     for group in line_groups:
         x1 = int(group["x1"])
         y1 = int(group["y1"])
@@ -547,10 +639,13 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
         line_width = x2 - x1
         line_height = y2 - y1
         if line_width < max(32, int(image.width * 0.05)):
+            line_reject["narrow_line"] += 1
             continue
         if line_height < 6 or line_height > image.height * 0.80:
+            line_reject["bad_height"] += 1
             continue
         if line_width / max(1, line_height) < 1.4:
+            line_reject["low_aspect"] += 1
             continue
         x_padding = max(6, int(line_height * 0.35))
         y_padding = max(4, int(line_height * 0.20))
@@ -563,8 +658,10 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
         crop_width = crop_box[2] - crop_box[0]
         crop_height = crop_box[3] - crop_box[1]
         if crop_width < 16 or crop_height < 8:
+            line_reject["small_crop"] += 1
             continue
         if crop_width < crop_height:
+            line_reject["portrait_crop"] += 1
             continue
         center_x = (crop_box[0] + crop_box[2]) / 2.0
         center_y = (crop_box[1] + crop_box[3]) / 2.0
@@ -573,9 +670,15 @@ def _extract_subtitle_line_images_from_mask(image, raw_mask, max_lines=3):
         score = (crop_width * crop_height) * (1.0 + (0.35 * bottom_bias)) * (1.0 - (0.20 * center_penalty))
         candidates.append((crop_box[1], score, image.crop(crop_box)))
 
+    for reject_name, count in line_reject.items():
+        if count:
+            _diag_note(diagnostics, f"line_{reject_name}", count)
+
     if len(candidates) > max_lines:
         candidates = sorted(candidates, key=lambda item: item[1], reverse=True)[:max_lines]
-    return [crop for _y, _score, crop in sorted(candidates, key=lambda item: item[0])]
+    crops = [crop for _y, _score, crop in sorted(candidates, key=lambda item: item[0])]
+    _diag_note(diagnostics, "crops", len(crops))
+    return crops
 
 
 def _build_subtitle_edge_mask(gray):
@@ -591,9 +694,15 @@ def _build_subtitle_edge_mask(gray):
     return np.logical_or(contrast_mask, edges)
 
 
-def prepare_paddleocr_subtitle_line_images(pil_image, settings, max_lines=3):
+def prepare_paddleocr_subtitle_line_images(
+    pil_image,
+    settings,
+    max_lines=3,
+    diagnostics=None,
+):
     image = prepare_paddleocr_image(pil_image, settings)
     if image.width <= 0 or image.height <= 0:
+        _diag_note(diagnostics, "invalid_image", 1)
         return []
 
     rgb = np.array(image.convert("RGB"))
@@ -604,15 +713,106 @@ def prepare_paddleocr_subtitle_line_images(pil_image, settings, max_lines=3):
         threshold = max(180.0, float(np.percentile(gray, 95)))
         bright_mask = gray >= threshold
     if not bool(bright_mask.any()):
+        _diag_note(diagnostics, "bright_mask_empty", 1)
         edge_mask = _build_subtitle_edge_mask(gray)
-        return _extract_subtitle_line_images_from_mask(image, edge_mask, max_lines=max_lines)
+        _diag_note(diagnostics, "edge_fallback_attempted", 1)
+        edge_diag = {}
+        crops = _extract_subtitle_line_images_from_mask(
+            image,
+            edge_mask,
+            max_lines=max_lines,
+            diagnostics=edge_diag,
+        )
+        if diagnostics is not None:
+            for key, value in edge_diag.items():
+                _diag_note(diagnostics, f"edge_{key}", value)
+            if crops:
+                _diag_note(diagnostics, "edge_fallback_crop_success", 1)
+            else:
+                _diag_note(diagnostics, "edge_fallback_no_crop", 1)
+                # Promote top edge reject reason for no-crop classification.
+                top_reject = _top_reject_reason(edge_diag, prefix="")
+                if top_reject:
+                    _diag_note(diagnostics, f"no_crop_reason_edge_{top_reject}", 1)
+                else:
+                    _diag_note(diagnostics, "no_crop_reason_edge_no_candidates", 1)
+        return crops
 
-    line_images = _extract_subtitle_line_images_from_mask(image, bright_mask, max_lines=max_lines)
+    bright_diag = {}
+    line_images = _extract_subtitle_line_images_from_mask(
+        image,
+        bright_mask,
+        max_lines=max_lines,
+        diagnostics=bright_diag,
+    )
+    if diagnostics is not None:
+        for key, value in bright_diag.items():
+            _diag_note(diagnostics, f"bright_{key}", value)
     if line_images:
+        _diag_note(diagnostics, "bright_crop_success", 1)
         return line_images
 
+    _diag_note(diagnostics, "bright_no_crop", 1)
+    top_bright_reject = _top_reject_reason(bright_diag, prefix="")
+    if top_bright_reject:
+        _diag_note(diagnostics, f"no_crop_reason_bright_{top_bright_reject}", 1)
+    else:
+        _diag_note(diagnostics, "no_crop_reason_bright_no_candidates", 1)
+
     edge_mask = _build_subtitle_edge_mask(gray)
-    return _extract_subtitle_line_images_from_mask(image, edge_mask, max_lines=max_lines)
+    _diag_note(diagnostics, "edge_fallback_attempted", 1)
+    edge_diag = {}
+    crops = _extract_subtitle_line_images_from_mask(
+        image,
+        edge_mask,
+        max_lines=max_lines,
+        diagnostics=edge_diag,
+    )
+    if diagnostics is not None:
+        for key, value in edge_diag.items():
+            _diag_note(diagnostics, f"edge_{key}", value)
+        if crops:
+            _diag_note(diagnostics, "edge_fallback_crop_success", 1)
+        else:
+            _diag_note(diagnostics, "edge_fallback_no_crop", 1)
+            top_edge_reject = _top_reject_reason(edge_diag, prefix="")
+            if top_edge_reject:
+                _diag_note(diagnostics, f"no_crop_reason_edge_{top_edge_reject}", 1)
+            else:
+                _diag_note(diagnostics, "no_crop_reason_edge_no_candidates", 1)
+    return crops
+
+
+def _top_reject_reason(diag, prefix=""):
+    if not isinstance(diag, dict):
+        return ""
+    best_name = ""
+    best_count = 0
+    for key, value in diag.items():
+        if not str(key).startswith("reject_"):
+            continue
+        try:
+            count = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if count > best_count:
+            best_count = count
+            best_name = str(key)
+    if not best_name:
+        # Fall back to line-level rejects.
+        for key, value in diag.items():
+            if not str(key).startswith("line_"):
+                continue
+            try:
+                count = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if count > best_count:
+                best_count = count
+                best_name = str(key)
+    if not best_name:
+        return ""
+    return f"{prefix}{best_name}" if prefix else best_name
 
 
 def _tolist_if_possible(value):
@@ -678,9 +878,12 @@ def flatten_paddleocr_result(result, min_score=0.45, keep_linebreaks=False):
     return separator.join(line.text for line in lines), lines
 
 
-def flatten_paddleocr_text_recognition_result(result, min_score=0.45):
+def flatten_paddleocr_text_recognition_result(result, min_score=0.45, diagnostics=None):
     min_score = _coerce_float(min_score, 0.45, 0.0, 1.0)
     lines = []
+    low_conf = 0
+    noise = 0
+    empty = 0
     for item in _iter_paddleocr_result_items(result) or ():
         nested = _get_result_value(item, "res", None)
         if nested is not None:
@@ -689,12 +892,14 @@ def flatten_paddleocr_text_recognition_result(result, min_score=0.45):
             _get_result_value(item, "rec_text", "")
         )
         if not clean_text:
+            empty += 1
             continue
         try:
             confidence = float(_get_result_value(item, "rec_score", 0.0) or 0.0)
         except Exception:
             confidence = 0.0
         if confidence < min_score:
+            low_conf += 1
             log_debug_coalesced(
                 "paddle-subtitle-fast-path-low-confidence",
                 "PaddleOCR subtitle fast path filtered low-confidence line "
@@ -704,6 +909,7 @@ def flatten_paddleocr_text_recognition_result(result, min_score=0.45):
             )
             continue
         if _looks_like_subtitle_symbol_noise(clean_text):
+            noise += 1
             log_debug_coalesced(
                 "paddle-subtitle-fast-path-symbol-noise",
                 "PaddleOCR subtitle fast path filtered noisy line "
@@ -713,6 +919,11 @@ def flatten_paddleocr_text_recognition_result(result, min_score=0.45):
             )
             continue
         lines.append(PaddleOCRLine(clean_text, round(confidence, 3), None))
+    if diagnostics is not None:
+        _diag_note(diagnostics, "rec_empty", empty)
+        _diag_note(diagnostics, "rec_low_confidence", low_conf)
+        _diag_note(diagnostics, "rec_noise", noise)
+        _diag_note(diagnostics, "rec_kept", len(lines))
     return " ".join(line.text for line in lines), lines
 
 
@@ -756,6 +967,66 @@ def _looks_like_subtitle_symbol_noise(text):
     return noisy_ratio > 0.45 and alpha_count < 3
 
 
+def _publish_subtitle_diag(event_key, message, diagnostics=None, *, outcome=None):
+    if isinstance(diagnostics, dict):
+        published_counts = diagnostics.get("_published_diag_counts")
+        if not isinstance(published_counts, dict):
+            published_counts = {}
+            diagnostics["_published_diag_counts"] = published_counts
+        for key, value in diagnostics.items():
+            if str(key).startswith("_"):
+                continue
+            try:
+                amount = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            previous_amount = int(published_counts.get(key, 0) or 0)
+            if amount > previous_amount:
+                _inc_subtitle_diag(key, amount - previous_amount)
+                published_counts[key] = amount
+        # Keep log lines short and content-free: only a compact outcome code.
+        # Full bucket breakdown lives in get_subtitle_fastpath_diagnostics_snapshot().
+        if outcome is None:
+            for key in (
+                "fast_path_success",
+                "fast_path_no_usable_text",
+                "fast_path_error",
+                "fast_path_no_line_crop",
+                "full_fallback_text",
+                "full_fallback_empty",
+                "full_fallback_error",
+            ):
+                if int(diagnostics.get(key, 0) or 0):
+                    outcome = key
+                    break
+        reason = None
+        reason_items = [
+            (k, int(v or 0))
+            for k, v in diagnostics.items()
+            if str(k).startswith("no_crop_reason_")
+        ]
+        reason_items.sort(key=lambda item: item[1], reverse=True)
+        if reason_items and reason_items[0][1] > 0:
+            reason = reason_items[0][0]
+        bits = []
+        if outcome:
+            bits.append(f"outcome={outcome}")
+        if reason:
+            bits.append(f"reason={reason}")
+        rec_low = int(diagnostics.get("rec_low_confidence", 0) or 0)
+        rec_noise = int(diagnostics.get("rec_noise", 0) or 0)
+        if rec_low:
+            bits.append(f"low_conf={rec_low}")
+        if rec_noise:
+            bits.append(f"noise={rec_noise}")
+        if bits:
+            message = f"{message} [{' '.join(bits)}]"
+    # Bound log size for existing content-free contracts.
+    if len(message) > 220:
+        message = message[:217].rstrip() + "..."
+    log_debug_coalesced(event_key, message, interval_seconds=5.0)
+
+
 def recognize_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
     settings = normalize_paddleocr_settings(settings)
     engine = get_paddleocr_engine(settings)
@@ -770,7 +1041,12 @@ def recognize_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
 
 def recognize_subtitle_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
     settings = normalize_paddleocr_settings(settings)
-    line_images = prepare_paddleocr_subtitle_line_images(pil_image, settings)
+    diagnostics = {}
+    line_images = prepare_paddleocr_subtitle_line_images(
+        pil_image,
+        settings,
+        diagnostics=diagnostics,
+    )
     if line_images:
         try:
             engine = get_paddleocr_text_recognition_engine(settings)
@@ -781,44 +1057,86 @@ def recognize_subtitle_with_paddleocr(pil_image, settings=None, keep_linebreaks=
                 input=predict_input,
                 batch_size=max(1, len(line_inputs)),
             )
+            rec_diag = {}
             _line_text, recognized_lines = flatten_paddleocr_text_recognition_result(
                 result,
                 min_score=settings.min_score,
+                diagnostics=rec_diag,
             )
+            for key, value in rec_diag.items():
+                _diag_note(diagnostics, key, value)
             if recognized_lines:
                 separator = "\n" if keep_linebreaks else " "
                 text = separator.join(line.text for line in recognized_lines)
-                log_debug_coalesced(
+                _diag_note(diagnostics, "fast_path_success", 1)
+                _publish_subtitle_diag(
                     "paddle-subtitle-fast-path-success",
                     "PaddleOCR subtitle fast path recognized "
                     f"lines={len(recognized_lines)} chars={len(text)}",
-                    interval_seconds=5.0,
+                    diagnostics,
+                    outcome="fast_path_success",
                 )
                 return text, recognized_lines
-            log_debug_coalesced(
+            _diag_note(diagnostics, "fast_path_no_usable_text", 1)
+            _publish_subtitle_diag(
                 "paddle-subtitle-fast-path-no-usable-text",
                 "PaddleOCR subtitle fast path found no usable text; "
                 "falling back to full OCR",
-                interval_seconds=5.0,
+                diagnostics,
+                outcome="fast_path_no_usable_text",
             )
         except Exception as subtitle_error:
             reason = _sanitize_exception_reason_for_log(subtitle_error)
-            log_debug_coalesced(
+            _diag_note(diagnostics, "fast_path_error", 1)
+            _publish_subtitle_diag(
                 "paddle-subtitle-fast-path-error",
                 "PaddleOCR subtitle fast path failed; falling back to full OCR: "
                 f"{type(subtitle_error).__name__}: {reason}",
-                interval_seconds=5.0,
+                diagnostics,
+                outcome="fast_path_error",
             )
     else:
-        log_debug_coalesced(
+        _diag_note(diagnostics, "fast_path_no_line_crop", 1)
+        _publish_subtitle_diag(
             "paddle-subtitle-fast-path-no-line-crop",
             "PaddleOCR subtitle fast path found no line crop; "
             "falling back to full OCR",
-            interval_seconds=5.0,
+            diagnostics,
+            outcome="fast_path_no_line_crop",
         )
 
-    return recognize_with_paddleocr(
-        pil_image,
-        settings,
-        keep_linebreaks=keep_linebreaks,
-    )
+    try:
+        text, lines = recognize_with_paddleocr(
+            pil_image,
+            settings,
+            keep_linebreaks=keep_linebreaks,
+        )
+        if text and str(text).strip():
+            _diag_note(diagnostics, "full_fallback_text", 1)
+            _publish_subtitle_diag(
+                "paddle-subtitle-full-fallback-text",
+                "PaddleOCR full OCR fallback produced text "
+                f"lines={len(lines)} chars={len(str(text))}",
+                diagnostics,
+                outcome="full_fallback_text",
+            )
+        else:
+            _diag_note(diagnostics, "full_fallback_empty", 1)
+            _publish_subtitle_diag(
+                "paddle-subtitle-full-fallback-empty",
+                "PaddleOCR full OCR fallback produced no text",
+                diagnostics,
+                outcome="full_fallback_empty",
+            )
+        return text, lines
+    except Exception as full_error:
+        reason = _sanitize_exception_reason_for_log(full_error)
+        _diag_note(diagnostics, "full_fallback_error", 1)
+        _publish_subtitle_diag(
+            "paddle-subtitle-full-fallback-error",
+            "PaddleOCR full OCR fallback failed: "
+            f"{type(full_error).__name__}: {reason}",
+            diagnostics,
+            outcome="full_fallback_error",
+        )
+        raise

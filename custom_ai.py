@@ -161,3 +161,14 @@ class CustomAIProvider(CustomAICapabilitiesMixin, CustomAIRequestsMixin, CustomA
         self._unsupported_structured_output_keys = set()
         self._unsupported_reasoning_effort_keys = set()
         self._unsupported_prompt_cache_key_keys = set()
+        # Route-scoped temporary non-stream bypass after repeated stream
+        # transport failures. Not a permanent "stream unsupported" memory.
+        self._stream_transport_bypass_lock = threading.RLock()
+        self._stream_transport_bypass_states = {}
+        self._stream_transport_bypass_metrics = {
+            "stream_transport_failure_streak_max": 0,
+            "stream_transport_bypass_entered": 0,
+            "stream_transport_bypass_requests": 0,
+            "stream_transport_bypass_recovered": 0,
+            "stream_transport_bypass_expired": 0,
+        }
