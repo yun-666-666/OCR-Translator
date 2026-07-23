@@ -18,6 +18,36 @@ class PaddleOCRBackendTests(unittest.TestCase):
             ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"),
         )
 
+    def test_coerce_float_and_int_share_backend_contract(self):
+        from paddle_ocr_backend import _coerce_float, _coerce_int
+
+        self.assertEqual(_coerce_float("0.35", 0.45, 0.0, 1.0), 0.35)
+        self.assertEqual(_coerce_float("bad", 0.45, 0.0, 1.0), 0.45)
+        self.assertEqual(_coerce_float(None, 0.45, 0.0, 1.0), 0.45)
+        self.assertEqual(_coerce_float("2.5", 1.0, 1.0, 2.0), 2.0)
+        self.assertEqual(_coerce_float("0.1", 1.0, 1.0, 4.0), 1.0)
+
+        self.assertEqual(_coerce_int("960", 960, 128, 4096), 960)
+        self.assertEqual(_coerce_int("12.9", 960, 128, 4096), 960)
+        self.assertEqual(_coerce_int(None, 960, 128, 4096), 960)
+        self.assertEqual(_coerce_int("64", 960, 128, 4096), 128)
+        self.assertEqual(_coerce_int("9999", 960, 128, 4096), 4096)
+
+    def test_normalize_paddleocr_settings_coerces_numeric_fields(self):
+        from paddle_ocr_backend import PaddleOCRSettings, normalize_paddleocr_settings
+
+        settings = normalize_paddleocr_settings(
+            PaddleOCRSettings(
+                min_score="1.5",
+                upscale="0.25",
+                text_det_limit_side_len="50",
+            )
+        )
+
+        self.assertEqual(settings.min_score, 1.0)
+        self.assertEqual(settings.upscale, 1.0)
+        self.assertEqual(settings.text_det_limit_side_len, 128)
+
     def test_paddleocr_settings_default_to_fast_subtitle_values(self):
         from paddle_ocr_backend import PaddleOCRSettings
 
@@ -1633,6 +1663,50 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         self.assertEqual(settings.model_size, "small")
         self.assertEqual(settings.min_score, 0.35)
         self.assertEqual(settings.upscale, 2.0)
+
+    def test_worker_paddleocr_settings_use_shared_numeric_coercion(self):
+        import worker_capture
+        import worker_threads
+        from paddle_ocr_backend import _coerce_float, _coerce_int
+
+        app = types.SimpleNamespace(
+            paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
+            paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "tiny"),
+            paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
+            paddleocr_min_score_var=types.SimpleNamespace(get=lambda: "not-a-number"),
+            paddleocr_upscale_var=types.SimpleNamespace(get=lambda: "9.0"),
+            paddleocr_text_det_limit_side_len_var=types.SimpleNamespace(get=lambda: "12"),
+            paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
+            paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: "yes"),
+        )
+
+        settings = worker_threads.get_paddleocr_settings_from_app(app)
+
+        # Characterisation: invalid / out-of-range UI values must keep the same
+        # clamp-and-default contract as paddle_ocr_backend helpers.
+        self.assertEqual(
+            settings.min_score,
+            _coerce_float("not-a-number", 0.45, 0.0, 1.0),
+        )
+        self.assertEqual(
+            settings.upscale,
+            _coerce_float("9.0", 1.0, 1.0, 4.0),
+        )
+        self.assertEqual(
+            settings.text_det_limit_side_len,
+            _coerce_int("12", 960, 128, 4096),
+        )
+        self.assertEqual(settings.min_score, 0.45)
+        self.assertEqual(settings.upscale, 4.0)
+        self.assertEqual(settings.text_det_limit_side_len, 128)
+        self.assertTrue(settings.use_textline_orientation)
+        # Dedup invariant: worker modules re-export the backend helpers.
+        self.assertIs(worker_capture._coerce_float, _coerce_float)
+        self.assertIs(worker_capture._coerce_int, _coerce_int)
+        self.assertIs(worker_threads._coerce_float, _coerce_float)
+        self.assertIs(worker_threads._coerce_int, _coerce_int)
 
     def test_paddleocr_queue_keeps_latest_frame_only(self):
         import worker_threads

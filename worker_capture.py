@@ -18,6 +18,8 @@ from ocr_utils import build_capture_signature
 from paddle_ocr_backend import (
     PADDLEOCR_MODEL_CODE,
     PaddleOCRSettings,
+    _coerce_float,
+    _coerce_int,
     prepare_paddleocr_image,
     recognize_subtitle_with_paddleocr,
 )
@@ -305,30 +307,6 @@ def _read_app_var(app, attr, default=None):
         except Exception:
             return default
     return default
-
-
-def _coerce_float(value, default, min_value=None, max_value=None):
-    try:
-        coerced = float(value)
-    except (TypeError, ValueError):
-        coerced = float(default)
-    if min_value is not None:
-        coerced = max(float(min_value), coerced)
-    if max_value is not None:
-        coerced = min(float(max_value), coerced)
-    return coerced
-
-
-def _coerce_int(value, default, min_value=None, max_value=None):
-    try:
-        coerced = int(value)
-    except (TypeError, ValueError):
-        coerced = int(default)
-    if min_value is not None:
-        coerced = max(int(min_value), coerced)
-    if max_value is not None:
-        coerced = min(int(max_value), coerced)
-    return coerced
 
 
 def _coerce_bool(value, default=False):
