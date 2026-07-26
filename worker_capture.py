@@ -491,6 +491,17 @@ def publish_capture_ui_snapshot(app, *, bump_generation=False, reason=""):
             source_geometry=source_geometry,
             generation=app.capture_ui_generation,
         )
+        previous = getattr(app, "capture_ui_snapshot", None)
+        # Periodic refreshers (e.g. the adaptive-interval tick) republish every
+        # cycle without bumping the generation.  When nothing actually changed
+        # this is an identical snapshot, so keep the existing object and skip
+        # the store + the per-publish log I/O (dominant when nothing changes).
+        if (
+            not bump_generation
+            and isinstance(previous, CaptureUISnapshot)
+            and previous == snapshot
+        ):
+            return previous
         app.capture_ui_snapshot = snapshot
 
     if reason:

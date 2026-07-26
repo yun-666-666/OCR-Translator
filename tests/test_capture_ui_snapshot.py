@@ -36,6 +36,44 @@ class CaptureUISnapshotTests(unittest.TestCase):
         self.assertNotIn("source_overlay", fields)
         self.assertTrue(all(not hasattr(value, "winfo_exists") for value in fields.values()))
 
+    def test_unchanged_republish_without_bump_is_skipped(self):
+        app = types.SimpleNamespace(
+            current_scan_interval=120,
+            base_scan_interval=100,
+            source_area=[1, 2, 11, 12],
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: True,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            source_overlay=None,
+        )
+        first = publish_capture_ui_snapshot(app, reason="first")
+        with patch("worker_capture._log_debug") as log:
+            again = publish_capture_ui_snapshot(
+                app, reason="adaptive scan interval"
+            )
+        # Identical inputs, no generation bump: keep the same object and skip
+        # the per-publish log I/O entirely.
+        self.assertIs(again, first)
+        self.assertIs(app.capture_ui_snapshot, first)
+        log.assert_not_called()
+
+    def test_changed_republish_updates_snapshot(self):
+        app = types.SimpleNamespace(
+            current_scan_interval=120,
+            base_scan_interval=100,
+            source_area=[1, 2, 11, 12],
+            get_ocr_model_setting=lambda: "custom_ai",
+            is_api_based_ocr_model=lambda model=None: True,
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            source_overlay=None,
+        )
+        first = publish_capture_ui_snapshot(app, reason="first")
+        app.source_area = [5, 6, 15, 16]
+        second = publish_capture_ui_snapshot(app, reason="geometry changed")
+        self.assertIsNot(second, first)
+        self.assertEqual(second.source_geometry, (5, 6, 15, 16))
+        self.assertIs(app.capture_ui_snapshot, second)
+
     def test_worker_reads_snapshot_without_touching_tk_apis(self):
         screenshot = Image.new("RGB", (4, 4), (9, 9, 9))
         forbidden = Mock(side_effect=AssertionError("Tk access from capture worker"))
