@@ -699,13 +699,18 @@ def prepare_paddleocr_subtitle_line_images(
     settings,
     max_lines=3,
     diagnostics=None,
+    prepared_image=None,
 ):
-    image = prepare_paddleocr_image(pil_image, settings)
+    image = (
+        prepared_image
+        if prepared_image is not None
+        else prepare_paddleocr_image(pil_image, settings)
+    )
     if image.width <= 0 or image.height <= 0:
         _diag_note(diagnostics, "invalid_image", 1)
         return []
 
-    rgb = np.array(image.convert("RGB"))
+    rgb = np.array(image if image.mode == "RGB" else image.convert("RGB"))
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     threshold = max(145.0, float(np.percentile(gray, 88)))
     bright_mask = gray >= threshold
@@ -1027,10 +1032,13 @@ def _publish_subtitle_diag(event_key, message, diagnostics=None, *, outcome=None
     log_debug_coalesced(event_key, message, interval_seconds=5.0)
 
 
-def recognize_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
+def recognize_with_paddleocr(
+    pil_image, settings=None, keep_linebreaks=False, prepared_image=None
+):
     settings = normalize_paddleocr_settings(settings)
     engine = get_paddleocr_engine(settings)
-    prepared_image = prepare_paddleocr_image(pil_image, settings)
+    if prepared_image is None:
+        prepared_image = prepare_paddleocr_image(pil_image, settings)
     result = engine.predict(np.array(prepared_image))
     return flatten_paddleocr_result(
         result,
@@ -1041,17 +1049,28 @@ def recognize_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
 
 def recognize_subtitle_with_paddleocr(pil_image, settings=None, keep_linebreaks=False):
     settings = normalize_paddleocr_settings(settings)
+    # Prepare the frame once and reuse it for both the line-crop fast path and
+    # the full-frame fallback below (fallback previously re-prepared + re-upscaled).
+    prepared_image = prepare_paddleocr_image(pil_image, settings)
     diagnostics = {}
     line_images = prepare_paddleocr_subtitle_line_images(
         pil_image,
         settings,
         diagnostics=diagnostics,
+        prepared_image=prepared_image,
     )
     if line_images:
         try:
             engine = get_paddleocr_text_recognition_engine(settings)
             recognized_lines = []
-            line_inputs = [np.array(line_image.convert("RGB")) for line_image in line_images]
+            line_inputs = [
+                np.array(
+                    line_image
+                    if line_image.mode == "RGB"
+                    else line_image.convert("RGB")
+                )
+                for line_image in line_images
+            ]
             predict_input = line_inputs if len(line_inputs) > 1 else line_inputs[0]
             result = engine.predict(
                 input=predict_input,
@@ -1110,6 +1129,7 @@ def recognize_subtitle_with_paddleocr(pil_image, settings=None, keep_linebreaks=
             pil_image,
             settings,
             keep_linebreaks=keep_linebreaks,
+            prepared_image=prepared_image,
         )
         if text and str(text).strip():
             _diag_note(diagnostics, "full_fallback_text", 1)

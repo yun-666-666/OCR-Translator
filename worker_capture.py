@@ -595,8 +595,22 @@ def process_local_ocr_frame(
             settings,
             keep_linebreaks=keep_linebreaks,
         )
-        preview_pil = _prepare_paddleocr_image(screenshot_pil, settings)
-        return ocr_cleaned_text, _pil_to_debug_bgr(preview_pil), "PaddleOCR"
+        # The preview image is only consumed on the OCR-debugging path
+        # (update_debug_display / save_debug_images), so skip the
+        # convert+upscale+cvtColor work entirely when debugging is off.
+        if isinstance(capture_snapshot, CaptureUISnapshot):
+            ocr_debugging = bool(capture_snapshot.ocr_debugging)
+        else:
+            ocr_debugging = _coerce_bool(
+                _read_app_var(app, "ocr_debugging_var", False),
+                False,
+            )
+        debug_img = None
+        if ocr_debugging:
+            debug_img = _pil_to_debug_bgr(
+                _prepare_paddleocr_image(screenshot_pil, settings)
+            )
+        return ocr_cleaned_text, debug_img, "PaddleOCR"
 
     raise ValueError(f"Unsupported local OCR model: {ocr_model}")
 

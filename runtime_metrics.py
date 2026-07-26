@@ -81,11 +81,14 @@ class RuntimeMetrics:
             for name, events in list(self._timings.items()):
                 values = self._fresh_timing_values(events, now)
                 if values:
+                    # Sort once and index both percentiles from the same
+                    # ordered list; `latest` stays insertion-ordered.
+                    ordered = sorted(values)
                     timings[name] = {
-                        "count": len(values),
+                        "count": len(ordered),
                         "latest": values[-1],
-                        "p50": self._percentile(values, 50),
-                        "p90": self._percentile(values, 90),
+                        "p50": self._percentile_from_sorted(ordered, 50),
+                        "p90": self._percentile_from_sorted(ordered, 90),
                     }
                 elif not events:
                     self._timings.pop(name, None)
@@ -147,10 +150,40 @@ class RuntimeMetrics:
         return [value for _timestamp, value in events]
 
     @staticmethod
-    def _percentile(values, percentile):
-        if not values:
+    def _percentile_from_sorted(ordered, percentile):
+        if not ordered:
             return 0.0
-        ordered = sorted(values)
         rank = int(math.ceil((percentile / 100.0) * len(ordered)))
         index = min(len(ordered) - 1, max(0, rank - 1))
         return ordered[index]
+
+    @staticmethod
+    def _percentile(values, percentile):
+        if not values:
+            return 0.0
+        return RuntimeMetrics._percentile_from_sorted(
+            sorted(values), percentile
+        )
+
+    def get_timing(self, name):
+        """Return one timing metric's summary without percentiling the rest."""
+        metric_name = str(name or "").strip()
+        if not metric_name:
+            return None
+        now = float(self._clock())
+        with self._lock:
+            events = self._timings.get(metric_name)
+            if events is None:
+                return None
+            values = self._fresh_timing_values(events, now)
+            if not values:
+                if not events:
+                    self._timings.pop(metric_name, None)
+                return None
+            ordered = sorted(values)
+            return {
+                "count": len(ordered),
+                "latest": values[-1],
+                "p50": self._percentile_from_sorted(ordered, 50),
+                "p90": self._percentile_from_sorted(ordered, 90),
+            }

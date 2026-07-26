@@ -1855,6 +1855,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             paddleocr_text_det_limit_side_len_var=types.SimpleNamespace(get=lambda: "960"),
             paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
             paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
+            ocr_debugging_var=types.SimpleNamespace(get=lambda: True),
             wait_for_paddleocr_prewarm=Mock(return_value=True),
         )
 
@@ -1877,6 +1878,47 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             recognize.call_args.args[1],
             timeout=20.0,
         )
+
+    def test_process_local_ocr_frame_skips_debug_image_when_debugging_off(self):
+        import worker_threads
+        import worker_capture
+
+        image = Image.new("RGB", (16, 10), "white")
+        app = types.SimpleNamespace(
+            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
+            paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
+            paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "small"),
+            paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
+            paddleocr_min_score_var=types.SimpleNamespace(get=lambda: "0.35"),
+            paddleocr_upscale_var=types.SimpleNamespace(get=lambda: "1.0"),
+            paddleocr_text_det_limit_side_len_var=types.SimpleNamespace(get=lambda: "960"),
+            paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
+            paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
+            ocr_debugging_var=types.SimpleNamespace(get=lambda: False),
+            wait_for_paddleocr_prewarm=Mock(return_value=True),
+        )
+
+        with patch.object(
+            worker_threads,
+            "recognize_subtitle_with_paddleocr",
+            return_value=("Hello world", []),
+        ), patch.object(
+            worker_capture,
+            "_prepare_paddleocr_image",
+        ) as prepare_preview:
+            text, processed_cv_img, engine_label = worker_threads.process_local_ocr_frame(
+                app,
+                image,
+                "paddleocr",
+            )
+
+        # Debugging off: no preview image built and the expensive prep is skipped.
+        self.assertEqual(text, "Hello world")
+        self.assertEqual(engine_label, "PaddleOCR")
+        self.assertIsNone(processed_cv_img)
+        prepare_preview.assert_not_called()
 
     def test_process_local_ocr_frame_uses_paddleocr_subtitle_fast_path(self):
         import worker_threads

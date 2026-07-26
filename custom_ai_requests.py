@@ -1,5 +1,6 @@
 """Response normalization, parsing, model listing, and usage extraction."""
 
+from collections import namedtuple
 import json
 import sys
 import time
@@ -10,6 +11,20 @@ from custom_ai_policy import (
     TRANSLATION_OUTPUT_PREAMBLES,
     TRANSLATION_OUTPUT_WRAPPER_LABELS,
     normalize_custom_ai_latency_mode,
+)
+
+
+# Source-derived values that are invariant across a single streamed response.
+# Precomputed once per stream instead of on every SSE chunk.
+_StreamSourceContext = namedtuple(
+    "_StreamSourceContext",
+    [
+        "source_is_fenced",
+        "source_casefold",
+        "source_first_line",
+        "active_preambles",
+        "active_labels",
+    ],
 )
 
 
@@ -97,15 +112,8 @@ class CustomAIRequestsMixin:
             )
         return normalized
 
-    def _normalize_translation_stream_partial(
-        self,
-        source_text,
-        partial_text,
-    ):
-        raw = str(partial_text or "").lstrip("\ufeff")
-        if not raw:
-            return None
-
+    def _translation_stream_source_context(self, source_text):
+        """Precompute the per-stream invariants derived only from source_text."""
         source = str(source_text or "").strip()
         source_lines = source.splitlines()
         source_is_fenced = (
@@ -113,17 +121,52 @@ class CustomAIRequestsMixin:
             and source_lines[0].strip().startswith("```")
             and source_lines[-1].strip() == "```"
         )
-        if source_is_fenced:
-            return raw
-
-        candidate = raw.lstrip()
-        candidate_casefold = candidate.casefold()
         source_casefold = source.casefold()
         source_first_line = (
             source_lines[0].strip().casefold()
             if source_lines
             else ""
         )
+        active_preambles = tuple(
+            preamble
+            for preamble in TRANSLATION_OUTPUT_PREAMBLES
+            if not source_casefold.startswith(preamble)
+        )
+        active_labels = tuple(
+            label
+            for label in TRANSLATION_OUTPUT_WRAPPER_LABELS
+            if source_first_line != label
+        )
+        return _StreamSourceContext(
+            source_is_fenced=source_is_fenced,
+            source_casefold=source_casefold,
+            source_first_line=source_first_line,
+            active_preambles=active_preambles,
+            active_labels=active_labels,
+        )
+
+    def _normalize_translation_stream_partial(
+        self,
+        source_text,
+        partial_text,
+        source_context=None,
+    ):
+        raw = str(partial_text or "").lstrip("\ufeff")
+        if not raw:
+            return None
+
+        # source_context holds values that depend only on source_text and are
+        # therefore constant for the whole stream; compute on demand when a
+        # caller does not supply the precomputed context.
+        if source_context is None:
+            source_context = self._translation_stream_source_context(source_text)
+        if source_context.source_is_fenced:
+            return raw
+
+        candidate = raw.lstrip()
+        candidate_casefold = candidate.casefold()
+        source_casefold = source_context.source_casefold
+        source_first_line = source_context.source_first_line
 
         if "```".startswith(candidate) and len(candidate) < 3:
             return None
@@ -159,11 +202,7 @@ class CustomAIRequestsMixin:
                         body = body[:-trailing_backticks].rstrip()
                 return body or None
 
-        active_preambles = tuple(
-            preamble
-            for preamble in TRANSLATION_OUTPUT_PREAMBLES
-            if not source_casefold.startswith(preamble)
-        )
+        active_preambles = source_context.active_preambles
         if any(
             preamble.startswith(candidate_casefold)
             for preamble in active_preambles
@@ -174,11 +213,7 @@ class CustomAIRequestsMixin:
                 remainder = candidate[len(preamble):].lstrip()
                 return remainder or None
 
-        active_labels = tuple(
-            label
-            for label in TRANSLATION_OUTPUT_WRAPPER_LABELS
-            if source_first_line != label
-        )
+        active_labels = source_context.active_labels
         if any(
             label.startswith(candidate_casefold)
             for label in active_labels
@@ -206,11 +241,13 @@ class CustomAIRequestsMixin:
         stream_callback,
     ):
         last_emitted = [None]
+        source_context = self._translation_stream_source_context(source_text)
 
         def filtered_callback(partial_text):
             normalized = self._normalize_translation_stream_partial(
                 source_text,
                 partial_text,
+                source_context=source_context,
             )
             if not normalized or normalized == last_emitted[0]:
                 return

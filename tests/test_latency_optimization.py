@@ -7364,7 +7364,7 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         self.assertEqual(app.translation_sequence_counter, 1)
         self.assertEqual(app.last_displayed_translation_sequence, 1)
 
-    def test_ocr_model_change_clears_stability_gate(self):
+    def test_ocr_model_change_to_ai_keeps_prewarm_and_skips_cache_clear(self):
         import app_logic
 
         app = object.__new__(app_logic.GameChangingTranslator)
@@ -7373,10 +7373,14 @@ class LatencyOcrStabilityGateTests(unittest.TestCase):
         app.ocr_preview_window = None
         app.ocr_model_var = types.SimpleNamespace(get=lambda: "custom_ai")
         app.ocr_stability_gate = types.SimpleNamespace(clear=Mock(return_value=True))
+        app._invalidate_paddleocr_prewarm_state = Mock()
+        app.clear_paddleocr_runtime_cache = Mock()
 
         app_logic.GameChangingTranslator.on_ocr_model_change(app)
 
         app.ocr_stability_gate.clear.assert_called()
+        app._invalidate_paddleocr_prewarm_state.assert_not_called()
+        app.clear_paddleocr_runtime_cache.assert_not_called()
 
 
 class RuntimeLogCoalescingTests(unittest.TestCase):

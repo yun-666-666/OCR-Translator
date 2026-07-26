@@ -142,11 +142,15 @@ class AppCaptureOcrMixin:
     def _get_local_ocr_adaptive_interval(self, base_interval):
         """Return a conservative local OCR interval from recent real work."""
         try:
-            timing = (
-                self.runtime_metrics.snapshot()
-                .get("timings", {})
-                .get("local_ocr_duration", {})
-            )
+            get_timing = getattr(self.runtime_metrics, "get_timing", None)
+            if callable(get_timing):
+                timing = get_timing("local_ocr_duration") or {}
+            else:
+                timing = (
+                    self.runtime_metrics.snapshot()
+                    .get("timings", {})
+                    .get("local_ocr_duration", {})
+                )
             sample_count = int(timing.get("count", 0) or 0)
             p50_seconds = float(timing.get("p50", 0.0) or 0.0)
         except (AttributeError, OverflowError, TypeError, ValueError):

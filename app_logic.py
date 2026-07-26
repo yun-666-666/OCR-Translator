@@ -711,6 +711,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             self._paddleocr_prewarm_metrics = self._new_paddleocr_prewarm_metrics()
         if not hasattr(self, '_paddleocr_first_ocr_wait_generation'):
             self._paddleocr_first_ocr_wait_generation = 0
+        if not hasattr(self, '_paddleocr_ready_wait_published_generation'):
+            self._paddleocr_ready_wait_published_generation = -1
         if not hasattr(self, '_paddleocr_start_wait'):
             self._paddleocr_start_wait = None
         return self._paddleocr_prewarm_lock
@@ -971,7 +973,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 current_generation if generation is None else int(generation)
             )
             if self._paddleocr_first_ocr_wait_generation == observed_generation:
-                return self.get_paddleocr_prewarm_metrics_snapshot()
+                # Already recorded for this generation; the per-frame caller
+                # discards the return value, so skip building a snapshot copy.
+                return None
             self._paddleocr_first_ocr_wait_generation = observed_generation
         return self._update_paddleocr_prewarm_metrics(
             first_ocr_wait_s=round(max(0.0, float(waited_s or 0.0)), 4),
@@ -1243,16 +1247,27 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                 ready_event = self._paddleocr_prewarm_event if active else None
 
         if ready_now:
-            self._update_paddleocr_prewarm_metrics(
-                generation=generation,
-                wait_path="worker_wait",
-                waited_for_ready=False,
-                wait_timeout_s=float(timeout),
-                wait_completed=True,
-                wait_ready=True,
-                wait_s=0.0,
-                ready=True,
-            )
+            # Steady state: prewarm is done and these values are identical on
+            # every OCR frame.  Republishing them re-runs ~20 gauge/label
+            # updates (each taking the shared metrics lock + regex sanitize)
+            # for zero new information, so publish only once per generation.
+            with lock:
+                already_published = (
+                    self._paddleocr_ready_wait_published_generation == generation
+                )
+                if not already_published:
+                    self._paddleocr_ready_wait_published_generation = generation
+            if not already_published:
+                self._update_paddleocr_prewarm_metrics(
+                    generation=generation,
+                    wait_path="worker_wait",
+                    waited_for_ready=False,
+                    wait_timeout_s=float(timeout),
+                    wait_completed=True,
+                    wait_ready=True,
+                    wait_s=0.0,
+                    ready=True,
+                )
             return True
         if not active or ready_event is None:
             self._update_paddleocr_prewarm_metrics(
@@ -1481,11 +1496,39 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         """Called when OCR parameters change to refresh preview if it's open."""
         try:
             current_ocr_model = self.get_ocr_model_setting() if hasattr(self, 'get_ocr_model_setting') else PADDLEOCR_MODEL_CODE
-            if current_ocr_model == PADDLEOCR_MODEL_CODE:
-                self.clear_paddleocr_runtime_cache("OCR parameter changed")
         except Exception as e:
-            log_debug(f"Error clearing OCR runtime after OCR parameter change: {e}")
-        if hasattr(self, "publish_capture_ui_snapshot"):
+            log_debug(f"Error reading OCR model in on_ocr_parameter_change: {e}")
+            current_ocr_model = PADDLEOCR_MODEL_CODE
+
+        # Tk 'write' traces fire on every keystroke and on no-op focus-out
+        # .set() re-clamps.  Only invalidate the warmed engine cache / bump the
+        # capture generation when the NORMALIZED PaddleOCR settings actually
+        # changed; otherwise typing a value cold-starts local OCR several times
+        # and flushes the OCR frame cache mid-session.
+        settings_changed = True
+        if current_ocr_model == PADDLEOCR_MODEL_CODE:
+            current_settings = None
+            try:
+                current_settings = self.get_current_paddleocr_settings()
+            except Exception:
+                current_settings = None
+            if current_settings is not None:
+                settings_changed = (
+                    current_settings
+                    != getattr(
+                        self, "_last_applied_paddleocr_parameter_settings", None
+                    )
+                )
+                self._last_applied_paddleocr_parameter_settings = current_settings
+            if settings_changed:
+                try:
+                    self.clear_paddleocr_runtime_cache("OCR parameter changed")
+                except Exception as e:
+                    log_debug(
+                        f"Error clearing OCR runtime after OCR parameter change: {e}"
+                    )
+
+        if settings_changed and hasattr(self, "publish_capture_ui_snapshot"):
             self.publish_capture_ui_snapshot(
                 bump_generation=True,
                 reason="OCR parameter changed",
@@ -1510,7 +1553,11 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
     def on_ocr_model_change(self, *args):
         """Called when OCR model selection changes to update UI visibility."""
         try:
-            self.clear_paddleocr_runtime_cache("OCR model changed")
+            # Keep an already-running PaddleOCR prewarm untouched.  Clearing
+            # its engine cache blocks this Tk trace callback on the prewarm's
+            # cache lock; invalidating it would also force users to cold-start
+            # local OCR after trying AI OCR.  Engine caches are keyed by their
+            # complete normalized settings, so retaining them is safe.
             self.clear_ocr_stability_gate("OCR model changed")
 
             # End OCR session if switching away from API OCR while translation is running

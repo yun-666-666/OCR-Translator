@@ -1,4 +1,5 @@
 # unified_translation_cache.py
+import functools
 import hashlib
 import heapq
 import json
@@ -9,6 +10,45 @@ import time
 from pathlib import Path
 
 from logger import log_debug, log_debug_coalesced
+
+
+@functools.lru_cache(maxsize=256)
+def _custom_ai_params_hash(
+    profile_id,
+    base_url,
+    model,
+    credential_scope,
+    wire_api,
+    reasoning_effort,
+    structured_output_contract,
+    custom_prompt,
+    keep_linebreaks,
+    context,
+):
+    """Memoized custom_ai params hash.
+
+    The JSON body below is byte-for-byte identical to the previous inline
+    computation in ``_generate_cache_key`` so persisted cache keys are stable;
+    memoization only avoids re-running json.dumps + md5 for identical params.
+    """
+    params_str = json.dumps(
+        {
+            "profile_id": profile_id,
+            "base_url": base_url,
+            "model": model,
+            "credential_scope": credential_scope,
+            "wire_api": wire_api,
+            "reasoning_effort": reasoning_effort,
+            "structured_output_contract": structured_output_contract,
+            "custom_prompt": custom_prompt,
+            "keep_linebreaks": keep_linebreaks,
+            "context": list(context),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.md5(params_str.encode("utf-8")).hexdigest()[:8]
+
 
 
 CACHE_SCHEMA_VERSION = 2
@@ -66,6 +106,7 @@ class UnifiedTranslationCache:
         text_hash = hashlib.md5(text.encode("utf-8")).hexdigest()
 
         params_str = ""
+        params_hash = ""
         if provider == "marianmt" and "beam_size" in kwargs:
             params_str = f"_beam{kwargs['beam_size']}"
         elif provider == "deepl_api" and "model_type" in kwargs:
@@ -73,37 +114,34 @@ class UnifiedTranslationCache:
         elif provider == "google_api" and "format" in kwargs:
             params_str = f"_fmt{kwargs['format']}"
         elif provider == "custom_ai":
-            params_str = json.dumps(
-                {
-                    "profile_id": kwargs.get("profile_id", ""),
-                    "base_url": str(kwargs.get("base_url", "")).strip().rstrip("/"),
-                    "model": kwargs.get("model", ""),
-                    "credential_scope": kwargs.get(
-                        "credential_scope",
-                        "",
-                    ),
-                    "wire_api": str(
-                        kwargs.get("wire_api") or "chat_completions"
-                    ).strip().lower(),
-                    "reasoning_effort": str(
-                        kwargs.get("reasoning_effort") or ""
-                    ).strip().lower(),
-                    "structured_output_contract": str(
-                        kwargs.get("structured_output_contract") or "text"
-                    ).strip().lower(),
-                    "custom_prompt": kwargs.get("custom_prompt", ""),
-                    "keep_linebreaks": bool(kwargs.get("keep_linebreaks", False)),
-                    "context": list(kwargs.get("context", ()) or ()),
-                },
-                ensure_ascii=False,
-                sort_keys=True,
+            try:
+                context_key = tuple(kwargs.get("context", ()) or ())
+            except TypeError:
+                context_key = ()
+            hash_args = (
+                kwargs.get("profile_id", ""),
+                str(kwargs.get("base_url", "")).strip().rstrip("/"),
+                kwargs.get("model", ""),
+                kwargs.get("credential_scope", ""),
+                str(
+                    kwargs.get("wire_api") or "chat_completions"
+                ).strip().lower(),
+                str(kwargs.get("reasoning_effort") or "").strip().lower(),
+                str(
+                    kwargs.get("structured_output_contract") or "text"
+                ).strip().lower(),
+                kwargs.get("custom_prompt", ""),
+                bool(kwargs.get("keep_linebreaks", False)),
+                context_key,
             )
+            try:
+                params_hash = _custom_ai_params_hash(*hash_args)
+            except TypeError:
+                # Unhashable field (e.g. dict-valued context) — bypass the memo.
+                params_hash = _custom_ai_params_hash.__wrapped__(*hash_args)
 
-        params_hash = (
-            hashlib.md5(params_str.encode("utf-8")).hexdigest()[:8]
-            if params_str
-            else ""
-        )
+        if params_str and not params_hash:
+            params_hash = hashlib.md5(params_str.encode("utf-8")).hexdigest()[:8]
         return (
             text_hash,
             source_lang.lower(),
@@ -732,37 +770,15 @@ class UnifiedTranslationCache:
             **kwargs,
         )
 
+        hit = False
+        translation = None
         with self.lock:
             try:
                 translation = self._cache[cache_key]
             except KeyError:
-                normalized_provider = str(provider).lower()
-                normalized_source = str(source_lang).lower()
-                normalized_target = str(target_lang).lower()
-                model_type = ""
-                if provider.lower() == "deepl_api" and "model_type" in kwargs:
-                    model_type = str(kwargs["model_type"])
-                    miss_message = (
-                        f"Unified cache MISS: {provider} {source_lang}->{target_lang} "
-                        f"(model_type={kwargs['model_type']})"
-                    )
-                else:
-                    miss_message = (
-                        f"Unified cache MISS: {provider} {source_lang}->{target_lang}"
-                    )
-                log_debug_coalesced(
-                    (
-                        "unified-cache-miss",
-                        normalized_provider,
-                        normalized_source,
-                        normalized_target,
-                        model_type,
-                    ),
-                    miss_message,
-                    interval_seconds=5.0,
-                )
-                return None
+                hit = False
             else:
+                hit = True
                 access_time = time.time()
                 self._access_times[cache_key] = access_time
                 last_requested = self._last_access_persist_request_times.get(
@@ -779,14 +795,46 @@ class UnifiedTranslationCache:
                     self._mark_entry_upsert_dirty_locked(cache_key)
                     self._last_access_persist_request_times[cache_key] = access_time
                     self._schedule_persistence_locked()
-                if provider.lower() == "deepl_api" and "model_type" in kwargs:
-                    log_debug(
-                        f"Unified cache HIT: {provider} {source_lang}->{target_lang} "
-                        f"(model_type={kwargs['model_type']})"
-                    )
-                else:
-                    log_debug(f"Unified cache HIT: {provider} {source_lang}->{target_lang}")
-                return translation
+
+        # Emit diagnostics AFTER releasing the lock: log_debug runs regex
+        # sanitize + a synchronous file write/flush (and possibly a rotation),
+        # which must not serialize other threads behind the cache lock.
+        if hit:
+            if provider.lower() == "deepl_api" and "model_type" in kwargs:
+                log_debug(
+                    f"Unified cache HIT: {provider} {source_lang}->{target_lang} "
+                    f"(model_type={kwargs['model_type']})"
+                )
+            else:
+                log_debug(f"Unified cache HIT: {provider} {source_lang}->{target_lang}")
+            return translation
+
+        normalized_provider = str(provider).lower()
+        normalized_source = str(source_lang).lower()
+        normalized_target = str(target_lang).lower()
+        model_type = ""
+        if provider.lower() == "deepl_api" and "model_type" in kwargs:
+            model_type = str(kwargs["model_type"])
+            miss_message = (
+                f"Unified cache MISS: {provider} {source_lang}->{target_lang} "
+                f"(model_type={kwargs['model_type']})"
+            )
+        else:
+            miss_message = (
+                f"Unified cache MISS: {provider} {source_lang}->{target_lang}"
+            )
+        log_debug_coalesced(
+            (
+                "unified-cache-miss",
+                normalized_provider,
+                normalized_source,
+                normalized_target,
+                model_type,
+            ),
+            miss_message,
+            interval_seconds=5.0,
+        )
+        return None
 
     def store(self, text, source_lang, target_lang, provider, translation, **kwargs):
         """
@@ -825,13 +873,15 @@ class UnifiedTranslationCache:
                 else:
                     self._schedule_persistence_locked()
 
-            if provider.lower() == "deepl_api" and "model_type" in kwargs:
-                log_debug(
-                    f"Unified cache STORE: {provider} {source_lang}->{target_lang} "
-                    f"(model_type={kwargs['model_type']})"
-                )
-            else:
-                log_debug(f"Unified cache STORE: {provider} {source_lang}->{target_lang}")
+        # Log outside the lock (regex sanitize + file write/flush must not be
+        # serialized behind the cache lock; the UI thread also takes it).
+        if provider.lower() == "deepl_api" and "model_type" in kwargs:
+            log_debug(
+                f"Unified cache STORE: {provider} {source_lang}->{target_lang} "
+                f"(model_type={kwargs['model_type']})"
+            )
+        else:
+            log_debug(f"Unified cache STORE: {provider} {source_lang}->{target_lang}")
 
         if operation is not None:
             succeeded = self._apply_persistence_operation(operation)

@@ -1,6 +1,7 @@
 """OCR candidate quality, stability gating, and local OCR routing."""
 
 from difflib import SequenceMatcher
+import functools
 import queue
 import re
 import sys
@@ -14,6 +15,17 @@ OCR_STABILITY_GATE_MIN_WAIT_SECONDS = 0.12
 OCR_STABILITY_GATE_MAX_WAIT_SECONDS = 0.25
 OCR_STABILITY_GATE_SUSPICIOUS_SHORT_LENGTH = 12
 OCR_STABILITY_GATE_NOISE_RATIO = 0.35
+
+# Built once at import; rebuilding this per call was pure per-frame waste.
+_SUBMIT_TEXT_TRANS = str.maketrans({
+    "“": '"',
+    "”": '"',
+    "‘": "'",
+    "’": "'",
+    "–": "-",
+    "—": "-",
+    "−": "-",
+})
 
 
 def _facade():
@@ -112,24 +124,21 @@ def _get_custom_ai_ocr_reasoning_contract(app):
     )
 
 
-def _normalize_local_ocr_submit_text(text_to_translate):
-    if not isinstance(text_to_translate, str):
-        return ""
-
-    normalized = text_to_translate.replace("<br>", " ")
-    normalized = normalized.translate(str.maketrans({
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u2013": "-",
-        "\u2014": "-",
-        "\u2212": "-",
-    }))
+@functools.lru_cache(maxsize=512)
+def _normalize_local_ocr_submit_text_cached(text):
+    normalized = text.replace("<br>", " ")
+    normalized = normalized.translate(_SUBMIT_TEXT_TRANS)
     normalized = normalized.lower()
     normalized = re.sub(r"\s+", " ", normalized).strip()
     normalized = re.sub(r"[.!?\u2026]+$", "", normalized).strip()
     return normalized
+
+
+def _normalize_local_ocr_submit_text(text_to_translate):
+    if not isinstance(text_to_translate, str):
+        return ""
+    # Same string is normalized 4-10x per candidate; the cache collapses those.
+    return _normalize_local_ocr_submit_text_cached(text_to_translate)
 
 
 def _ocr_candidate_has_terminal_punctuation(text):
@@ -515,12 +524,12 @@ def _should_skip_local_ocr_resubmit(app, text_to_translate):
     if current_scope is not None and last_scope is not None and current_scope != last_scope:
         return False
 
-    last_norm = _normalize_local_ocr_submit_text(
-        getattr(app, "last_local_ocr_submitted_text", None)
-    )
-    if not last_norm:
+    # _remember_local_ocr_submit always stores text and its norm together, so
+    # the stored norm is authoritative; only re-normalize when it is missing.
+    last_norm = getattr(app, "last_local_ocr_submitted_norm", None)
+    if not isinstance(last_norm, str) or not last_norm:
         last_norm = _normalize_local_ocr_submit_text(
-            getattr(app, "last_local_ocr_submitted_norm", None)
+            getattr(app, "last_local_ocr_submitted_text", None)
         )
 
     if not last_norm:

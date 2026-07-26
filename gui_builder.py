@@ -372,10 +372,15 @@ def _refresh_runtime_metrics_panel(app, schedule_next=True):
     try:
         _update_runtime_metric_gauges(app)
         content = _format_runtime_metrics_snapshot(metrics.snapshot())
-        text_widget.config(state=tk.NORMAL)
-        text_widget.delete("1.0", tk.END)
-        text_widget.insert(tk.END, content)
-        text_widget.config(state=tk.DISABLED)
+        # The panel refreshes at 1 Hz for the whole session and is usually
+        # idle; skip the Tk delete+insert (a full re-layout) when the rendered
+        # text has not changed.
+        if content != getattr(app, "_runtime_metrics_last_rendered", None):
+            text_widget.config(state=tk.NORMAL)
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert(tk.END, content)
+            text_widget.config(state=tk.DISABLED)
+            app._runtime_metrics_last_rendered = content
     except tk.TclError:
         return
     except Exception as e:
@@ -400,6 +405,8 @@ def _reset_runtime_metrics_panel(app):
             reset()
         except Exception as e:
             log_debug(f"Runtime metrics reset failed: {e}")
+    # Force a re-render even if the formatted text coincidentally matches.
+    app._runtime_metrics_last_rendered = None
     _refresh_runtime_metrics_panel(app, schedule_next=False)
 
 

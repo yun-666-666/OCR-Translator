@@ -556,6 +556,22 @@ def _api_ocr_scan_interval_seconds(app):
 
 def _api_ocr_recent_duration_p50_seconds(app):
     metrics = _runtime_metrics(app)
+    get_timing = getattr(metrics, "get_timing", None)
+    if callable(get_timing):
+        for metric_name in ("api_ocr_duration", "ocr_duration"):
+            try:
+                timing = get_timing(metric_name)
+            except Exception:
+                timing = None
+            if not isinstance(timing, dict):
+                continue
+            try:
+                p50 = float(timing.get("p50") or 0.0)
+            except (TypeError, ValueError):
+                p50 = 0.0
+            if p50 > 0.0:
+                return p50
+        return 0.0
     snapshotter = getattr(metrics, "snapshot", None)
     if not callable(snapshotter):
         return 0.0
