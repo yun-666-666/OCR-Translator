@@ -212,6 +212,19 @@ Method: aggregate counts / timing distributions over the newest debug log (2,693
 | **Fix** | `worker_capture.py:publish_capture_ui_snapshot` now returns the existing object and skips the store + log when `bump_generation` is False and the freshly built `CaptureUISnapshot` equals the stored one. First publish and every real change still store + log; the bump path is unchanged. |
 | **Tests** | +2 (`test_unchanged_republish_without_bump_is_skipped`, `test_changed_republish_updates_snapshot`). |
 
+### L2 — Redundant main-window geometry writes  *(FIXED this pass)*
+
+| Field | Detail |
+|---|---|
+| **Evidence** | `Updated geometry in config object: 650x941+1765+285` logged **17× with an identical value**. `on_window_configure` (`handlers/configuration_handler.py:14-24`) fires on any `<Configure>` event (redraw/focus/move) and, after a 500 ms debounce, `save_main_window_geometry` rewrites the same 5 config keys + a log line even when the window did not move or resize. |
+| **Cost** | 5 redundant in-memory config writes + a per-event log write/flush; in-memory only (no disk save), so low but pure waste + log noise. |
+| **Fix** | `config_manager.py:save_main_window_geometry` returns early when the geometry string equals the value already stored in the config object. |
+| **Tests** | +2 (`test_unchanged_geometry_is_written_once`, `test_changed_geometry_is_rewritten`). |
+
+### F12 re-evaluated with runtime data — stays DEFERRED
+
+Capture timing this run: **median 15 ms, p90 16 ms, max 109 ms** (region 1958×214). mss instance setup/teardown is only a few ms of that, and capture is far from the bottleneck (translation p90 ~10 s). The MED impact estimate does not hold for this workload, so the thread-safety/stale-handle risk of reusing an `mss` instance is not justified. Left deferred.
+
 ### Observations — NOT code-fixed (config / product tradeoffs, reported for the maintainer)
 
 | # | Signal (this run) | Interpretation | Recommended action |
