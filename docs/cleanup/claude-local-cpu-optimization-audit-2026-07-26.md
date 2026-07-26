@@ -196,3 +196,29 @@ Plus one dead-code note (F13) and two verified-clean confirmations (§5).
 - SQLite persistence runs deltas under a separate `_persistence_lock` off the hot lock, debounced, with 60 s access-time throttling; `_log_custom_short_call` offloads its write to a background executor.
 - `config_manager.py` snapshots settings into Tk vars/dataclasses at load — no repeated config reads on hot paths.
 - Happy-path HTTP response bodies are parsed once; streaming line iteration is linear; the HTTP session is pooled; capability memory prevents re-sending known-rejected params.
+
+---
+
+## 6. Runtime log analysis — latest run (`translator_debug.log`, 2026-07-26 21:01)
+
+Method: aggregate counts / timing distributions over the newest debug log (2,693 lines, 88 translations). No raw secret/body content read.
+
+### L1 — Redundant capture-snapshot republishes  *(FIXED this pass)*
+
+| Field | Detail |
+|---|---|
+| **Evidence** | Of 164 `published UI snapshot` events, **133 were the same `generation=10`** (21 more were `generation=11`). The periodic adaptive-interval refresh (`app_capture_ocr.py:234,306`, 2 s throttle) republishes every cycle even when no snapshot input changed. |
+| **Cost** | Each republish rebuilt the snapshot, re-stored it, and wrote a per-publish log line (regex sanitize + file write/flush). |
+| **Fix** | `worker_capture.py:publish_capture_ui_snapshot` now returns the existing object and skips the store + log when `bump_generation` is False and the freshly built `CaptureUISnapshot` equals the stored one. First publish and every real change still store + log; the bump path is unchanged. |
+| **Tests** | +2 (`test_unchanged_republish_without_bump_is_skipped`, `test_changed_republish_updates_snapshot`). |
+
+### Observations — NOT code-fixed (config / product tradeoffs, reported for the maintainer)
+
+| # | Signal (this run) | Interpretation | Recommended action |
+|---|---|---|---|
+| O1 | **89% of translations complete via failover** (78/88); grok failover **errors 9×** (`ValueError - URL HTTP…`), **profile unavailable 7×**, **cooling-skip 12×**, **deadline exhausted 7×** | The first-choice profile is failing/slow almost every request, so nearly every translation pays a wasted primary attempt before falling over. This is largely **profile configuration**, not a code defect. | Check the primary Custom AI profile (endpoint/key/model). Consider making it the failover, or fixing the recurring grok `URL HTTP` error. |
+| O2 | **Translation latency**: total median 2.45 s / **p90 10.2 s** / max 12.6 s; worker median 1.61 s / **p90 10.0 s** (API-bound); queue wait median 0.50 s / p90 1.17 s | The tail is dominated by the slow/failing route (O1), not local CPU. Overflow slow-route protection fires heavily (49 blocks, 11 entries) — the adaptive system working as designed under slow upstreams. | Resolving O1 should collapse the p90 tail. No code change advised. |
+| O3 | **~91% of translations superseded** (80/88 `Processing newer sequence`; 55 stale-timer skips) | Because each translation can take up to 10 s (O1/O2), newer subtitles supersede in-flight ones; the staleness guards correctly discard the stale work. Symptom of O1, not a bug. | Follows from O1. |
+| O4 | **Cache hit rate ≈ 0** (2 real HITs; MISS log is 5 s-coalesced so undercounted) vs 157 STOREs | The cache key includes rolling translation **context**, so a repeated subtitle with different surrounding context is a miss. This is the intended context-aware-quality tradeoff (prior audits' "H3 context-blind cache" was deferred as quality-risky). | Leave as-is unless a context-free fallback lookup is explicitly desired (quality tradeoff). |
+
+**PaddleOCR note:** subtitle fast-path→full-fallback fired 73× (37 no-crop + 36 no-usable-text); 39 fallbacks produced text, 32 were empty. F8 already removed the fallback's redundant re-prepare; the remaining full-OCR cost on empty frames is accuracy-driven, not a clean CPU win.
