@@ -1,6 +1,7 @@
 import configparser
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -146,6 +147,50 @@ class ConfigManagerPathAndAtomicSaveTests(unittest.TestCase):
                 self._restore_config_dir(previous)
 
         self.assertEqual(loaded["Settings"]["scan_interval"], "555")
+
+
+class SaveMainWindowGeometryTests(unittest.TestCase):
+    def _make_root(self, geom, w, h, x, y):
+        return types.SimpleNamespace(
+            winfo_exists=lambda: True,
+            geometry=lambda: geom,
+            winfo_width=lambda: w,
+            winfo_height=lambda: h,
+            winfo_x=lambda: x,
+            winfo_y=lambda: y,
+        )
+
+    def test_unchanged_geometry_is_written_once(self):
+        config = configparser.ConfigParser()
+        config['Settings'] = {}
+        root = self._make_root("650x941+1765+285", 650, 941, 1765, 285)
+        with patch.object(config_manager, "log_debug") as log:
+            config_manager.save_main_window_geometry(config, root)
+            config_manager.save_main_window_geometry(config, root)
+        self.assertEqual(
+            config['Settings']['main_window_geometry'], "650x941+1765+285"
+        )
+        self.assertEqual(config['Settings']['main_window_x'], "1765")
+        # Second identical save is a no-op (single "Updated geometry" log).
+        updates = [
+            c for c in log.call_args_list
+            if "Updated geometry in config object" in str(c.args[0])
+        ]
+        self.assertEqual(len(updates), 1)
+
+    def test_changed_geometry_is_rewritten(self):
+        config = configparser.ConfigParser()
+        config['Settings'] = {}
+        config_manager.save_main_window_geometry(
+            config, self._make_root("650x941+1765+285", 650, 941, 1765, 285)
+        )
+        config_manager.save_main_window_geometry(
+            config, self._make_root("800x600+10+20", 800, 600, 10, 20)
+        )
+        self.assertEqual(
+            config['Settings']['main_window_geometry'], "800x600+10+20"
+        )
+        self.assertEqual(config['Settings']['main_window_width'], "800")
 
 
 if __name__ == "__main__":

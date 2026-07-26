@@ -557,6 +557,11 @@ def save_main_window_geometry(app_config, root_window):
         y = root_window.winfo_y()
 
         if width > 0 and height > 0:
+            # <Configure> fires on any window event (redraw, focus, move); the
+            # debounced save then rewrites identical geometry repeatedly. Skip
+            # when unchanged to avoid redundant writes + per-event log I/O.
+            if app_config['Settings'].get('main_window_geometry') == geometry:
+                return
             app_config['Settings']['main_window_geometry'] = geometry
             app_config['Settings']['main_window_width'] = str(width)
             app_config['Settings']['main_window_height'] = str(height)
