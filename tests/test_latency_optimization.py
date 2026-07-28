@@ -6394,6 +6394,10 @@ class LatencyTranslationCacheTests(unittest.TestCase):
                 "TLS/SSL connection was closed "
                 "(unexpected_eof_while_reading)"
             ),
+            (
+                "Custom AI translation error: request deadline exhausted "
+                "before a successful translation."
+            ),
         )
 
         for error_text in cases:

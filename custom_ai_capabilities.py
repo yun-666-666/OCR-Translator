@@ -418,17 +418,31 @@ class CustomAICapabilitiesMixin:
         model = str(profile.get("model") or "").strip().lower()
         return model.startswith(("grok", "xai/", "x-ai/"))
 
+    def _profile_supports_no_reasoning(self, profile):
+        """Return whether a Grok model accepts an explicit ``none`` effort."""
+        profile = profile if isinstance(profile, dict) else {}
+        model = str(profile.get("model") or "").strip().lower()
+        for prefix in ("xai/", "x-ai/"):
+            if model.startswith(prefix):
+                model = model[len(prefix):]
+                break
+        return (
+            model.startswith("grok-4.3")
+            or "non-reasoning" in model
+        )
+
     def _reasoning_effort_for_payload(self, profile, effort):
         """Return the wire-compatible explicit reasoning value.
 
-        Current xAI Grok endpoints reject the literal ``none`` value.  Their
-        lowest accepted explicit value is ``low``; mapping only that wire value
-        keeps an xAI profile from silently acquiring a relay default or failing
-        with a parameter error.
+        Reasoning-only Grok models reject the literal ``none`` value. Their
+        lowest accepted explicit value is ``low``. Grok models with a real
+        no-reasoning contract must keep ``none`` explicit so a relay cannot
+        replace it with its default reasoning mode.
         """
         if (
             effort == CUSTOM_AI_REASONING_EFFORT_NONE
             and self._profile_requires_explicit_reasoning_effort(profile)
+            and not self._profile_supports_no_reasoning(profile)
         ):
             return "low"
         return effort

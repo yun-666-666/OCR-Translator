@@ -223,6 +223,7 @@ def _is_transient_custom_ai_provider_error(value):
         "bad gateway",
         "read timed out",
         "read timeout",
+        "request deadline exhausted",
         "connect timeout",
         "connection timed out",
         "connection refused",

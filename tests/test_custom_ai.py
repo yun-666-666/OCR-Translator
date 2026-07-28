@@ -5375,6 +5375,40 @@ class CustomAIProviderTests(unittest.TestCase):
         self.assertEqual(translation_payload["reasoning_effort"], "low")
         self.assertEqual(ocr_payload["reasoning_effort"], "low")
 
+    def test_grok_models_that_support_none_keep_no_reasoning_contract(self):
+        provider = CustomAIProvider()
+
+        for model in (
+            "grok-4.3",
+            "grok-4.20-0309-non-reasoning",
+        ):
+            with self.subTest(model=model):
+                profile = {
+                    "model": model,
+                    "reasoning_effort": "none",
+                }
+
+                translation_payload = provider.build_translation_payload(
+                    profile,
+                    "Hi",
+                    "en",
+                    "zh-CN",
+                )
+                ocr_payload = provider.build_ocr_payload(
+                    profile,
+                    b"webp-bytes",
+                    "en",
+                )
+
+                self.assertEqual(
+                    translation_payload["reasoning_effort"],
+                    "none",
+                )
+                self.assertEqual(
+                    ocr_payload["reasoning_effort"],
+                    "none",
+                )
+
     def test_grok_none_reasoning_fallback_remembers_the_wire_effort(self):
         provider = CustomAIProvider()
         profile = {
@@ -5384,7 +5418,7 @@ class CustomAIProviderTests(unittest.TestCase):
         provider._remember_unsupported_reasoning_effort(
             profile,
             "translation",
-            "low",
+            "none",
         )
 
         payload = provider.build_translation_payload(
