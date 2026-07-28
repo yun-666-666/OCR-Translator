@@ -30,6 +30,12 @@ _COMMON_SECRET_RE = re.compile(
     re.IGNORECASE,
 )
 _LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+# Relay/proxy URL path credentials, e.g. /e2/cs_SYNTHETIC_RELAY_001/v1/...
+# Keep scheme+host for diagnostics; only the path token is redacted.
+# Require a path-ish boundary so ordinary words are not touched.
+_RELAY_PATH_TOKEN_RE = re.compile(
+    r"(?i)(?<=/)cs_[A-Za-z0-9_-]{6,}(?![A-Za-z0-9_-])"
+)
 # Sensitive field names only — never bare "key" or diagnostic labels like status/class.
 # Require a non-identifier boundary so INVALID_API_KEY: ... is not treated as api_key=.
 _SECRET_FIELD_NAME = (
@@ -136,6 +142,7 @@ def sanitize_log_message(message, api_key=None, max_length=0):
     text = _BEARER_RE.sub("Bearer [redacted]", text)
     text = _SECRET_FIELD_ASSIGNMENT_RE.sub(r"\1[redacted]", text)
     text = _COMMON_SECRET_RE.sub("[redacted]", text)
+    text = _RELAY_PATH_TOKEN_RE.sub("[redacted]", text)
     text = _LONG_TOKEN_RE.sub("[redacted]", text)
     text = re.sub(r"\s+", " ", text.replace("\r", " ").replace("\n", " ")).strip()
 

@@ -288,6 +288,167 @@ class DiagnosticSanitizerTests(unittest.TestCase):
         self.assertNotIn("shortSecret", nested_cleaned)
         self.assertIn("api_key=[redacted]", nested_cleaned)
 
+    def test_sanitize_redacts_relay_url_path_tokens(self):
+        """Relay path tokens like cs_<token> must never appear in logs.
+
+        Scheme and host stay for diagnostics; path tokens are redacted.
+        Covers ordinary errors, timeouts, full URLs, multi-URL strings,
+        and case variants while preserving existing secret redaction.
+        """
+        short_token = "SYNTHETIC_RELAY_001"
+        mixed_token = "SyNtHeTiC_RELAY_002"
+        cases = (
+            (
+                "timeout-error-live-shape",
+                (
+                    f"https://relay.example/e2/cs_{short_token}/v1/chat/completions: "
+                    "HTTPSConnectionPool(host='relay.example', port=443): "
+                    "Read timed out. (read timeout=10.0)"
+                ),
+                (f"cs_{short_token}", short_token),
+                (
+                    "https://relay.example/",
+                    "relay.example",
+                    "/v1/chat/completions",
+                    "Read timed out",
+                ),
+            ),
+            (
+                "ordinary-http-error",
+                (
+                    "Chat completions request failed (HTTP 502) at "
+                    f"https://relay.example.com/e2/cs_{short_token}"
+                    "/v1/chat/completions: bad gateway"
+                ),
+                (f"cs_{short_token}", short_token),
+                (
+                    "https://relay.example.com/",
+                    "relay.example.com",
+                    "HTTP 502",
+                    "bad gateway",
+                ),
+            ),
+            (
+                "full-url-only",
+                f"https://proxy.test/path/cs_{short_token}/v1/models",
+                (f"cs_{short_token}", short_token),
+                ("https://proxy.test/", "proxy.test", "/v1/models"),
+            ),
+            (
+                "multiple-urls",
+                (
+                    f"Tried: https://a.example/e1/cs_{short_token}/v1/chat; "
+                    f"https://b.example/e9/CS_{mixed_token}/v1/chat"
+                ),
+                (
+                    f"cs_{short_token}",
+                    short_token,
+                    f"CS_{mixed_token}",
+                    mixed_token,
+                ),
+                (
+                    "https://a.example/",
+                    "https://b.example/",
+                    "a.example",
+                    "b.example",
+                ),
+            ),
+            (
+                "uppercase-prefix",
+                f"error at HTTPS://HOST.EXAMPLE/E2/CS_{mixed_token}/v1/x",
+                (f"CS_{mixed_token}", mixed_token),
+                ("HTTPS://HOST.EXAMPLE/", "HOST.EXAMPLE"),
+            ),
+            (
+                "mixed-with-existing-secrets",
+                (
+                    f"Authorization: Bearer sk-live-secretTOKEN123 "
+                    f"url=https://relay.example/e2/cs_{short_token}/v1/chat "
+                    f"api_key=shortSecret status=timeout"
+                ),
+                (
+                    f"cs_{short_token}",
+                    short_token,
+                    "sk-live-secretTOKEN123",
+                    "shortSecret",
+                ),
+                (
+                    "https://relay.example/",
+                    "relay.example",
+                    "api_key=",
+                    "status=timeout",
+                ),
+            ),
+        )
+        for name, raw, forbidden, required in cases:
+            with self.subTest(case=name):
+                cleaned = logger.sanitize_log_message(raw)
+                for token in forbidden:
+                    self.assertNotIn(token, cleaned)
+                for marker in required:
+                    self.assertIn(marker, cleaned)
+                self.assertIn("[redacted]", cleaned)
+
+    def test_sanitize_relay_path_token_accepts_any_non_token_delimiter(self):
+        token = "cs_SYNTHETIC_RELAY_003"
+        delimiters = (
+            "/",
+            "?",
+            "#",
+            " ",
+            "'",
+            '"',
+            ")",
+            "]",
+            "}",
+            ">",
+            ".",
+            "!",
+            "",
+        )
+        for delimiter in delimiters:
+            with self.subTest(delimiter=repr(delimiter)):
+                raw = f"https://relay.example/e2/{token}{delimiter}"
+                cleaned = logger.sanitize_log_message(raw)
+                self.assertNotIn(token, cleaned)
+                self.assertIn("https://relay.example/", cleaned)
+                self.assertIn("[redacted]", cleaned)
+
+    def test_sanitize_relay_path_token_requires_path_boundary(self):
+        ordinary_values = (
+            "plain cs_SYNTHETIC_RELAY_004 text",
+            "plain CS_SYNTHETIC_RELAY_004 text",
+            "https://relay.example/e2/css_SYNTHETIC_RELAY_004/value",
+            "https://relay.example/e2/xcs_SYNTHETIC_RELAY_004/value",
+        )
+        for raw in ordinary_values:
+            with self.subTest(raw=raw):
+                self.assertEqual(logger.sanitize_log_message(raw), raw)
+
+    def test_log_debug_never_persists_relay_path_token_sentinels(self):
+        path_token = "cs_SENTINEL_RELAY_PATH_TOK"
+        message = (
+            f"Custom AI failover translation error: provider=grok ValueError - "
+            f"https://relay.example/e2/{path_token}/v1/chat/completions: "
+            f"Read timed out. (read timeout=10.0) "
+            f"api_key=SENTINEL_API_KEY_SHORT status=timeout"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch.dict(os.environ, {"OCR_TRANSLATOR_LOG_DIR": tmp_dir}):
+                logger.close_log_writers()
+                logger.log_debug(message)
+                logger.close_log_writers()
+            content = (Path(tmp_dir) / "translator_debug.log").read_text(
+                encoding="utf-8-sig"
+            )
+
+        self.assertNotIn(path_token, content)
+        self.assertNotIn("SENTINEL_RELAY_PATH_TOK", content)
+        self.assertNotIn("SENTINEL_API_KEY_SHORT", content)
+        self.assertIn("https://relay.example/", content)
+        self.assertIn("relay.example", content)
+        self.assertIn("status=timeout", content)
+
     def test_log_debug_never_persists_short_secret_field_sentinels(self):
         sentinels = (
             "SENTINEL_API_KEY_SHORT",
