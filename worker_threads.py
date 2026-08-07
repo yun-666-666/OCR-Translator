@@ -25,6 +25,12 @@ from paddle_ocr_backend import (
     prepare_paddleocr_image,
     recognize_subtitle_with_paddleocr,
 )
+from rapid_ocr_backend import (
+    RAPIDOCR_MODEL_CODE,
+    RapidOCRSettings,
+    prepare_rapidocr_image,
+    recognize_with_rapidocr,
+)
 from translation_utils import (
     is_translation_error_result,
     post_process_translation_text,
@@ -57,6 +63,7 @@ from worker_capture import (
     _log_hot_path_timing,
     _request_snapshot_timeout_seconds,
     _log_paddle_ocr_route,
+    _log_rapid_ocr_route,
     _runtime_metrics,
     _record_metric_timing,
     _increment_metric,
@@ -73,6 +80,8 @@ from worker_capture import (
     get_paddleocr_settings_from_app,
     get_paddleocr_ocr_cache_mode_key,
     get_paddleocr_ocr_cache_mode_key_from_settings,
+    get_rapidocr_settings_from_app,
+    get_rapidocr_ocr_cache_mode_key_from_settings,
     get_capture_ui_snapshot,
     _pil_to_debug_bgr,
     process_local_ocr_frame,
@@ -162,7 +171,7 @@ def _custom_ai_ocr_cooldown_seconds(app):
 
 
 def _effective_ocr_model_for_frame(app, selected_model):
-    """Use PaddleOCR for this frame while the selected AI OCR profile cools down."""
+    """Use the default local OCR while the selected AI OCR profile cools down."""
     if selected_model != "custom_ai":
         return selected_model
 
@@ -171,12 +180,12 @@ def _effective_ocr_model_for_frame(app, selected_model):
         return selected_model
 
     log_debug_coalesced(
-        "custom-ai-ocr-paddle-fallback",
+        "custom-ai-ocr-local-fallback",
         "WT: Custom AI OCR is cooling down for about "
-        f"{math.ceil(cooldown_seconds)}s; temporarily using PaddleOCR",
+        f"{math.ceil(cooldown_seconds)}s; temporarily using RapidOCR",
         interval_seconds=5.0,
     )
-    return PADDLEOCR_MODEL_CODE
+    return RAPIDOCR_MODEL_CODE
 
 
 def _api_ocr_concurrency_limit(app, provider_name):
@@ -271,7 +280,14 @@ def run_ocr_thread(app):
             region_origin = getattr(screenshot_pil, '_gct_region_origin', (0, 0))
             ocr_cache_key = None
             if hasattr(app, 'ocr_frame_cache') and not is_api_ocr:
-                if ocr_model == PADDLEOCR_MODEL_CODE:
+                if ocr_model == RAPIDOCR_MODEL_CODE:
+                    settings = frame_snapshot.rapidocr_settings or RapidOCRSettings()
+                    cache_lang = frame_snapshot.source_lang or "en"
+                    cache_mode_key = get_rapidocr_ocr_cache_mode_key_from_settings(
+                        settings,
+                        frame_snapshot.keep_linebreaks,
+                    )
+                elif ocr_model == PADDLEOCR_MODEL_CODE:
                     settings = frame_snapshot.paddleocr_settings
                     if settings is None:
                         raise RuntimeError(
@@ -285,18 +301,12 @@ def run_ocr_thread(app):
                         )
                     )
                 else:
-                    ocr_model = PADDLEOCR_MODEL_CODE
-                    settings = frame_snapshot.paddleocr_settings
-                    if settings is None:
-                        raise RuntimeError(
-                            "Captured frame is missing PaddleOCR settings"
-                        )
-                    cache_lang = settings.lang
-                    cache_mode_key = (
-                        get_paddleocr_ocr_cache_mode_key_from_settings(
-                            settings,
-                            frame_snapshot.keep_linebreaks,
-                        )
+                    ocr_model = RAPIDOCR_MODEL_CODE
+                    settings = frame_snapshot.rapidocr_settings or RapidOCRSettings()
+                    cache_lang = frame_snapshot.source_lang or "en"
+                    cache_mode_key = get_rapidocr_ocr_cache_mode_key_from_settings(
+                        settings,
+                        frame_snapshot.keep_linebreaks,
                     )
                 ocr_cache_key = build_ocr_frame_cache_key(
                     frame_hash,
@@ -339,12 +349,15 @@ def run_ocr_thread(app):
                 )
                 continue # Skip to the next loop iteration
 
+            elif ocr_model == RAPIDOCR_MODEL_CODE:
+                _log_rapid_ocr_route()
+
             elif ocr_model == PADDLEOCR_MODEL_CODE:
                 _log_paddle_ocr_route()
 
             else:
-                log_debug(f"WT: OCR: Unknown OCR model '{ocr_model}', falling back to PaddleOCR")
-                ocr_model = PADDLEOCR_MODEL_CODE
+                log_debug(f"WT: OCR: Unknown OCR model '{ocr_model}', falling back to RapidOCR")
+                ocr_model = RAPIDOCR_MODEL_CODE
 
             if not goto_post_ocr:
                 # ==================== LOCAL OCR PROCESSING ====================
@@ -385,7 +398,7 @@ def run_ocr_thread(app):
                 _clear_ocr_stability_gate(app, "empty or placeholder OCR")
                 continue
 
-            if ocr_model == PADDLEOCR_MODEL_CODE:
+            if ocr_model in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}:
                 route_result = _route_local_ocr_candidate_for_translation(
                     app,
                     ocr_cleaned_text,

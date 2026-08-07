@@ -30,6 +30,7 @@ settings_tab_title,Settings
 translation_model_label,Translation Model:
 ocr_model_label,OCR Model:
 ocr_model_paddleocr,PaddleOCR (offline)
+ocr_model_rapidocr,RapidOCR PP-OCRv6 tiny (ONNX)
 source_lang_label,Source Language:
 target_lang_label,Target Language:
 custom_context_window_label,Custom AI context subtitles:

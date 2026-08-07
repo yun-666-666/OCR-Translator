@@ -12,6 +12,7 @@ from gui_builder import (
     build_ocr_model_display_options,
     filter_model_values,
     get_paddleocr_ocr_display_name,
+    get_rapidocr_ocr_display_name,
     get_system_fonts,
     handle_translation_profile_selection,
     resolve_ocr_model_display_selection,
@@ -21,6 +22,7 @@ from gui_profile_controls import persist_translation_failover_choice
 from logger import log_debug
 from modern_ui import SquareIconButton
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
+from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 from ui_elements import create_scrollable_tab
 
 
@@ -140,7 +142,10 @@ def create_settings_tab(app):
         app.suppress_traces()
         try:
             model_code, profile_id = resolve_ocr_model_display_selection(app, selected_display)
-            if model_code == PADDLEOCR_MODEL_CODE:
+            if model_code == RAPIDOCR_MODEL_CODE:
+                app.ocr_model_var.set(RAPIDOCR_MODEL_CODE)
+                log_debug("OCR model set to rapidocr")
+            elif model_code == PADDLEOCR_MODEL_CODE:
                 app.ocr_model_var.set(PADDLEOCR_MODEL_CODE)
                 log_debug("OCR model set to paddleocr")
             elif model_code == 'custom_ai' and profile_id:
@@ -257,16 +262,21 @@ def create_settings_tab(app):
         active_translation = app.custom_ai_profiles.get_active_profile("translation")
         app.translation_model_display_var.set(active_translation["name"] if active_translation else translation_names[0])
 
-        ocr_names = [get_paddleocr_ocr_display_name(app)]
+        ocr_names = [
+            get_rapidocr_ocr_display_name(app),
+            get_paddleocr_ocr_display_name(app),
+        ]
         ocr_names.extend(enabled_names)
         app.ocr_model_combobox.config(values=ocr_names)
         active_ocr = app.custom_ai_profiles.get_active_profile("ocr")
         if app.ocr_model_var.get() == "custom_ai" and active_ocr:
             app.ocr_model_display_var.set(active_ocr["name"])
+        elif app.ocr_model_var.get() == RAPIDOCR_MODEL_CODE:
+            app.ocr_model_display_var.set(get_rapidocr_ocr_display_name(app))
         elif app.ocr_model_var.get() == PADDLEOCR_MODEL_CODE:
             app.ocr_model_display_var.set(get_paddleocr_ocr_display_name(app))
         elif app.ocr_model_var.get() != "custom_ai":
-            app.ocr_model_display_var.set(get_paddleocr_ocr_display_name(app))
+            app.ocr_model_display_var.set(get_rapidocr_ocr_display_name(app))
 
         profile_to_load = None
         if select_profile_id:

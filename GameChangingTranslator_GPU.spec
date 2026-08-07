@@ -7,9 +7,23 @@ python -m PyInstaller --clean --noconfirm GameChangingTranslator_GPU.spec
 """
 
 import os
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 
 current_dir = os.path.dirname(os.path.abspath("__file__"))
+rapidocr_datas = collect_data_files("rapidocr", includes=["*.yaml"])
+onnxruntime_binaries = collect_dynamic_libs("onnxruntime")
+rapidocr_optional_engine_prefixes = (
+    "rapidocr.inference_engine.mnn",
+    "rapidocr.inference_engine.openvino",
+    "rapidocr.inference_engine.paddle",
+    "rapidocr.inference_engine.py" + "to" + "rch",
+    "rapidocr.inference_engine.tensorrt",
+)
+rapidocr_hidden_imports = collect_submodules(
+    "rapidocr",
+    filter=lambda name: not name.startswith(rapidocr_optional_engine_prefixes),
+)
 
 live_hidden_imports = [
     "app_logic",
@@ -48,6 +62,9 @@ live_hidden_imports = [
     "paddleocr",
     "paddlex",
     "paddle_ocr_backend",
+    "rapid_ocr_backend",
+    "rapidocr",
+    "onnxruntime",
     "pyside_overlay",
     "resource_copier",
     "resource_handler",
@@ -76,18 +93,19 @@ live_hidden_imports = [
     "tkinter.messagebox",
     "tkinter.ttk",
 ]
+live_hidden_imports += rapidocr_hidden_imports
 
 a = Analysis(
     ["main.py"],
     pathex=[current_dir],
-    binaries=[],
+    binaries=onnxruntime_binaries,
     datas=[
         ("resources", "resources"),
         ("docs/user-manual.html", "docs"),
         ("docs/CHANGELOG.md", "docs"),
         ("README.md", "."),
         ("LICENSE", "."),
-    ],
+    ] + rapidocr_datas,
     hiddenimports=live_hidden_imports,
     hookspath=[],
     hooksconfig={},

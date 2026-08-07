@@ -700,10 +700,10 @@ class PaddleOCRBackendTests(unittest.TestCase):
 
 
 class PaddleOCRConfigAndUITests(unittest.TestCase):
-    def test_paddleocr_defaults_exist(self):
+    def test_rapidocr_is_default_and_paddleocr_settings_remain_available(self):
         from config_manager import DEFAULT_CONFIG_SETTINGS
 
-        self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], "paddleocr")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], "rapidocr")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_source_dir"], "PaddleOCR-3.7.0")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_ocr_version"], "PP-OCRv6")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_model_size"], "tiny")
@@ -723,6 +723,7 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
         self.assertEqual(
             gui_builder.build_ocr_model_display_options(app),
             [
+                "RapidOCR PP-OCRv6 tiny (ONNX)",
                 "PaddleOCR PP-OCRv6 (offline)",
                 "Vision API",
             ],

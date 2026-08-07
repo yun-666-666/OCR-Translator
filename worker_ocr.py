@@ -9,6 +9,7 @@ import time
 
 from logger import summarize_text_for_log
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
+from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 from worker_capture import _increment_metric, _refresh_ocr_queue_metric
 
 OCR_STABILITY_GATE_MIN_WAIT_SECONDS = 0.12
@@ -779,7 +780,7 @@ def _ocr_queue_prefers_latest_frame(ocr_model):
     frames once capacity frees up.
     """
     model = str(ocr_model or "").strip().lower()
-    return model == PADDLEOCR_MODEL_CODE or model == "custom_ai"
+    return model in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE, "custom_ai"}
 
 
 def enqueue_ocr_frame_for_model(app, screenshot, ocr_model):

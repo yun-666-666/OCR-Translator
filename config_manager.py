@@ -252,7 +252,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'custom_ai_log_content_enabled': 'False',
     'gui_language':'English',
     # OCR Model Selection
-    'ocr_model': 'paddleocr',
+    'ocr_model': 'rapidocr',
     'paddleocr_source_dir': 'PaddleOCR-3.7.0',
     'paddleocr_lang': 'en',
     'paddleocr_ocr_version': 'PP-OCRv6',
@@ -432,17 +432,17 @@ def load_app_config():
             log_debug(f"Config: Removed obsolete '{key}' setting.")
 
 
-    # Force live product path: Custom AI translation + PaddleOCR/Custom AI OCR.
+    # Force live product path: Custom AI translation + local/Custom AI OCR.
     current_translation_model = str(config_settings.get('translation_model', 'custom_ai') or 'custom_ai')
     if current_translation_model != 'custom_ai':
         config_settings['translation_model'] = 'custom_ai'
         settings_changed = True
         log_debug(f"Config: Migrated translation_model '{current_translation_model}' to custom_ai")
-    current_ocr_model = str(config_settings.get('ocr_model', 'paddleocr') or 'paddleocr')
-    if current_ocr_model not in {'paddleocr', 'custom_ai'}:
-        config_settings['ocr_model'] = 'paddleocr'
+    current_ocr_model = str(config_settings.get('ocr_model', 'rapidocr') or 'rapidocr')
+    if current_ocr_model not in {'rapidocr', 'paddleocr', 'custom_ai'}:
+        config_settings['ocr_model'] = 'rapidocr'
         settings_changed = True
-        log_debug(f"Config: Migrated ocr_model '{current_ocr_model}' to paddleocr")
+        log_debug(f"Config: Migrated ocr_model '{current_ocr_model}' to rapidocr")
 
     for key, value in dynamic_defaults.items():
         if key not in config_settings:
@@ -470,11 +470,11 @@ def load_app_config():
         settings_changed = True
         log_debug("Config: Synchronized legacy keep_linebreaks with translation layout")
 
-    current_ocr_model = config_settings.get('ocr_model', 'paddleocr')
-    if current_ocr_model not in ['paddleocr', 'custom_ai']:
-        config_settings['ocr_model'] = 'paddleocr'
+    current_ocr_model = config_settings.get('ocr_model', 'rapidocr')
+    if current_ocr_model not in ['rapidocr', 'paddleocr', 'custom_ai']:
+        config_settings['ocr_model'] = 'rapidocr'
         settings_changed = True
-        log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'paddleocr'")
+        log_debug(f"Config: Invalid OCR model '{current_ocr_model}' changed to 'rapidocr'")
 
     current_ai_optimization_mode = config_settings.get(
         'ai_optimization_mode', AI_OPTIMIZATION_AUTO

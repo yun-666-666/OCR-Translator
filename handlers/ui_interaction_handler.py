@@ -15,6 +15,7 @@ from logger import (
     read_debug_log_tail,
 )
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
+from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 import traceback
 
 
@@ -159,7 +160,8 @@ class UIInteractionHandler:
                     widget.grid_remove()
 
         is_paddleocr = (selected_ocr_model == PADDLEOCR_MODEL_CODE)
-        is_local_ocr = is_paddleocr
+        is_rapidocr = (selected_ocr_model == RAPIDOCR_MODEL_CODE)
+        is_local_ocr = is_paddleocr or is_rapidocr
         is_custom_ai_ocr = selected_ocr_model == "custom_ai"
         is_custom_translation = (
             getattr(self.app, "translation_model_var", None) is not None
@@ -195,7 +197,8 @@ class UIInteractionHandler:
 
         log_debug(
             f"OCR model UI updated for {selected_ocr_model}: "
-            f"PaddleOCR local={'visible' if is_paddleocr else 'hidden'}"
+            f"local={'visible' if is_local_ocr else 'hidden'} "
+            f"Paddle settings={'visible' if is_paddleocr else 'hidden'}"
         )
 
     def update_all_dropdowns_for_language_change(self):

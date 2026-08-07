@@ -37,6 +37,7 @@ from gui_profile_controls import (
     build_ocr_model_display_options,
     filter_model_values,
     get_paddleocr_ocr_display_name,
+    get_rapidocr_ocr_display_name,
     resolve_ocr_model_display_selection,
 )
 

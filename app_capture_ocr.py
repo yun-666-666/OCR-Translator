@@ -32,6 +32,12 @@ from paddle_ocr_backend import (
     prepare_paddleocr_image,
     recognize_with_paddleocr,
 )
+from rapid_ocr_backend import (
+    RAPIDOCR_MODEL_CODE,
+    RapidOCRSettings,
+    prepare_rapidocr_image,
+    recognize_with_rapidocr,
+)
 
 
 CUSTOM_AI_OCR_CONCURRENCY_LIMIT = 2
@@ -195,7 +201,7 @@ class AppCaptureOcrMixin:
         self.base_scan_interval = base_interval
 
         selected_ocr_model = self.get_ocr_model_setting()
-        if selected_ocr_model == PADDLEOCR_MODEL_CODE:
+        if selected_ocr_model in {RAPIDOCR_MODEL_CODE, PADDLEOCR_MODEL_CODE}:
             (
                 adaptive_interval,
                 local_sample_count,
@@ -575,6 +581,14 @@ class AppCaptureOcrMixin:
 
     def _run_preview_ocr_job(self, screenshot_pil, paddleocr_settings, keep_linebreaks):
         """Background-only Preview OCR. Must not touch Tk widgets."""
+        if isinstance(paddleocr_settings, RapidOCRSettings):
+            processed_pil = prepare_rapidocr_image(screenshot_pil, paddleocr_settings)
+            ocr_cleaned_text, _lines = recognize_with_rapidocr(
+                screenshot_pil,
+                paddleocr_settings,
+                keep_linebreaks=keep_linebreaks,
+            )
+            return processed_pil, ocr_cleaned_text
         processed_pil = prepare_paddleocr_image(screenshot_pil, paddleocr_settings)
         ocr_cleaned_text, _lines = recognize_with_paddleocr(
             screenshot_pil,
@@ -891,17 +905,21 @@ class AppCaptureOcrMixin:
                 return
 
             current_ocr_model = self.get_ocr_model_setting()
-            if current_ocr_model == PADDLEOCR_MODEL_CODE:
+            if current_ocr_model in {RAPIDOCR_MODEL_CODE, PADDLEOCR_MODEL_CODE}:
                 from worker_threads import get_paddleocr_settings_from_app
 
-                paddleocr_settings = get_paddleocr_settings_from_app(self)
+                paddleocr_settings = (
+                    RapidOCRSettings()
+                    if current_ocr_model == RAPIDOCR_MODEL_CODE
+                    else get_paddleocr_settings_from_app(self)
+                )
                 try:
                     keep_linebreaks = bool(self.keep_linebreaks_var.get())
                 except Exception:
                     keep_linebreaks = False
 
                 # Show the latest captured frame immediately on the UI thread.
-                # Full PaddleOCR recognition always runs off-thread.
+                # Full local OCR recognition always runs off-thread.
                 try:
                     self._apply_preview_image(screenshot_pil.convert("RGB"))
                 except Exception:
@@ -918,7 +936,7 @@ class AppCaptureOcrMixin:
                 self._apply_preview_text(
                     self.ui_lang.get_label(
                         "ocr_preview_local_only",
-                        "OCR preview is available for PaddleOCR.",
+                        "OCR preview is available for local OCR engines.",
                     )
                 )
         except tk.TclError:

@@ -61,6 +61,11 @@ from paddle_ocr_backend import (
     recognize_with_paddleocr,
     summarize_paddleocr_settings,
 )
+from rapid_ocr_backend import (
+    RAPIDOCR_DISPLAY_NAME,
+    RAPIDOCR_MODEL_CODE,
+    get_rapidocr_engine,
+)
 
 from handlers import (
     ConfigurationHandler,
@@ -82,7 +87,7 @@ try:
 except ImportError:
     pass
 
-# Live path only: PaddleOCR + Custom AI profiles.
+# Live path only: RapidOCR/PaddleOCR + Custom AI profiles.
 GOOGLE_TRANSLATE_API_AVAILABLE = False
 DEEPL_API_AVAILABLE = False
 GEMINI_API_AVAILABLE = False
@@ -303,9 +308,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.enable_instant_cache_display_var = tk.BooleanVar(value=self.config.getboolean('Settings', 'enable_instant_cache_display', fallback=True))
 
         # OCR Model Selection
-        configured_ocr_model = self.config['Settings'].get('ocr_model', PADDLEOCR_MODEL_CODE)
-        if configured_ocr_model not in [PADDLEOCR_MODEL_CODE, 'custom_ai']:
-            configured_ocr_model = PADDLEOCR_MODEL_CODE
+        configured_ocr_model = self.config['Settings'].get('ocr_model', RAPIDOCR_MODEL_CODE)
+        if configured_ocr_model not in [RAPIDOCR_MODEL_CODE, PADDLEOCR_MODEL_CODE, 'custom_ai']:
+            configured_ocr_model = RAPIDOCR_MODEL_CODE
         self.ocr_model_var = tk.StringVar(value=configured_ocr_model)
         translation_model_val = self.config['Settings'].get('translation_model', 'custom_ai')
         if translation_model_val != 'custom_ai':
@@ -409,11 +414,16 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.custom_ocr_profile_display_var = tk.StringVar()
         initial_ocr_model_code = self.ocr_model_var.get()
         initial_ocr_display_name = ""
-        if initial_ocr_model_code not in [PADDLEOCR_MODEL_CODE, 'custom_ai']:
-            log_debug(f"Configured legacy OCR model '{initial_ocr_model_code}' migrated to paddleocr")
-            self.ocr_model_var.set(PADDLEOCR_MODEL_CODE)
-            initial_ocr_model_code = PADDLEOCR_MODEL_CODE
-        if initial_ocr_model_code == PADDLEOCR_MODEL_CODE:
+        if initial_ocr_model_code not in [RAPIDOCR_MODEL_CODE, PADDLEOCR_MODEL_CODE, 'custom_ai']:
+            log_debug(f"Configured legacy OCR model '{initial_ocr_model_code}' migrated to rapidocr")
+            self.ocr_model_var.set(RAPIDOCR_MODEL_CODE)
+            initial_ocr_model_code = RAPIDOCR_MODEL_CODE
+        if initial_ocr_model_code == RAPIDOCR_MODEL_CODE:
+            initial_ocr_display_name = self.ui_lang.get_label(
+                "ocr_model_rapidocr",
+                RAPIDOCR_DISPLAY_NAME,
+            )
+        elif initial_ocr_model_code == PADDLEOCR_MODEL_CODE:
             initial_ocr_display_name = self.ui_lang.get_label("ocr_model_paddleocr", PADDLEOCR_DISPLAY_NAME)
         elif initial_ocr_model_code == 'custom_ai':
             active_ocr_profile = self.custom_ai_profiles.get_active_profile("ocr")
@@ -422,7 +432,10 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
 
         # Fallback if no specific display name was found
         if not initial_ocr_display_name:
-            initial_ocr_display_name = self.ui_lang.get_label("ocr_model_paddleocr", PADDLEOCR_DISPLAY_NAME)
+            initial_ocr_display_name = self.ui_lang.get_label(
+                "ocr_model_rapidocr",
+                RAPIDOCR_DISPLAY_NAME,
+            )
 
         self.ocr_model_display_var.set(initial_ocr_display_name)
 
@@ -1015,7 +1028,51 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
     def schedule_initial_ui_readiness(self):
         """Prepare overlays before starting background OCR initialization."""
         self.root.after(50, self.load_initial_overlay_areas)
+        self.root.after(200, self.schedule_initial_rapidocr_prewarm)
         self.root.after(250, self.schedule_initial_paddleocr_prewarm)
+
+    def schedule_initial_rapidocr_prewarm(self):
+        """Warm the fixed RapidOCR engine without blocking the Tk thread."""
+        try:
+            if self.get_ocr_model_setting() != RAPIDOCR_MODEL_CODE:
+                return False
+        except Exception as error:
+            log_debug(f"RapidOCR startup prewarm skipped: {error}")
+            return False
+        return self.ensure_rapidocr_ready_if_selected("application startup")
+
+    def ensure_rapidocr_ready_if_selected(self, reason="RapidOCR selected"):
+        try:
+            if self.get_ocr_model_setting() != RAPIDOCR_MODEL_CODE:
+                return False
+        except Exception as error:
+            log_debug(f"RapidOCR prewarm skipped ({reason}): {error}")
+            return False
+
+        active_thread = getattr(self, "_rapidocr_prewarm_thread", None)
+        if active_thread is not None and active_thread.is_alive():
+            return False
+
+        def _warm():
+            try:
+                get_rapidocr_engine()
+                log_debug(f"RapidOCR prewarm ready ({reason})")
+            except Exception as error:
+                log_debug(
+                    "RapidOCR prewarm failed; PaddleOCR fallback remains available "
+                    f"({reason}): {type(error).__name__}: {error}"
+                )
+            finally:
+                self._rapidocr_prewarm_thread = None
+
+        thread = threading.Thread(
+            target=_warm,
+            name="RapidOCRPrewarm",
+            daemon=True,
+        )
+        self._rapidocr_prewarm_thread = thread
+        thread.start()
+        return True
 
     def schedule_initial_paddleocr_prewarm(self):
         """Start local PaddleOCR loading after the UI is up when it is the selected OCR."""
@@ -1579,6 +1636,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
                     bump_generation=True,
                     reason="OCR model changed",
                 )
+
+            if self.ocr_model_var.get() == RAPIDOCR_MODEL_CODE:
+                self.ensure_rapidocr_ready_if_selected("OCR model changed")
 
             # Refresh OCR preview if it's open to use the new OCR model
             if self.ocr_preview_window is not None:

@@ -3232,7 +3232,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
         self.assertEqual(convert_calls, [])
         self.assertEqual(app.batch_sequence_counter, 7)
 
-    def test_custom_ai_ocr_cooldown_uses_paddleocr_for_current_frame(self):
+    def test_custom_ai_ocr_cooldown_uses_rapidocr_for_current_frame(self):
         worker_threads = import_worker_threads_for_tests()
         app = types.SimpleNamespace(
             translation_handler=types.SimpleNamespace(
@@ -3242,7 +3242,7 @@ class LatencyTranslationCacheTests(unittest.TestCase):
 
         self.assertEqual(
             worker_threads._effective_ocr_model_for_frame(app, "custom_ai"),
-            "paddleocr",
+            "rapidocr",
         )
 
     def test_custom_ai_ocr_recovers_automatically_after_cooldown(self):

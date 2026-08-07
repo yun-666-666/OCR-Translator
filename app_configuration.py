@@ -20,6 +20,7 @@ from gui_builder import (
 )
 from logger import set_debug_logging_enabled
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
+from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 
 DEFAULT_CUSTOM_PROMPT = (
     "Translate naturally and concisely. Preserve meaning, tone, names, and terminology; "
@@ -78,10 +79,13 @@ class AppConfigurationMixin:
             saved = self.ui_interaction_handler.save_settings(force=True)
             if saved and not getattr(self, "_app_is_closing", False):
                 try:
-                    if self.get_ocr_model_setting() == PADDLEOCR_MODEL_CODE:
+                    selected_ocr = self.get_ocr_model_setting()
+                    if selected_ocr == RAPIDOCR_MODEL_CODE:
+                        self.ensure_rapidocr_ready_if_selected("settings saved")
+                    elif selected_ocr == PADDLEOCR_MODEL_CODE:
                         self.ensure_paddleocr_ready_if_selected("settings saved")
                 except Exception as e:
-                    _log_debug(f"PaddleOCR prewarm after settings save failed: {e}")
+                    _log_debug(f"Local OCR prewarm after settings save failed: {e}")
             return saved
         _log_debug("Attempted to save settings before full initialization.")
         return False

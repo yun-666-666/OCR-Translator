@@ -10,6 +10,7 @@ from custom_ai import (
     normalize_custom_ai_reasoning_effort,
 )
 from paddle_ocr_backend import PADDLEOCR_DISPLAY_NAME, PADDLEOCR_MODEL_CODE
+from rapid_ocr_backend import RAPIDOCR_DISPLAY_NAME, RAPIDOCR_MODEL_CODE
 
 
 CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
@@ -25,8 +26,13 @@ def get_paddleocr_ocr_display_name(app):
     return app.ui_lang.get_label("ocr_model_paddleocr", PADDLEOCR_DISPLAY_NAME)
 
 
+def get_rapidocr_ocr_display_name(app):
+    return app.ui_lang.get_label("ocr_model_rapidocr", RAPIDOCR_DISPLAY_NAME)
+
+
 def build_ocr_model_display_options(app):
     options = [
+        get_rapidocr_ocr_display_name(app),
         get_paddleocr_ocr_display_name(app),
     ]
     options.extend([p["name"] for p in app.custom_ai_profiles.list_profiles(enabled_only=True)])
@@ -34,6 +40,8 @@ def build_ocr_model_display_options(app):
 
 
 def resolve_ocr_model_display_selection(app, selected_display):
+    if selected_display == get_rapidocr_ocr_display_name(app):
+        return RAPIDOCR_MODEL_CODE, None
     if selected_display == get_paddleocr_ocr_display_name(app):
         return PADDLEOCR_MODEL_CODE, None
     for profile in app.custom_ai_profiles.list_profiles(enabled_only=True):

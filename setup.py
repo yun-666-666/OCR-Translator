@@ -23,6 +23,8 @@ setup(
         "Pillow>=8.0.0",
         "requests>=2.25.0",
         "mss>=9.0.0",
+        "rapidocr==3.9.2",
+        "onnxruntime==1.28.0",
         "PySide6==6.7.3",
         "keyboard>=0.13.5",
         "python-bidi>=0.4.2",

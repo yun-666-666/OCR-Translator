@@ -23,6 +23,12 @@ from paddle_ocr_backend import (
     prepare_paddleocr_image,
     recognize_subtitle_with_paddleocr,
 )
+from rapid_ocr_backend import (
+    RAPIDOCR_MODEL_CODE,
+    RapidOCRSettings,
+    prepare_rapidocr_image,
+    recognize_with_rapidocr,
+)
 
 DEFAULT_TRANSLATION_REQUEST_TIMEOUT_SECONDS = 10.0
 CAPTURE_SLOW_SECONDS_MSS = 0.050
@@ -40,6 +46,7 @@ class CaptureUISnapshot:
     keep_linebreaks: bool
     is_api_based: bool
     paddleocr_settings: Optional[PaddleOCRSettings] = None
+    rapidocr_settings: Optional[RapidOCRSettings] = None
     source_lang: str = "en"
     ocr_debugging: bool = False
 
@@ -137,6 +144,14 @@ def _recognize_subtitle_with_paddleocr(*args, **kwargs):
     )
 
 
+def _prepare_rapidocr_image(*args, **kwargs):
+    return sys.modules["worker_threads"].prepare_rapidocr_image(*args, **kwargs)
+
+
+def _recognize_with_rapidocr(*args, **kwargs):
+    return sys.modules["worker_threads"].recognize_with_rapidocr(*args, **kwargs)
+
+
 def _log_hot_path_timing(
     event_key,
     message,
@@ -190,6 +205,14 @@ def _log_paddle_ocr_route():
     return _log_debug_coalesced(
         "ocr-routing-paddle",
         "WT: OCR routing to PaddleOCR PP-OCRv6",
+        interval_seconds=5.0,
+    )
+
+
+def _log_rapid_ocr_route():
+    return _log_debug_coalesced(
+        "ocr-routing-rapid",
+        "WT: OCR routing to RapidOCR PP-OCRv6 tiny ONNX (CPU 2/1 threads)",
         interval_seconds=5.0,
     )
 
@@ -343,6 +366,10 @@ def get_paddleocr_settings_from_app(app):
     )
 
 
+def get_rapidocr_settings_from_app(app):
+    return RapidOCRSettings()
+
+
 def _normalize_source_geometry(area):
     if not area:
         return None
@@ -403,10 +430,10 @@ def build_capture_ui_snapshot(
             try:
                 ocr_model = getter()
             except Exception:
-                ocr_model = PADDLEOCR_MODEL_CODE
+                ocr_model = RAPIDOCR_MODEL_CODE
         else:
-            ocr_model = getattr(app, "ocr_model", PADDLEOCR_MODEL_CODE)
-    ocr_model = str(ocr_model or PADDLEOCR_MODEL_CODE)
+            ocr_model = getattr(app, "ocr_model", RAPIDOCR_MODEL_CODE)
+    ocr_model = str(ocr_model or RAPIDOCR_MODEL_CODE)
 
     if scan_interval_ms is None:
         scan_interval_ms = getattr(app, "current_scan_interval", None)
@@ -439,15 +466,16 @@ def build_capture_ui_snapshot(
             try:
                 is_api_based = bool(api_checker())
             except Exception:
-                is_api_based = ocr_model != PADDLEOCR_MODEL_CODE
+                is_api_based = ocr_model not in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}
         except Exception:
-            is_api_based = ocr_model != PADDLEOCR_MODEL_CODE
+            is_api_based = ocr_model not in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}
     else:
-        is_api_based = ocr_model != PADDLEOCR_MODEL_CODE
+        is_api_based = ocr_model not in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}
 
-    # Keep local settings available even while Custom AI OCR is selected: a
-    # request-scoped cooldown may route this captured frame through PaddleOCR.
+    # Keep both local settings available while Custom AI OCR is selected so a
+    # request-scoped cooldown or runtime failure can route locally.
     paddleocr_settings = get_paddleocr_settings_from_app(app)
+    rapidocr_settings = get_rapidocr_settings_from_app(app)
     source_lang = str(
         getattr(app, "custom_source_lang", None)
         or _read_app_var(app, "source_lang_var", "en")
@@ -467,6 +495,7 @@ def build_capture_ui_snapshot(
         keep_linebreaks=keep_linebreaks,
         is_api_based=is_api_based,
         paddleocr_settings=paddleocr_settings,
+        rapidocr_settings=rapidocr_settings,
         source_lang=source_lang,
         ocr_debugging=ocr_debugging,
     )
@@ -562,6 +591,21 @@ def get_paddleocr_ocr_cache_mode_key_from_settings(
     )
 
 
+def get_rapidocr_ocr_cache_mode_key_from_settings(settings, keep_linebreaks):
+    settings = settings or RapidOCRSettings()
+    return (
+        f"rapidocr|version={settings.ocr_version}"
+        f"|size={settings.model_size}"
+        f"|engine={settings.engine}"
+        f"|device={settings.device}"
+        f"|threads={settings.intra_op_num_threads}/{settings.inter_op_num_threads}"
+        f"|min_score={settings.min_score}"
+        f"|det_limit={settings.text_det_limit_side_len}"
+        f"|det_limit_type={settings.text_det_limit_type}"
+        f"|keep_linebreaks={keep_linebreaks}"
+    )
+
+
 def _pil_to_debug_bgr(pil_image):
     rgb = np.array(pil_image.convert("RGB"))
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -573,6 +617,66 @@ def process_local_ocr_frame(
     ocr_model,
     capture_snapshot=None,
 ):
+    if ocr_model == RAPIDOCR_MODEL_CODE:
+        if (
+            isinstance(capture_snapshot, CaptureUISnapshot)
+            and capture_snapshot.rapidocr_settings is not None
+        ):
+            rapidocr_settings = capture_snapshot.rapidocr_settings
+            keep_linebreaks = bool(capture_snapshot.keep_linebreaks)
+        else:
+            rapidocr_settings = get_rapidocr_settings_from_app(app)
+            keep_linebreaks = _coerce_bool(
+                _read_app_var(app, "keep_linebreaks_var", False),
+                False,
+            )
+        try:
+            ocr_cleaned_text, _lines = _recognize_with_rapidocr(
+                screenshot_pil,
+                rapidocr_settings,
+                keep_linebreaks=keep_linebreaks,
+            )
+            engine_label = "RapidOCR"
+            debug_prepare = lambda: _prepare_rapidocr_image(
+                screenshot_pil,
+                rapidocr_settings,
+            )
+        except Exception as rapid_error:
+            _log_debug_coalesced(
+                "rapidocr-runtime-fallback",
+                "WT: RapidOCR failed; using PaddleOCR fallback: "
+                f"{type(rapid_error).__name__}: {rapid_error}",
+                interval_seconds=5.0,
+            )
+            paddleocr_settings = (
+                capture_snapshot.paddleocr_settings
+                if isinstance(capture_snapshot, CaptureUISnapshot)
+                and capture_snapshot.paddleocr_settings is not None
+                else get_paddleocr_settings_from_app(app)
+            )
+            ocr_cleaned_text, _lines = _recognize_subtitle_with_paddleocr(
+                screenshot_pil,
+                paddleocr_settings,
+                keep_linebreaks=keep_linebreaks,
+            )
+            engine_label = "PaddleOCR fallback"
+            debug_prepare = lambda: _prepare_paddleocr_image(
+                screenshot_pil,
+                paddleocr_settings,
+            )
+
+        if isinstance(capture_snapshot, CaptureUISnapshot):
+            ocr_debugging = bool(capture_snapshot.ocr_debugging)
+        else:
+            ocr_debugging = _coerce_bool(
+                _read_app_var(app, "ocr_debugging_var", False),
+                False,
+            )
+        debug_img = None
+        if ocr_debugging:
+            debug_img = _pil_to_debug_bgr(debug_prepare())
+        return ocr_cleaned_text, debug_img, engine_label
+
     if ocr_model == PADDLEOCR_MODEL_CODE:
         if (
             isinstance(capture_snapshot, CaptureUISnapshot)

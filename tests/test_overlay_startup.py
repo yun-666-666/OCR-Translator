@@ -343,7 +343,7 @@ class OverlayStartupTests(unittest.TestCase):
         )
         self.assertEqual(1, app.source_overlay.toggle_count)
 
-    def test_startup_schedules_overlay_readiness_before_paddleocr_prewarm(self):
+    def test_startup_schedules_overlay_readiness_before_local_ocr_prewarms(self):
         import app_logic
 
         scheduled = []
@@ -355,6 +355,7 @@ class OverlayStartupTests(unittest.TestCase):
         app = object.__new__(app_logic.GameChangingTranslator)
         app.root = Root()
         app.load_initial_overlay_areas = lambda: None
+        app.schedule_initial_rapidocr_prewarm = lambda: None
         app.schedule_initial_paddleocr_prewarm = lambda: None
 
         app.schedule_initial_ui_readiness()
@@ -362,6 +363,7 @@ class OverlayStartupTests(unittest.TestCase):
         self.assertEqual(
             [
                 (50, app.load_initial_overlay_areas),
+                (200, app.schedule_initial_rapidocr_prewarm),
                 (250, app.schedule_initial_paddleocr_prewarm),
             ],
             scheduled,

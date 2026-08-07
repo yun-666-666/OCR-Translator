@@ -79,27 +79,26 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertNotIn("def create_about_tab", app_logic_source)
         self.assertNotIn("def create_api_usage_tab", gui_builder_source)
 
-    def test_rapidocr_support_is_removed_from_startup_files(self):
-        files_to_check = [
+    def test_rapidocr_support_is_wired_into_startup_files(self):
+        rapidocr_files = (
             "app_logic.py",
             "config_manager.py",
             "gui_builder.py",
-            "ocr_utils.py",
             "worker_threads.py",
-            "handlers/configuration_handler.py",
             "handlers/ui_interaction_handler.py",
             "requirements.txt",
             "resources/gui_eng.csv",
             "resources/gui_pol.csv",
             "resources/gui_zh.csv",
-            "ocr_translator_config.ini",
-        ]
+            "ocr_translator_config.example.ini",
+        )
 
-        for relative_path in files_to_check:
-            source = Path(relative_path).read_text(encoding="utf-8-sig")
-            lowered = source.lower()
-            self.assertNotIn("rapidocr", lowered, msg=relative_path)
-            self.assertNotIn("onnxruntime", lowered, msg=relative_path)
+        for relative_path in rapidocr_files:
+            source = Path(relative_path).read_text(encoding="utf-8-sig").lower()
+            self.assertIn("rapidocr", source, msg=relative_path)
+
+        requirements = Path("requirements.txt").read_text(encoding="utf-8-sig").lower()
+        self.assertIn("onnxruntime==1.28.0", requirements)
 
     def test_missing_custom_prompt_loads_optimized_default_prompt(self):
         import app_logic
