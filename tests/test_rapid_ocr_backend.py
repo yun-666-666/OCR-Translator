@@ -1,4 +1,6 @@
 import configparser
+import io
+import logging
 import os
 import tempfile
 import types
@@ -71,6 +73,45 @@ class RapidOCRBackendTests(unittest.TestCase):
         self.assertEqual(params["Det.limit_type"], "max")
         self.assertEqual(params["Rec.ocr_version"].value, "PP-OCRv6")
         self.assertEqual(params["Rec.model_type"].value, "tiny")
+
+    def test_rapidocr_logger_suppresses_only_empty_detection_warning(self):
+        rapidocr_logger = logging.getLogger("RapidOCR")
+        original_filters = list(rapidocr_logger.filters)
+        original_handlers = list(rapidocr_logger.handlers)
+        original_level = rapidocr_logger.level
+        original_propagate = rapidocr_logger.propagate
+        output = io.StringIO()
+        rapidocr_logger.filters = []
+        rapidocr_logger.handlers = [logging.StreamHandler(output)]
+        rapidocr_logger.setLevel(logging.WARNING)
+        rapidocr_logger.propagate = False
+
+        try:
+            rapid_ocr_backend._install_rapidocr_warning_filter()
+            rapid_ocr_backend._install_rapidocr_warning_filter()
+            rapidocr_logger.warning(
+                rapid_ocr_backend.RAPIDOCR_EMPTY_DETECTION_WARNING
+            )
+            rapidocr_logger.warning("A useful RapidOCR warning")
+        finally:
+            installed_filter_count = sum(
+                isinstance(
+                    existing_filter,
+                    rapid_ocr_backend._SuppressEmptyDetectionWarning,
+                )
+                for existing_filter in rapidocr_logger.filters
+            )
+            rapidocr_logger.filters = original_filters
+            rapidocr_logger.handlers = original_handlers
+            rapidocr_logger.setLevel(original_level)
+            rapidocr_logger.propagate = original_propagate
+
+        self.assertEqual(installed_filter_count, 1)
+        self.assertNotIn(
+            rapid_ocr_backend.RAPIDOCR_EMPTY_DETECTION_WARNING,
+            output.getvalue(),
+        )
+        self.assertIn("A useful RapidOCR warning", output.getvalue())
 
     def test_flatten_filters_low_scores_and_orders_lines(self):
         result = types.SimpleNamespace(

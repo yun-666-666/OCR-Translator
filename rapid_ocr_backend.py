@@ -1,5 +1,6 @@
 """RapidOCR PP-OCRv6 tiny ONNX backend for low-latency local OCR."""
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ RAPIDOCR_ONNXRUNTIME_VERSION = "1.28.0"
 RAPIDOCR_INTRA_OP_THREADS = 2
 RAPIDOCR_INTER_OP_THREADS = 1
 RAPIDOCR_MIN_SCORE = 0.45
+RAPIDOCR_EMPTY_DETECTION_WARNING = "The text detection result is empty"
 
 
 class RapidOCRUnavailableError(RuntimeError):
@@ -46,6 +48,20 @@ _ENGINE_LOCK = threading.RLock()
 _INFERENCE_LOCK = threading.Lock()
 
 
+class _SuppressEmptyDetectionWarning(logging.Filter):
+    def filter(self, record):
+        return record.getMessage() != RAPIDOCR_EMPTY_DETECTION_WARNING
+
+
+def _install_rapidocr_warning_filter():
+    rapidocr_logger = logging.getLogger("RapidOCR")
+    if not any(
+        isinstance(existing_filter, _SuppressEmptyDetectionWarning)
+        for existing_filter in rapidocr_logger.filters
+    ):
+        rapidocr_logger.addFilter(_SuppressEmptyDetectionWarning())
+
+
 def _model_root_dir():
     override = str(os.environ.get("OCR_TRANSLATOR_RAPIDOCR_MODEL_DIR", "") or "").strip()
     if override:
@@ -73,6 +89,8 @@ def _build_engine():
         raise RapidOCRUnavailableError(
             "RapidOCR 3.9.2 and ONNX Runtime 1.28.0 are required"
         ) from error
+
+    _install_rapidocr_warning_filter()
 
     params = {
         "Global.model_root_dir": str(_model_root_dir()),
