@@ -253,6 +253,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'gui_language':'English',
     # OCR Model Selection
     'ocr_model': 'rapidocr',
+    'rapidocr_min_score': '0.45',
     'paddleocr_source_dir': 'PaddleOCR-3.7.0',
     'paddleocr_lang': 'en',
     'paddleocr_ocr_version': 'PP-OCRv6',

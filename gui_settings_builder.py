@@ -174,6 +174,15 @@ def create_settings_tab(app):
     app.source_lang_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
     app.source_lang_combobox = ttk.Combobox(frame, textvariable=app.source_display_var, width=25, state='readonly')
     app.source_lang_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+    app.rapidocr_source_lang_note = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "rapidocr_source_lang_note",
+            "Translation only; not used by RapidOCR recognition",
+        ),
+        wraplength=260,
+    )
+    app.rapidocr_source_lang_note.grid(row=2, column=2, padx=5, pady=5, sticky="w")
 
     def on_source_lang_gui_changed(event):
         selected_display_name = app.source_display_var.get()
@@ -922,6 +931,34 @@ def create_settings_tab(app):
         app.save_settings()
 
     app.paddleocr_min_score_spinbox.bind("<FocusOut>", on_paddleocr_min_score_focus_out)
+
+    app.rapidocr_min_score_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("rapidocr_min_score_label", "RapidOCR minimum score:"),
+    )
+    app.rapidocr_min_score_label.grid(row=current_row, column=0, padx=5, pady=5, sticky="w")
+    app.rapidocr_min_score_spinbox = ttk.Spinbox(
+        frame,
+        from_=0.0,
+        to=1.0,
+        increment=0.05,
+        textvariable=app.rapidocr_min_score_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_paddleocr_min_score, '%P'),
+    )
+    app.rapidocr_min_score_spinbox.grid(row=current_row, column=1, padx=5, pady=5, sticky="w")
+
+    def on_rapidocr_min_score_focus_out(event):
+        try:
+            value = float(app.rapidocr_min_score_var.get())
+            clamped = max(0.0, min(1.0, value))
+            app.rapidocr_min_score_var.set(f"{clamped:.2f}")
+        except (ValueError, tk.TclError):
+            app.rapidocr_min_score_var.set("0.45")
+        app.save_settings()
+
+    app.rapidocr_min_score_spinbox.bind("<FocusOut>", on_rapidocr_min_score_focus_out)
     current_row += 1
 
     # Store references to OCR debugging widgets for OCR model UI management

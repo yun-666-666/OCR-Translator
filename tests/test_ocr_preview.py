@@ -8,6 +8,7 @@ from PIL import Image
 
 from app_capture_ocr import AppCaptureOcrMixin
 from paddle_ocr_backend import PADDLEOCR_MODEL_CODE, PaddleOCRSettings
+from rapid_ocr_backend import RAPIDOCR_MODEL_CODE, RapidOCRSettings
 
 
 class _DummyVar:
@@ -116,6 +117,24 @@ class PreviewLatestOnlyOcrTests(unittest.TestCase):
         schedule.assert_called_once()
         recognize.assert_not_called()
         self.assertEqual(host.preview_text_widget.texts[-1], "main worker text")
+
+    def test_refresh_rapidocr_uses_current_minimum_score_settings(self):
+        host = _PreviewHost()
+        host._ocr_model = RAPIDOCR_MODEL_CODE
+        settings = RapidOCRSettings(min_score=0.82)
+
+        with patch(
+            "worker_threads.get_rapidocr_settings_from_app",
+            return_value=settings,
+        ), patch.object(
+            host,
+            "_schedule_preview_ocr",
+            return_value=True,
+        ) as schedule:
+            host.refresh_ocr_preview()
+
+        schedule.assert_called_once()
+        self.assertIs(schedule.call_args.args[1], settings)
 
     def test_high_frequency_refresh_keeps_one_inflight_and_latest_pending(self):
         host = _PreviewHost()

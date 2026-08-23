@@ -568,16 +568,18 @@ class DisplayManager:
             self.app.ocr_results_text.delete(1.0, tk.END)
             # Add metadata
             ocr_model = self.app.get_ocr_model_setting() if hasattr(self.app, "get_ocr_model_setting") else ""
-            paddle_min_score = (
-                self.app.paddleocr_min_score_var.get()
-                if hasattr(self.app, "paddleocr_min_score_var")
-                else ""
-            )
+            if ocr_model == "rapidocr":
+                min_score_label = "RapidOCR Minimum Score"
+                min_score_var = getattr(self.app, "rapidocr_min_score_var", None)
+            else:
+                min_score_label = "PaddleOCR Minimum Score"
+                min_score_var = getattr(self.app, "paddleocr_min_score_var", None)
+            min_score = min_score_var.get() if min_score_var is not None else ""
             debug_info_text = (f"Timestamp: {time.strftime('%H:%M:%S')}\n"
                                f"OCR Model: {ocr_model}\n"
                                f"Target Lang (API): {self.app.target_lang_var.get()}\n" # This is the API target lang setting
                                f"Stability: {self.app.text_stability_counter}/{self.app.stable_threshold}\n"
-                               f"PaddleOCR Minimum Score: {paddle_min_score}\n"
+                               f"{min_score_label}: {min_score}\n"
                                f"{'-'*20}\n"
                                f"{ocr_text_content_udd}\n") # Use renamed arg
             self.app.ocr_results_text.insert(tk.END, debug_info_text)

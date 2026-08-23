@@ -1778,7 +1778,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             any(name == "ocr_queue_stale_frame_drop" for name, _amount in increments)
         )
 
-    def test_paddleocr_first_clear_text_submits_without_legacy_stability_threshold(self):
+    def test_paddleocr_zero_stability_threshold_submits_first_clear_text(self):
         import worker_threads
         from paddle_ocr_backend import PaddleOCRSettings
         from worker_capture import CaptureUISnapshot
@@ -1803,7 +1803,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             capture_ui_snapshot=snapshot,
             previous_text="",
             text_stability_counter=0,
-            stable_threshold=2,
+            stable_threshold=0,
             is_placeholder_text=lambda _text: False,
             calculate_text_similarity=lambda _current, _previous: 0.0,
             reset_clear_timeout=Mock(),

@@ -49,6 +49,7 @@ class CaptureUISnapshot:
     rapidocr_settings: Optional[RapidOCRSettings] = None
     source_lang: str = "en"
     ocr_debugging: bool = False
+    stability_threshold: int = 0
 
 
 def _next_local_capture_interval(
@@ -292,13 +293,15 @@ def _advance_local_capture_signature(
     last_signature,
     repeat_count,
     current_signature,
+    required_repeats=0,
 ):
     """Return updated local-frame state and whether to enqueue this frame."""
     if current_signature != last_signature:
         return current_signature, 0, True
 
     repeat_count = max(0, int(repeat_count or 0)) + 1
-    return current_signature, repeat_count, repeat_count <= 1
+    allowed_repeats = max(1, int(required_repeats or 0))
+    return current_signature, repeat_count, repeat_count <= allowed_repeats
 
 
 def _get_api_ocr_cache_model_key(app, provider_name):
@@ -367,7 +370,14 @@ def get_paddleocr_settings_from_app(app):
 
 
 def get_rapidocr_settings_from_app(app):
-    return RapidOCRSettings()
+    return RapidOCRSettings(
+        min_score=_coerce_float(
+            _read_app_var(app, "rapidocr_min_score_var", "0.45"),
+            0.45,
+            0.0,
+            1.0,
+        ),
+    )
 
 
 def _normalize_source_geometry(area):
@@ -485,6 +495,16 @@ def build_capture_ui_snapshot(
         _read_app_var(app, "ocr_debugging_var", False),
         False,
     )
+    stability_threshold = _coerce_int(
+        _read_app_var(
+            app,
+            "stability_var",
+            getattr(app, "stable_threshold", 0),
+        ),
+        0,
+        0,
+        5,
+    )
 
     return CaptureUISnapshot(
         generation=int(generation),
@@ -498,6 +518,7 @@ def build_capture_ui_snapshot(
         rapidocr_settings=rapidocr_settings,
         source_lang=source_lang,
         ocr_debugging=ocr_debugging,
+        stability_threshold=stability_threshold,
     )
 
 
@@ -938,6 +959,7 @@ def run_capture_thread(app):
                     last_cap_signature,
                     duplicate_capture_count,
                     capture_signature,
+                    snapshot.stability_threshold,
                 )
                 if not should_enqueue:
                     _increment_metric(app, "capture_exact_duplicate_skip")

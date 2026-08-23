@@ -352,6 +352,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             value=max(0, min(5000, custom_ai_submit_interval_ms))
         )
 
+        self.rapidocr_min_score_var = tk.StringVar(
+            value=self.config['Settings'].get('rapidocr_min_score', '0.45')
+        )
         self.paddleocr_source_dir_var = tk.StringVar(
             value=self.config['Settings'].get('paddleocr_source_dir', 'PaddleOCR-3.7.0')
         )
@@ -529,6 +532,8 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         self.custom_ai_log_content_enabled_var.trace_add("write", self.settings_changed_callback)
         self.ai_optimization_mode_var.trace_add("write", self.settings_changed_callback)
         self.custom_ai_submit_interval_ms_var.trace_add("write", self.settings_changed_callback)
+        self.rapidocr_min_score_var.trace_add("write", self.settings_changed_callback)
+        self.rapidocr_min_score_var.trace_add("write", self.on_ocr_parameter_change)
         for paddleocr_var in (
             self.paddleocr_source_dir_var,
             self.paddleocr_lang_var,
@@ -735,6 +740,12 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         from worker_threads import get_paddleocr_settings_from_app
 
         return get_paddleocr_settings_from_app(self)
+
+    def get_current_rapidocr_settings(self):
+        """Return normalized RapidOCR settings for the current UI/config selection."""
+        from worker_threads import get_rapidocr_settings_from_app
+
+        return get_rapidocr_settings_from_app(self)
 
     def is_paddleocr_ready_for_settings(self, settings=None):
         """True when the matching local PaddleOCR engines have completed prewarm."""
@@ -1558,12 +1569,25 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             current_ocr_model = PADDLEOCR_MODEL_CODE
 
         # Tk 'write' traces fire on every keystroke and on no-op focus-out
-        # .set() re-clamps.  Only invalidate the warmed engine cache / bump the
-        # capture generation when the NORMALIZED PaddleOCR settings actually
-        # changed; otherwise typing a value cold-starts local OCR several times
-        # and flushes the OCR frame cache mid-session.
+        # .set() re-clamps. Only bump the capture generation when normalized
+        # local OCR settings actually changed. PaddleOCR also needs its warmed
+        # runtime cache invalidated when engine-affecting parameters change.
         settings_changed = True
-        if current_ocr_model == PADDLEOCR_MODEL_CODE:
+        if current_ocr_model == RAPIDOCR_MODEL_CODE:
+            current_settings = None
+            try:
+                current_settings = self.get_current_rapidocr_settings()
+            except Exception:
+                current_settings = None
+            if current_settings is not None:
+                settings_changed = (
+                    current_settings
+                    != getattr(
+                        self, "_last_applied_rapidocr_parameter_settings", None
+                    )
+                )
+                self._last_applied_rapidocr_parameter_settings = current_settings
+        elif current_ocr_model == PADDLEOCR_MODEL_CODE:
             current_settings = None
             try:
                 current_settings = self.get_current_paddleocr_settings()

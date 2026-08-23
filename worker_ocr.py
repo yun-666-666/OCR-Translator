@@ -771,23 +771,79 @@ def _clear_ocr_stability_gate(app, reason):
     return had_pending
 
 
+def _configured_text_stability_allows_submit(app, text):
+    """Apply the user-selected count of additional identical OCR readings."""
+    try:
+        threshold = max(0, int(getattr(app, "stable_threshold", 0) or 0))
+    except (TypeError, ValueError):
+        threshold = 0
+
+    current_text = str(text or "")
+    previous_text = str(getattr(app, "previous_text", "") or "")
+    if threshold <= 0:
+        app.previous_text = current_text
+        app.text_stability_counter = 0
+        return True
+
+    if current_text == previous_text:
+        try:
+            previous_count = max(
+                0,
+                int(getattr(app, "text_stability_counter", 0) or 0),
+            )
+        except (TypeError, ValueError):
+            previous_count = 0
+        app.text_stability_counter = min(threshold, previous_count + 1)
+    else:
+        app.previous_text = current_text
+        app.text_stability_counter = 0
+
+    return app.text_stability_counter >= threshold
+
+
 def _ocr_queue_prefers_latest_frame(ocr_model):
     """Return whether queued older frames can never beat a fresher capture.
 
-    Local Paddle and Custom AI OCR both process one frame at a time and discard
-    older responses by sequence. Keeping a multi-frame backlog only delays the
-    latest subtitle and can force paid API encode/OCR work on already-stale
-    frames once capacity frees up.
+    Local OCR and Custom AI OCR normally discard older queued frames. The
+    configured local text-stability threshold is the one exception: matching
+    frames are retained just long enough to satisfy the requested reading count.
     """
     model = str(ocr_model or "").strip().lower()
     return model in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE, "custom_ai"}
 
 
+def _ocr_queue_stability_context(screenshot, ocr_model):
+    model = str(ocr_model or "").strip().lower()
+    if model not in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}:
+        return None
+    snapshot = getattr(screenshot, "_gct_capture_snapshot", None)
+    try:
+        threshold = int(getattr(snapshot, "stability_threshold", 0) or 0)
+    except (TypeError, ValueError):
+        threshold = 0
+    if threshold <= 0:
+        return None
+    signature = getattr(screenshot, "_gct_capture_signature", None)
+    if signature is None:
+        signature = getattr(screenshot, "_gct_frame_hash", None)
+    if signature is None:
+        return None
+    generation = getattr(snapshot, "generation", None)
+    return (model, generation, signature)
+
+
 def enqueue_ocr_frame_for_model(app, screenshot, ocr_model):
     ocr_queue = app.ocr_queue
     prefer_latest = _ocr_queue_prefers_latest_frame(ocr_model)
+    stability_context = _ocr_queue_stability_context(screenshot, ocr_model)
+    retain_matching_stability_frames = (
+        stability_context is not None
+        and stability_context
+        == getattr(app, "_ocr_queue_stability_context", None)
+    )
+    app._ocr_queue_stability_context = stability_context
     dropped = 0
-    if prefer_latest:
+    if prefer_latest and not retain_matching_stability_frames:
         try:
             while True:
                 ocr_queue.get_nowait()

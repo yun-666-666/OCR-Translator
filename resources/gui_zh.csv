@@ -32,6 +32,7 @@ ocr_model_label,OCR 模型：
 ocr_model_paddleocr,PaddleOCR（离线）
 ocr_model_rapidocr,RapidOCR PP-OCRv6 tiny（ONNX）
 source_lang_label,源语言：
+rapidocr_source_lang_note,仅用于翻译；RapidOCR 识别不支持
 target_lang_label,目标语言：
 custom_context_window_label,联系上下文句数：
 custom_ai_log_content_label,Custom AI 短日志正文：
@@ -54,6 +55,7 @@ scan_interval_label,扫描间隔（毫秒）：
 clear_timeout_label,清空翻译超时（秒）：
 stability_threshold_label,文本稳定阈值：
 paddleocr_min_score_label,PaddleOCR 最低分：
+rapidocr_min_score_label,RapidOCR 最低分：
 ocr_debugging_label,OCR 调试：
 show_debug_checkbox,显示调试图像/文本
 preview_btn,预览

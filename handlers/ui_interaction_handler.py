@@ -184,6 +184,12 @@ class UIInteractionHandler:
             manage_grid(self.app.paddleocr_min_score_label, show=is_paddleocr)
         if hasattr(self.app, 'paddleocr_min_score_spinbox'):
             manage_grid(self.app.paddleocr_min_score_spinbox, show=is_paddleocr)
+        if hasattr(self.app, 'rapidocr_min_score_label'):
+            manage_grid(self.app.rapidocr_min_score_label, show=is_rapidocr)
+        if hasattr(self.app, 'rapidocr_min_score_spinbox'):
+            manage_grid(self.app.rapidocr_min_score_spinbox, show=is_rapidocr)
+        if hasattr(self.app, 'rapidocr_source_lang_note'):
+            manage_grid(self.app.rapidocr_source_lang_note, show=is_rapidocr)
         if hasattr(self.app, 'stability_label'):
             manage_grid(self.app.stability_label, show=is_local_ocr)
         if hasattr(self.app, 'stability_spinbox'):
@@ -539,6 +545,16 @@ class UIInteractionHandler:
             cfg['ai_optimization_mode'] = self.app.get_ai_optimization_mode()
             cfg['custom_ai_submit_interval_ms'] = str(
                 max(0, min(5000, int(self.app.custom_ai_submit_interval_ms_var.get())))
+            )
+            rapidocr_min_score_var = getattr(
+                self.app,
+                'rapidocr_min_score_var',
+                None,
+            )
+            cfg['rapidocr_min_score'] = (
+                rapidocr_min_score_var.get()
+                if rapidocr_min_score_var is not None
+                else cfg.get('rapidocr_min_score', '0.45')
             )
             cfg['paddleocr_source_dir'] = self.app.paddleocr_source_dir_var.get()
             cfg['paddleocr_lang'] = self.app.paddleocr_lang_var.get()

@@ -113,6 +113,7 @@ from worker_ocr import (
     _apply_inactive_translation_clear,
     _schedule_inactive_translation_clear,
     _clear_ocr_stability_gate,
+    _configured_text_stability_allows_submit,
     enqueue_ocr_frame_for_model,
     _submit_final_local_ocr_text,
     _schedule_ocr_stability_flush,
@@ -399,6 +400,16 @@ def run_ocr_thread(app):
                 continue
 
             if ocr_model in {PADDLEOCR_MODEL_CODE, RAPIDOCR_MODEL_CODE}:
+                if not _configured_text_stability_allows_submit(
+                    app,
+                    ocr_cleaned_text,
+                ):
+                    _clear_ocr_stability_gate(
+                        app,
+                        "configured text stability threshold not reached",
+                    )
+                    similar_texts_count = 0
+                    continue
                 route_result = _route_local_ocr_candidate_for_translation(
                     app,
                     ocr_cleaned_text,
@@ -406,7 +417,6 @@ def run_ocr_thread(app):
                     ocr_sequence_number=0,
                 )
                 if route_result in ("submitted", "skipped", "dropped", "pending"):
-                    app.text_stability_counter = 0
                     similar_texts_count = 0
                     continue
 

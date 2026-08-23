@@ -2,11 +2,12 @@ import configparser
 import io
 import logging
 import os
+import queue
 import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from PIL import Image
@@ -27,6 +28,7 @@ class RapidOCRBackendTests(unittest.TestCase):
 
     def test_default_configuration_selects_rapidocr(self):
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], RAPIDOCR_MODEL_CODE)
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["rapidocr_min_score"], "0.45")
 
     def test_removed_legacy_ocr_model_migrates_to_rapidocr(self):
         import config_manager
@@ -130,6 +132,180 @@ class RapidOCRBackendTests(unittest.TestCase):
 
         self.assertEqual(text, "first\nsecond")
         self.assertEqual([line.text for line in lines], ["first", "second"])
+
+    def test_worker_reads_rapidocr_minimum_score_from_settings(self):
+        app = types.SimpleNamespace(
+            rapidocr_min_score_var=types.SimpleNamespace(get=lambda: "0.82")
+        )
+
+        settings = worker_capture.get_rapidocr_settings_from_app(app)
+
+        self.assertEqual(settings.min_score, 0.82)
+
+    def test_recognition_uses_configured_minimum_score(self):
+        result = types.SimpleNamespace(
+            txts=("below", "accepted"),
+            scores=(0.79, 0.91),
+            boxes=np.asarray(
+                [
+                    [[0, 0], [10, 0], [10, 5], [0, 5]],
+                    [[0, 10], [20, 10], [20, 15], [0, 15]],
+                ]
+            ),
+        )
+        engine = Mock(return_value=result)
+        image = Image.new("RGB", (32, 16), color="black")
+
+        with patch("rapid_ocr_backend.get_rapidocr_engine", return_value=engine):
+            text, lines = rapid_ocr_backend.recognize_with_rapidocr(
+                image,
+                RapidOCRSettings(min_score=0.80),
+            )
+
+        self.assertEqual(text, "accepted")
+        self.assertEqual([line.text for line in lines], ["accepted"])
+        self.assertEqual(engine.call_args.kwargs["text_score"], 0.80)
+
+    def test_capture_keeps_enough_duplicate_frames_for_stability_setting(self):
+        signature = ("frame", 1)
+        last_signature, repeat_count, should_enqueue = (
+            worker_capture._advance_local_capture_signature(
+                None,
+                0,
+                signature,
+                required_repeats=5,
+            )
+        )
+        self.assertTrue(should_enqueue)
+
+        decisions = []
+        for _ in range(6):
+            last_signature, repeat_count, should_enqueue = (
+                worker_capture._advance_local_capture_signature(
+                    last_signature,
+                    repeat_count,
+                    signature,
+                    required_repeats=5,
+                )
+            )
+            decisions.append(should_enqueue)
+
+        self.assertEqual(decisions, [True, True, True, True, True, False])
+
+    def test_queue_retains_matching_frames_needed_by_stability_setting(self):
+        import worker_threads
+
+        snapshot = worker_capture.CaptureUISnapshot(
+            generation=7,
+            source_geometry=None,
+            ocr_model=RAPIDOCR_MODEL_CODE,
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=False,
+            rapidocr_settings=RapidOCRSettings(),
+            stability_threshold=2,
+        )
+        app = types.SimpleNamespace(ocr_queue=queue.Queue(maxsize=8))
+
+        for _ in range(3):
+            frame = Image.new("RGB", (8, 4), "white")
+            frame._gct_capture_snapshot = snapshot
+            frame._gct_capture_signature = ("same", 1)
+            self.assertTrue(
+                worker_threads.enqueue_ocr_frame_for_model(
+                    app,
+                    frame,
+                    RAPIDOCR_MODEL_CODE,
+                )
+            )
+
+        self.assertEqual(app.ocr_queue.qsize(), 3)
+
+        newer_frame = Image.new("RGB", (8, 4), "black")
+        newer_frame._gct_capture_snapshot = snapshot
+        newer_frame._gct_capture_signature = ("new", 2)
+        self.assertTrue(
+            worker_threads.enqueue_ocr_frame_for_model(
+                app,
+                newer_frame,
+                RAPIDOCR_MODEL_CODE,
+            )
+        )
+        self.assertEqual(app.ocr_queue.qsize(), 1)
+        self.assertIs(app.ocr_queue.get_nowait(), newer_frame)
+
+    def test_rapidocr_stability_threshold_requires_matching_readings(self):
+        import worker_threads
+
+        submitted = []
+        scheduled = []
+        snapshot = worker_capture.CaptureUISnapshot(
+            generation=1,
+            source_geometry=None,
+            ocr_model=RAPIDOCR_MODEL_CODE,
+            scan_interval_ms=100,
+            base_scan_interval_ms=100,
+            keep_linebreaks=False,
+            is_api_based=False,
+            rapidocr_settings=RapidOCRSettings(),
+            stability_threshold=2,
+        )
+        app = types.SimpleNamespace(
+            is_running=True,
+            ocr_queue=queue.Queue(),
+            capture_ui_snapshot=snapshot,
+            previous_text="",
+            text_stability_counter=0,
+            stable_threshold=2,
+            is_placeholder_text=lambda _text: False,
+            calculate_text_similarity=lambda _current, _previous: 0.0,
+            reset_clear_timeout=Mock(),
+            root=types.SimpleNamespace(
+                after=lambda delay, callback, *args: scheduled.append(
+                    (delay, callback, args)
+                ),
+                winfo_exists=lambda: True,
+            ),
+            _app_is_closing=False,
+        )
+        for _ in range(3):
+            image = Image.new("RGB", (16, 10), "white")
+            image._gct_capture_snapshot = snapshot
+            app.ocr_queue.put_nowait(image)
+
+        def fake_start_async_translation(
+            _app,
+            text,
+            _ocr_sequence_number,
+            requested_at_monotonic=None,
+        ):
+            submitted.append(text)
+            app.is_running = False
+
+        def stop_when_queue_is_drained(_seconds):
+            if app.ocr_queue.empty():
+                app.is_running = False
+
+        with patch.object(
+            worker_threads,
+            "process_local_ocr_frame",
+            return_value=("Stable RapidOCR subtitle.", None, "RapidOCR"),
+        ), patch.object(
+            worker_threads,
+            "start_async_translation",
+            side_effect=fake_start_async_translation,
+        ), patch.object(
+            worker_threads.time,
+            "sleep",
+            side_effect=stop_when_queue_is_drained,
+        ):
+            worker_threads.run_ocr_thread(app)
+            for _delay, callback, args in list(scheduled):
+                callback(*args)
+
+        self.assertEqual(submitted, ["Stable RapidOCR subtitle."])
+        self.assertEqual(app.text_stability_counter, 2)
 
     def test_worker_routes_rapidocr_and_keeps_paddle_fallback(self):
         app = types.SimpleNamespace(

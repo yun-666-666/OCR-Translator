@@ -177,6 +177,12 @@ def flatten_rapidocr_result(result, keep_linebreaks=False, min_score=RAPIDOCR_MI
 
 
 def recognize_with_rapidocr(pil_image, settings=None, keep_linebreaks=False):
+    settings = settings or RapidOCRSettings()
+    try:
+        min_score = float(settings.min_score)
+    except (TypeError, ValueError):
+        min_score = RAPIDOCR_MIN_SCORE
+    min_score = max(0.0, min(1.0, min_score))
     prepared = prepare_rapidocr_image(pil_image, settings)
     engine = get_rapidocr_engine()
     with _INFERENCE_LOCK:
@@ -185,12 +191,12 @@ def recognize_with_rapidocr(pil_image, settings=None, keep_linebreaks=False):
             use_det=True,
             use_cls=False,
             use_rec=True,
-            text_score=RAPIDOCR_MIN_SCORE,
+            text_score=min_score,
         )
     return flatten_rapidocr_result(
         result,
         keep_linebreaks=keep_linebreaks,
-        min_score=RAPIDOCR_MIN_SCORE,
+        min_score=min_score,
     )
 
 

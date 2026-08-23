@@ -906,10 +906,13 @@ class AppCaptureOcrMixin:
 
             current_ocr_model = self.get_ocr_model_setting()
             if current_ocr_model in {RAPIDOCR_MODEL_CODE, PADDLEOCR_MODEL_CODE}:
-                from worker_threads import get_paddleocr_settings_from_app
+                from worker_threads import (
+                    get_paddleocr_settings_from_app,
+                    get_rapidocr_settings_from_app,
+                )
 
                 paddleocr_settings = (
-                    RapidOCRSettings()
+                    get_rapidocr_settings_from_app(self)
                     if current_ocr_model == RAPIDOCR_MODEL_CODE
                     else get_paddleocr_settings_from_app(self)
                 )

@@ -32,6 +32,7 @@ ocr_model_label,Model OCR:
 ocr_model_paddleocr,PaddleOCR (lokalny)
 ocr_model_rapidocr,RapidOCR PP-OCRv6 tiny (ONNX)
 source_lang_label,Język źródłowy:
+rapidocr_source_lang_note,Tylko do tłumaczenia; nierozpoznawane przez RapidOCR
 target_lang_label,Język docelowy:
 custom_context_window_label,Napisy kontekstu Custom AI:
 custom_ai_log_content_label,Treść short log Custom AI:
@@ -54,6 +55,7 @@ scan_interval_label,Interwał skanowania (ms):
 clear_timeout_label,Czas wyświetlania tłumaczenia (s):
 stability_threshold_label,Próg stabilności tekstu:
 paddleocr_min_score_label,Minimalny wynik PaddleOCR:
+rapidocr_min_score_label,Minimalny wynik RapidOCR:
 ocr_debugging_label,Debugowanie OCR:
 show_debug_checkbox,Pokaż wyniki OCR
 preview_btn,Podgląd
