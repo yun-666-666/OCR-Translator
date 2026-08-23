@@ -174,15 +174,6 @@ def create_settings_tab(app):
     app.source_lang_label.grid(row=2, column=0, padx=5, pady=5, sticky="w")
     app.source_lang_combobox = ttk.Combobox(frame, textvariable=app.source_display_var, width=25, state='readonly')
     app.source_lang_combobox.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-    app.rapidocr_source_lang_note = ttk.Label(
-        frame,
-        text=app.ui_lang.get_label(
-            "rapidocr_source_lang_note",
-            "Translation only; not used by RapidOCR recognition",
-        ),
-        wraplength=260,
-    )
-    app.rapidocr_source_lang_note.grid(row=2, column=2, padx=5, pady=5, sticky="w")
 
     def on_source_lang_gui_changed(event):
         selected_display_name = app.source_display_var.get()

@@ -344,7 +344,7 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertIn("custom_ai_submit_interval_label", labels, msg=path)
             self.assertTrue(labels["custom_ai_submit_interval_label"].strip(), msg=path)
 
-    def test_local_ocr_score_controls_and_rapidocr_support_note_are_present(self):
+    def test_local_ocr_score_controls_are_present(self):
         gui_builder_source = Path("gui_settings_builder.py").read_text(encoding="utf-8-sig")
         ui_handler_source = Path("handlers/ui_interaction_handler.py").read_text(encoding="utf-8-sig")
         legacy_confidence_key = "confidence" + "_threshold_label"
@@ -359,7 +359,8 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertIn("rapidocr_min_score_var", gui_builder_source)
         self.assertIn("rapidocr_min_score_label, show=is_rapidocr", ui_handler_source)
         self.assertIn("rapidocr_min_score_spinbox, show=is_rapidocr", ui_handler_source)
-        self.assertIn("rapidocr_source_lang_note, show=is_rapidocr", ui_handler_source)
+        self.assertNotIn("rapidocr_source_lang_note", gui_builder_source)
+        self.assertNotIn("rapidocr_source_lang_note", ui_handler_source)
         self.assertNotIn("confidence_label", ui_handler_source)
         self.assertNotIn(legacy_confidence_key, gui_builder_source)
 
@@ -374,8 +375,7 @@ class StartupOptimizationTests(unittest.TestCase):
             self.assertTrue(labels["paddleocr_min_score_label"].strip(), msg=path)
             self.assertIn("rapidocr_min_score_label", labels, msg=path)
             self.assertTrue(labels["rapidocr_min_score_label"].strip(), msg=path)
-            self.assertIn("rapidocr_source_lang_note", labels, msg=path)
-            self.assertTrue(labels["rapidocr_source_lang_note"].strip(), msg=path)
+            self.assertNotIn("rapidocr_source_lang_note", labels, msg=path)
             self.assertNotIn(legacy_confidence_key, labels, msg=path)
 
     def test_new_custom_ai_controls_have_all_language_labels(self):

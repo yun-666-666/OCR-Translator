@@ -188,8 +188,6 @@ class UIInteractionHandler:
             manage_grid(self.app.rapidocr_min_score_label, show=is_rapidocr)
         if hasattr(self.app, 'rapidocr_min_score_spinbox'):
             manage_grid(self.app.rapidocr_min_score_spinbox, show=is_rapidocr)
-        if hasattr(self.app, 'rapidocr_source_lang_note'):
-            manage_grid(self.app.rapidocr_source_lang_note, show=is_rapidocr)
         if hasattr(self.app, 'stability_label'):
             manage_grid(self.app.stability_label, show=is_local_ocr)
         if hasattr(self.app, 'stability_spinbox'):

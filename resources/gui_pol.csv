@@ -32,7 +32,6 @@ ocr_model_label,Model OCR:
 ocr_model_paddleocr,PaddleOCR (lokalny)
 ocr_model_rapidocr,RapidOCR PP-OCRv6 tiny (ONNX)
 source_lang_label,Język źródłowy:
-rapidocr_source_lang_note,Tylko do tłumaczenia; nierozpoznawane przez RapidOCR
 target_lang_label,Język docelowy:
 custom_context_window_label,Napisy kontekstu Custom AI:
 custom_ai_log_content_label,Treść short log Custom AI:

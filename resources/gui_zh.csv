@@ -32,7 +32,6 @@ ocr_model_label,OCR 模型：
 ocr_model_paddleocr,PaddleOCR（离线）
 ocr_model_rapidocr,RapidOCR PP-OCRv6 tiny（ONNX）
 source_lang_label,源语言：
-rapidocr_source_lang_note,仅用于翻译；RapidOCR 识别不支持
 target_lang_label,目标语言：
 custom_context_window_label,联系上下文句数：
 custom_ai_log_content_label,Custom AI 短日志正文：
