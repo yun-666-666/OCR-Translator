@@ -1,157 +1,79 @@
 # Troubleshooting Guide
 
-> **Live path note:** Supported OCR is PaddleOCR or Custom AI OCR; supported translation is Custom AI profiles (OpenAI-compatible endpoints). Sections that mention MarianMT, DeepL, Google Translate, Gemini, or OpenAI standalone providers are **archived legacy reference** only and are not active product paths.
+The supported runtime is RapidOCR or PaddleOCR for local OCR, optional Custom AI OCR, and Custom AI translation through an OpenAI-compatible endpoint.
 
-This guide addresses common issues you might encounter when using Game-Changing Translator.
+## Application does not start
 
-## Application Startup Issues
+- Use Python 3.9 through 3.12.
+- From the repository root, run `python -m pip install -r requirements.txt`.
+- Start with `python main.py` so import errors are visible.
+- Install the Microsoft Visual C++ Redistributable if Windows reports a missing native DLL.
 
-### Application fails to start
+`pytest` is not required to run the application. It is only the development test runner.
 
-**Symptoms:** Error message or application immediately closes after startup.
+## RapidOCR problems
 
-**Possible solutions:**
-- Verify you have Python 3.9 through 3.12 installed
-- Make sure all dependencies are installed: `pip install -r requirements.txt`
-- Check your Python environment if using a virtual environment
-- Try running the application from command line to see error messages: `python main.py`
+RapidOCR is the default local OCR engine.
 
-### Missing DLL error
+- Keep the capture region tight around the text.
+- Adjust the RapidOCR minimum score if faint text is being rejected or noise is being accepted.
+- Verify the application can read its bundled model resources.
+- RapidOCR's source-language selection is translation context; it does not dynamically switch the bundled OCR model.
 
-**Symptoms:** Error about missing DLL files.
+## PaddleOCR unavailable
 
-**Solution:** Install the Microsoft Visual C++ Redistributable package from the [Microsoft website](https://support.microsoft.com/en-us/help/2977003/the-latest-supported-visual-c-downloads).
+The supported CPU source installation is defined in `requirements.txt` and includes PaddlePaddle, PaddleOCR, and PaddleX.
 
-## OCR Issues
+- Re-run `python -m pip install -r requirements.txt` in the same Python environment used to start the app.
+- If you intentionally use CUDA, replace the CPU `paddlepaddle` package with the matching `paddlepaddle-gpu` build from PaddlePaddle's official installation matrix.
+- If a custom PaddleOCR source directory is configured, treat it as trusted executable Python code and verify that the directory exists.
+- Select PaddleOCR and use OCR Preview to trigger its first lazy initialization. The application no longer preloads PaddleOCR at startup.
 
-### PaddleOCR unavailable
+## PaddleOCR accuracy or speed
 
-**Symptoms:** Local OCR returns an error or the preview cannot run PaddleOCR.
+The Settings tab exposes the effective PaddleOCR language/model selection, OCR version, model size, device, minimum score, upscale, detection limit and type, text-line orientation, and optional source directory.
 
-**Solutions:**
-- Verify the Python dependencies are installed with `pip install -r requirements.txt`
-- In the Settings tab, check the PaddleOCR source directory, language, model size, and device settings
-- If you use a local PaddleOCR source checkout, make sure the configured folder exists
-- Switch the OCR model to a Custom AI OCR profile if local PaddleOCR is unavailable on the machine
+- Select a language supported by the chosen PaddleOCR model family.
+- Prefer smaller models and CPU for lower memory use; larger or GPU models can improve throughput but consume more memory.
+- Avoid large capture regions combined with high upscale values because image memory grows with pixel area.
+- Increase the minimum score to reject noise; decrease it if valid faint text is missing.
 
-### Poor OCR accuracy
+## Local OpenAI-compatible endpoint
 
-**Symptoms:** Text is not recognized correctly or contains many errors.
+- Set the base URL and model name in a Custom AI profile.
+- Leave API Key blank when the local server does not require authentication. The app then omits the `Authorization` header.
+- Choose the protocol expected by the server: Chat Completions or Responses API.
+- If model discovery is unsupported, enter the model name manually.
+- Confirm the local server is already listening; the application does not start or manage external model servers.
 
-**Solutions:**
-- Adjust the PaddleOCR minimum score, model size, upscale, and detection settings in the Settings tab
-- Increase the size of the captured area to include more context
-- Set the correct source language in the Settings tab
-- For non-Latin languages, set the correct PaddleOCR language in Settings
-- Use a clearer font or increase text size in the source application if possible
-- Adjust the stability threshold if text is flickering
+## Remote endpoint authentication errors
 
-## Translation Issues
+- Confirm the base URL, model, protocol, and API Key all belong to the same provider.
+- Check expiry, quota, and account permissions.
+- API keys are stored through the credential store and are not written in plaintext to the profile JSON during normal operation.
 
-### Language selection issues
+## Slow translation or high resource use
 
-**Symptoms:** Translation fails, wrong language detected, or OCR performs poorly.
+- Reduce the capture area and avoid unnecessary PaddleOCR upscale.
+- Use RapidOCR when its recognition quality is sufficient.
+- Increase scan interval if OCR is consuming too much CPU.
+- Use a faster endpoint/model or the speed optimization mode.
+- Race mode is globally bounded, but each winning request may still leave an already-started losing HTTP call running until its network timeout.
 
-**Solutions:**
-- Make sure you've selected the correct source language for OCR
-- Verify the language pair is supported by your selected Custom AI profile or OpenAI-compatible endpoint
-- For non-Latin languages, verify the selected PaddleOCR language or use a Custom AI OCR profile
-- Check that the CSV language files are properly installed in the application directory
+## Application exit is delayed
 
-### API key errors
+The app stops accepting new work, waits for tracked OCR/translation/Race futures for a bounded period, then continues shutdown without waiting indefinitely. A remote HTTP call that has already started cannot be forcibly cancelled by Python; check endpoint latency and request timeouts if exits repeatedly reach the bound.
 
-**Symptoms:** "API key missing" or "Authentication error" messages.
+## Settings or profiles differ between launch methods
 
-**Solutions:**
-- Verify you've entered the correct Custom AI API key and base URL in the Settings tab
-- Check if your API key has expired or reached its limit
-- Confirm the active translation profile is a Custom AI profile (legacy Google/DeepL/Gemini/OpenAI/MarianMT keys are not used on the live path)
+Relative Custom AI profile paths, `custom_prompt.txt`, and the translation cache are resolved from the application/project root, not the process working directory. Confirm you are launching the intended checkout or packaged application directory.
 
-### Legacy MarianMT translation errors *(archived)*
+## Development test failures
 
-**Status:** MarianMT is not part of the current live path. If you still see MarianMT wording, switch the translation model to a Custom AI profile.
+Run the canonical suite from the repository root:
 
-### Slow or intermittent translations
+```bash
+python -m pytest
+```
 
-**Symptoms:** Translations appear slowly or inconsistently.
-
-**Solutions:**
-- Reduce scanning interval in Settings for faster detection
-- Decrease stability threshold if text is stable
-- Increase clear translation timeout to keep translations visible longer
-- Enable file caching to improve performance for repeated text
-- If using a legacy MarianMT path, lower the beam search value for faster performance
-- If using Custom AI translation, check endpoint latency, model choice, and request timeout settings
-- For better performance, use a computer with more RAM or CPU cores
-
-## Interface Issues
-
-### Overlay windows disappear
-
-**Symptoms:** Source or target overlay windows are not visible.
-
-**Solutions:**
-- Press Alt+1 to toggle source window visibility
-- Reselect source or target areas from the main interface
-- Restart the application if overlays don't respond
-- Check if another application is running in fullscreen mode that might be hiding the overlays
-
-### Hotkeys not working
-
-**Symptoms:** Keyboard shortcuts like ~ (toggle translation) don't respond.
-
-**Solutions:**
-- Make sure the keyboard module is installed: `pip install keyboard`
-- Run the application as administrator (some systems restrict keyboard hooks)
-- Check if another application is intercepting the same hotkeys
-- Try restarting the application
-
-## Application Performance
-
-### High CPU/Memory Usage
-
-**Symptoms:** Computer becomes slow when translation is running.
-
-**Solutions:**
-- Increase scan interval in Settings to reduce CPU usage
-- Use a smaller source capture area
-- If using a legacy MarianMT path, lower the beam search value
-- Close unnecessary applications to free up system resources
-- For MarianMT, offloading to GPU can improve performance (requires compatible GPU and proper setup)
-
-### Application crashes
-
-**Symptoms:** Application unexpectedly closes during operation.
-
-**Solutions:**
-- Check translator_debug.log for error details
-- Update all dependencies to the latest versions
-- Restart your computer to free up resources
-- If using large legacy MarianMT models, ensure you have sufficient RAM
-
-## File-related Issues
-
-### Config file errors
-
-**Symptoms:** Settings are not saved between sessions or load incorrectly.
-
-**Solutions:**
-- Delete ocr_translator_config.ini and let the application create a new one
-- Check file permissions in the application directory
-- Run the application as administrator to ensure write access
-
-### Cache File Issues
-
-**Symptoms:** Warnings about cache files or repetitive API calls.
-
-**Solutions:**
-- Use the "Clear Cache" button to reset translation caches
-- Check file permissions for the cache files
-- Disable and re-enable file caching in Settings
-
-## Still Having Problems?
-
-If you're still experiencing issues:
-
-1. Check the debug log file (translator_debug.log) for specific error messages
-2. Try running the application with OCR Debugging enabled to see exactly what's being captured
+Pytest is configured to collect only `tests/`. Do not restore the removed duplicate root-level test modules.

@@ -12,7 +12,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import gui_builder
-from gui_profile_controls import persist_translation_failover_choice
+from gui_profile_controls import (
+    custom_ai_wire_api_display_value,
+    persist_translation_failover_choice,
+)
 import custom_ai as custom_ai_module
 from credential_store import CredentialStoreError
 from custom_ai import CustomAIProfileManager, CustomAIProvider
@@ -68,6 +71,16 @@ def assert_secret_not_in_text(testcase, text, label):
 
 
 class CustomAIProfileManagerTests(unittest.TestCase):
+    def test_relative_profile_path_is_anchored_to_explicit_base_dir(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            manager = CustomAIProfileManager(
+                "profiles.json",
+                credential_store=FakeCredentialStore(),
+                base_dir=base_dir,
+            )
+
+            self.assertEqual(manager.path, Path(base_dir) / "profiles.json")
+
     def test_reasoning_effort_none_is_a_public_profile_value(self):
         self.assertEqual(
             custom_ai_module.normalize_custom_ai_reasoning_effort("none"),
@@ -132,6 +145,48 @@ class CustomAIProfileManagerTests(unittest.TestCase):
             self.assertTrue(credential_ref, "profile did not persist a credential reference")
             self.assertTrue(store.matches(credential_ref, TEST_SECRET_KEY), "credential store did not receive expected key")
             self.assertTrue(profile.get("api_key") == TEST_SECRET_KEY, "runtime profile did not keep API key")
+
+    def test_local_profile_can_be_saved_without_api_key_or_credential(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                profile = manager.add_profile(
+                    name="Local llama.cpp",
+                    base_url="http://127.0.0.1:8080/v1",
+                    api_key="",
+                    model="local-model",
+                )
+
+            persisted = json.loads(path.read_text(encoding="utf-8"))["profiles"][0]
+            self.assertEqual(profile.get("api_key"), "")
+            self.assertNotIn("api_key", persisted)
+            self.assertNotIn("api_key_ref", persisted)
+            self.assertEqual(store.values, {})
+
+    def test_clearing_profile_api_key_removes_credential_after_save(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "profiles.json"
+            store = FakeCredentialStore()
+
+            with patch("custom_ai.create_default_credential_store", return_value=store, create=True):
+                manager = CustomAIProfileManager(path)
+                profile = manager.add_profile(
+                    name="Remote",
+                    base_url="https://api.example/v1",
+                    api_key=TEST_SECRET_KEY,
+                    model="remote-model",
+                )
+                credential_ref = profile["api_key_ref"]
+                updated = manager.update_profile(profile["id"], api_key="")
+
+            persisted = json.loads(path.read_text(encoding="utf-8"))["profiles"][0]
+            self.assertEqual(updated.get("api_key"), "")
+            self.assertNotIn("api_key_ref", persisted)
+            self.assertNotIn(credential_ref, store.values)
+            self.assertIn(credential_ref, store.deleted)
 
     def test_profile_key_update_changes_credential_fingerprint_without_persisting_key(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -923,6 +978,14 @@ class CustomAIProfileManagerTests(unittest.TestCase):
 
 
 class CustomAIProviderTests(unittest.TestCase):
+    def test_local_profile_requests_omit_authorization_header(self):
+        provider = CustomAIProvider()
+
+        self.assertEqual(
+            provider._request_headers({"api_key": ""}),
+            {"Content-Type": "application/json"},
+        )
+
     def test_provider_base_url_key_canonicalizes_network_equivalence(self):
         provider = CustomAIProvider()
 
@@ -11314,11 +11377,10 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
             return_value=0.0
         )
 
-        with patch.object(
-            translation_handler_module.concurrent.futures,
-            "ThreadPoolExecutor",
-            return_value=FailingExecutor(),
-        ):
+        original_executor = handler._custom_race_executor
+        handler._custom_race_executor = FailingExecutor()
+        original_executor.shutdown(wait=False, cancel_futures=True)
+        try:
             with self.assertRaises(RuntimeError):
                 handler._custom_ai_translate_race(
                     first,
@@ -11328,8 +11390,73 @@ class TranslationHandlerCustomAITests(unittest.TestCase):
                     [],
                     False,
                 )
+        finally:
+            handler._custom_race_executor = None
 
         self.assertEqual(handler._custom_race_inflight_profiles, set())
+        handler.close()
+
+    def test_custom_ai_race_candidate_budget_is_shared_and_bounded(self):
+        profiles = [
+            {
+                "id": f"profile-{index}",
+                "base_url": f"https://profile-{index}.example/v1",
+                "model": "same-model",
+                "translation_failover_enabled": index > 0,
+            }
+            for index in range(5)
+        ]
+
+        class Profiles:
+            def list_profiles(self, kind=None, enabled_only=False):
+                return profiles
+
+        handler = TranslationHandler(
+            types.SimpleNamespace(
+                custom_ai_profiles=Profiles(),
+                custom_context_window_var=DummyVar(0),
+            )
+        )
+        handler._custom_race_candidate_limit = 2
+        candidates = handler._get_custom_ai_race_profiles(
+            profiles[0],
+            include_busy=True,
+        )
+
+        first = handler._reserve_custom_ai_race_candidates(candidates)
+        second = handler._reserve_custom_ai_race_candidates(candidates)
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(second, [])
+        handler._release_custom_ai_race_profile(first[0][1])
+        third = handler._reserve_custom_ai_race_candidates(candidates)
+        self.assertEqual(len(third), 1)
+        for _profile, identity in first[1:] + third:
+            handler._release_custom_ai_race_profile(identity)
+        handler.close()
+
+    def test_custom_ai_race_freeze_rejects_new_candidate_calls(self):
+        profile = {
+            "id": "active",
+            "base_url": "https://active.example/v1",
+            "model": "same-model",
+        }
+        handler = TranslationHandler(
+            types.SimpleNamespace(custom_context_window_var=DummyVar(0))
+        )
+        handler.custom_ai_provider.translate = Mock()
+        handler.set_race_submissions_frozen(True)
+
+        with self.assertRaises(TimeoutError):
+            handler._custom_ai_translate_race(
+                profile,
+                "Hello",
+                "en",
+                "zh-CN",
+                [],
+                False,
+            )
+        handler.custom_ai_provider.translate.assert_not_called()
         handler.close()
 
     def test_custom_ai_translation_uses_persistent_cache_between_handler_instances(self):
@@ -11428,6 +11555,34 @@ class ModelFilterTests(unittest.TestCase):
 
 
 class ProfileFormValuesTests(unittest.TestCase):
+    def test_profile_form_values_read_wire_api_choice_for_new_profile(self):
+        class UILang:
+            @staticmethod
+            def get_label(_key, fallback):
+                return fallback
+
+        ui_lang = UILang()
+        app = types.SimpleNamespace(
+            ui_lang=ui_lang,
+            custom_ai_profiles=types.SimpleNamespace(list_profiles=lambda: []),
+            ai_profile_selected_id=None,
+            ai_profile_name_var=DummyVar("Local Responses"),
+            ai_profile_url_var=DummyVar("http://127.0.0.1:8080/v1"),
+            ai_profile_key_var=DummyVar(""),
+            ai_profile_model_var=DummyVar("local-model"),
+            ai_profile_wire_api_var=DummyVar(
+                custom_ai_wire_api_display_value(
+                    types.SimpleNamespace(ui_lang=ui_lang),
+                    "responses",
+                )
+            ),
+        )
+
+        values = gui_builder.build_custom_ai_profile_values_from_form(app)
+
+        self.assertEqual(values["wire_api"], "responses")
+        self.assertEqual(values["api_key"], "")
+
     def test_profile_form_values_read_reasoning_effort_form_choice(self):
         selected_profile = {
             "id": "profile-1",

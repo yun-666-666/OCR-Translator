@@ -46,6 +46,7 @@ CUSTOM_PROMPT_CACHE_WEAK_RATIO = 0.45
 CUSTOM_PROMPT_CACHE_LONG_INPUT_TOKENS = 3500
 CUSTOM_PROMPT_CACHE_VERY_LONG_INPUT_TOKENS = 6000
 CUSTOM_AI_ROUTE_STATE_MAX_ENTRIES = 32
+CUSTOM_AI_RACE_MAX_CANDIDATE_CALLS = 4
 _CUSTOM_AI_PROFILE_UNSET = object()
 
 
@@ -82,8 +83,15 @@ class TranslationHandler(TranslationContextMixin, TranslationRequestsMixin, Tran
         # Retain the legacy attribute as the sparse-profile compatibility
         # advisor. Real configured routes use their own bounded advisor.
         self._custom_latency_advisor = self._get_custom_latency_advisor()
-        self._custom_race_state_lock = threading.Lock()
+        self._custom_race_state_lock = threading.Condition(threading.Lock())
         self._custom_race_inflight_profiles = set()
+        self._custom_race_futures = set()
+        self._custom_race_submissions_frozen = False
+        self._custom_race_candidate_limit = CUSTOM_AI_RACE_MAX_CANDIDATE_CALLS
+        self._custom_race_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=CUSTOM_AI_RACE_MAX_CANDIDATE_CALLS,
+            thread_name_prefix="CustomAIRace",
+        )
         
         # Legacy DeepL-specific context storage retained only to keep old callbacks harmless.
         self.deepl_context_window = []  # List of source texts only

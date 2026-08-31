@@ -45,6 +45,9 @@ ai_optimization_mode_quality,Najwyższa jakość
 custom_ai_submit_interval_label,Minimalny interwał tłumaczenia AI (ms):
 ai_profile_structured_output_label,Wyjście strukturalne
 ai_profile_reasoning_effort_label,Intensywność rozumowania
+ai_profile_wire_api_label,Protokół API
+custom_ai_wire_api_chat_completions,Chat Completions
+custom_ai_wire_api_responses,Responses API
 custom_ai_reasoning_effort_low,Niska
 custom_ai_reasoning_effort_none,Brak
 custom_ai_reasoning_effort_medium,Średnia
@@ -54,6 +57,16 @@ scan_interval_label,Interwał skanowania (ms):
 clear_timeout_label,Czas wyświetlania tłumaczenia (s):
 stability_threshold_label,Próg stabilności tekstu:
 paddleocr_min_score_label,Minimalny wynik PaddleOCR:
+paddleocr_source_dir_label,Katalog źródłowy PaddleOCR:
+paddleocr_browse_btn,Przeglądaj
+paddleocr_lang_label,Język PaddleOCR:
+paddleocr_version_label,Wersja PaddleOCR:
+paddleocr_model_size_label,Rozmiar modelu PaddleOCR:
+paddleocr_device_label,Urządzenie PaddleOCR:
+paddleocr_upscale_label,Skalowanie obrazu PaddleOCR:
+paddleocr_det_limit_label,Limit boku detekcji PaddleOCR:
+paddleocr_det_limit_type_label,Typ limitu detekcji PaddleOCR:
+paddleocr_textline_orientation_label,Orientacja wierszy tekstu PaddleOCR:
 rapidocr_min_score_label,Minimalny wynik RapidOCR:
 ocr_debugging_label,Debugowanie OCR:
 show_debug_checkbox,Pokaż wyniki OCR

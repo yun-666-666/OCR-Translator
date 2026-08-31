@@ -20,6 +20,38 @@ def _log_debug(message):
 
 
 class TranslationContextMixin:
+    def set_race_submissions_frozen(self, frozen):
+        with self._custom_race_state_lock:
+            self._custom_race_submissions_frozen = bool(frozen)
+            self._custom_race_state_lock.notify_all()
+
+    def get_pending_race_future_count(self):
+        with self._custom_race_state_lock:
+            return sum(
+                not future.done() for future in self._custom_race_futures
+            )
+
+    def _close_custom_ai_provider_if_safe(self):
+        if not getattr(self, "_custom_ai_provider_close_requested", False):
+            return False
+        if self.get_pending_race_future_count():
+            return False
+        app_counter = getattr(self.app, "get_pending_async_future_counts", None)
+        if callable(app_counter):
+            counts = app_counter()
+            if counts.get("ocr", 0) or counts.get("translation", 0):
+                return False
+        provider = getattr(self, "custom_ai_provider", None)
+        if provider is None:
+            return True
+        self.custom_ai_provider = None
+        try:
+            if hasattr(provider, "close"):
+                provider.close()
+        except Exception as e:
+            _log_debug(f"Error closing Custom AI provider: {e}")
+        return True
+
     def start_translation_session(self):
         provider = self._get_active_llm_provider()
         if provider:
@@ -87,6 +119,14 @@ class TranslationContextMixin:
         self._clear_active_context()
 
     def close(self):
+        self.set_race_submissions_frozen(True)
+        race_executor = getattr(self, "_custom_race_executor", None)
+        self._custom_race_executor = None
+        if race_executor is not None:
+            try:
+                race_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception as e:
+                _log_debug(f"Error shutting down Custom AI race executor: {e}")
         log_executor = None
         try:
             with self._custom_log_state_lock:
@@ -101,11 +141,8 @@ class TranslationContextMixin:
                 self.unified_cache.close()
         except Exception as e:
             _log_debug(f"Error closing unified translation cache: {e}")
-        try:
-            if hasattr(self.custom_ai_provider, "close"):
-                self.custom_ai_provider.close()
-        except Exception as e:
-            _log_debug(f"Error closing Custom AI provider: {e}")
+        self._custom_ai_provider_close_requested = True
+        self._close_custom_ai_provider_if_safe()
 
     # === DEEPL CONTEXT MANAGEMENT ===
     def _clear_deepl_context(self):

@@ -5,6 +5,23 @@ All notable changes to the Game-Changing Translator project will be documented i
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Restored the full PaddleOCR advanced settings surface and made language/model selection effective.
+- Added optional unauthenticated Custom AI profiles and a visible Chat Completions / Responses API selector.
+- Added a canonical `python -m pytest` entry point and the shipped root-level translation prompt.
+
+### Changed
+- Established the RapidOCR-enabled revision as the authoritative project baseline; later machine-specific local translation experiments are excluded.
+- Made RapidOCR the default local OCR path and changed PaddleOCR to lazy initialization on first actual use.
+- Anchored relative Custom AI profile, prompt, and translation-cache files to the application/project root.
+- Bounded Custom AI Race concurrency with a shared executor and improved tracked, bounded shutdown.
+- Pinned the supported PaddleOCR CPU dependency stack for reproducible source installation.
+
+### Removed
+- Removed duplicate root-level pytest modules and the unused experimental Rust overlay bridge.
+
 ## [3.10.6] - 2026-07-23
 
 ### Added

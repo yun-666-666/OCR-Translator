@@ -6,6 +6,12 @@ requests>=2.25.0
 mss>=9.0.0
 rapidocr==3.9.2
 onnxruntime==1.28.0
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+paddlex==3.7.2
+
+# CPU Paddle is the default source-install runtime. GPU users should replace
+# paddlepaddle with the matching paddlepaddle-gpu build for their CUDA setup.
 
 # GUI framework for RTL translation overlays
 # PINNED to 6.7.3 — Qt 6.8+ introduced a regression that breaks nativeEvent/WM_NCHITTEST

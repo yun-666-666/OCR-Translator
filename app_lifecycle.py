@@ -35,6 +35,61 @@ def _log_debug_coalesced(event_key, message, interval_seconds=5.0, status=None):
 
 
 class AppLifecycleMixin:
+    def _ensure_async_future_tracking(self):
+        if not hasattr(self, "_async_future_lock"):
+            self._async_future_lock = threading.Lock()
+        if not hasattr(self, "_ocr_futures"):
+            self._ocr_futures = set()
+        if not hasattr(self, "_translation_futures"):
+            self._translation_futures = set()
+        if not hasattr(self, "_async_submissions_frozen"):
+            self._async_submissions_frozen = False
+
+    def track_async_future(self, future, kind):
+        self._ensure_async_future_tracking()
+        futures = self._ocr_futures if kind == "ocr" else self._translation_futures
+        with self._async_future_lock:
+            futures.add(future)
+
+        def settle(settled_future):
+            with self._async_future_lock:
+                futures.discard(settled_future)
+            handler = getattr(self, "translation_handler", None)
+            close_if_safe = getattr(handler, "_close_custom_ai_provider_if_safe", None)
+            if callable(close_if_safe):
+                close_if_safe()
+
+        future.add_done_callback(settle)
+        return future
+
+    def get_pending_async_future_counts(self):
+        self._ensure_async_future_tracking()
+        with self._async_future_lock:
+            return {
+                "ocr": sum(not future.done() for future in self._ocr_futures),
+                "translation": sum(
+                    not future.done() for future in self._translation_futures
+                ),
+            }
+
+    def _get_pending_race_future_count(self):
+        handler = getattr(self, "translation_handler", None)
+        counter = getattr(handler, "get_pending_race_future_count", None)
+        if not callable(counter):
+            return 0
+        try:
+            return max(0, int(counter() or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_async_submissions_frozen(self, frozen):
+        self._ensure_async_future_tracking()
+        self._async_submissions_frozen = bool(frozen)
+        handler = getattr(self, "translation_handler", None)
+        setter = getattr(handler, "set_race_submissions_frozen", None)
+        if callable(setter):
+            setter(frozen)
+
     def initialize_async_translation_infrastructure(self):
         """Initialize async translation infrastructure if not already present."""
         if not hasattr(self, 'translation_sequence_counter'):
@@ -205,6 +260,7 @@ class AppLifecycleMixin:
 
     def _stop_translation_for_app_exit(self):
         """Stop worker activity for application exit without scheduling UI callbacks."""
+        self._set_async_submissions_frozen(True)
         if not self.is_running:
             _log_debug("Process was not running at close time.")
             return
@@ -233,13 +289,6 @@ class AppLifecycleMixin:
             except Exception as join_error:
                 _log_debug(f"Error joining thread during app exit: {join_error}")
 
-        if hasattr(self, 'active_ocr_calls'):
-            self.active_ocr_calls.clear()
-        if hasattr(self, 'active_ocr_inflight_keys'):
-            self.active_ocr_inflight_keys.clear()
-        if hasattr(self, 'active_translation_calls'):
-            self.active_translation_calls.clear()
-
         handler = getattr(self, 'translation_handler', None)
         if handler is not None:
             for method_name in ('request_end_ocr_session', 'request_end_translation_session'):
@@ -249,6 +298,23 @@ class AppLifecycleMixin:
                         method()
                     except Exception as session_error:
                         _log_debug(f"Error ending session during app exit: {session_error}")
+
+    def _wait_for_app_exit_futures(self, timeout_seconds=2.0):
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        while True:
+            counts = self.get_pending_async_future_counts()
+            race_count = self._get_pending_race_future_count()
+            if not counts["ocr"] and not counts["translation"] and not race_count:
+                return True
+            if time.monotonic() >= deadline:
+                _log_debug(
+                    "Application exit continuing after bounded async wait with "
+                    f"OCR futures={counts['ocr']}, "
+                    f"translation futures={counts['translation']}, "
+                    f"race futures={race_count}."
+                )
+                return False
+            time.sleep(0.05)
 
     def _graceful_shutdown_poll(self):
         """
@@ -268,8 +334,10 @@ class AppLifecycleMixin:
         if hasattr(translation_handler, 'ocr_providers'):
             for provider in translation_handler.ocr_providers.values():
                 pending_ocr += provider._pending_ocr_calls
+        future_counts = self.get_pending_async_future_counts()
         if hasattr(self, 'active_ocr_calls'):
             pending_ocr += len(self.active_ocr_calls)
+        pending_ocr = max(pending_ocr, future_counts["ocr"])
 
         pending_translation = 0
         if hasattr(translation_handler, 'providers'):
@@ -277,13 +345,26 @@ class AppLifecycleMixin:
                 pending_translation += provider._pending_translation_calls
         if hasattr(self, 'active_translation_calls'):
             pending_translation += len(self.active_translation_calls)
+        pending_translation = max(
+            pending_translation,
+            future_counts["translation"],
+        )
+        pending_race = self._get_pending_race_future_count()
 
         # Check if timeout is reached or all calls are done
         now = time.monotonic()
         elapsed = now - self._shutdown_start_time
-        if (pending_ocr == 0 and pending_translation == 0) or elapsed > 20.0:
+        if (
+            pending_ocr == 0
+            and pending_translation == 0
+            and pending_race == 0
+        ) or elapsed > 20.0:
             if elapsed > 20.0:
-                _log_debug(f"Warning: Shutdown timeout of 20.0s reached. Some API calls may not have completed.")
+                _log_debug(
+                    "Warning: Shutdown timeout of 20.0s reached with "
+                    f"OCR futures={pending_ocr}, translation futures={pending_translation}, "
+                    f"race futures={pending_race}."
+                )
             else:
                 _log_debug("All pending API calls have completed.")
 
@@ -296,10 +377,11 @@ class AppLifecycleMixin:
             "graceful-shutdown-wait",
             (
                 "Waiting for pending API calls to complete... "
-                f"OCR: {pending_ocr}, Translation: {pending_translation}"
+                f"OCR: {pending_ocr}, Translation: {pending_translation}, "
+                f"Race: {pending_race}"
             ),
             interval_seconds=1.0,
-            status=f"{pending_ocr}:{pending_translation}",
+            status=f"{pending_ocr}:{pending_translation}:{pending_race}",
         )
         if self._root_window_alive() and not getattr(self, '_app_is_closing', False):
             self.root.after(100, self._graceful_shutdown_poll)
@@ -342,6 +424,8 @@ class AppLifecycleMixin:
         self.status_label.config(text=status_text_stopped)
         _log_debug("Translation process stopped.")
 
+        if not getattr(self, "_app_is_closing", False):
+            self._set_async_submissions_frozen(False)
         self.toggle_in_progress = False # Release the lock here
 
     def _ensure_overlays_for_start(self):
@@ -645,6 +729,7 @@ class AppLifecycleMixin:
 
         self._app_is_closing = False
         self._shutdown_finalized = False
+        self._set_async_submissions_frozen(False)
         self.is_running = True
         start_capture_refresh = getattr(
             self,
@@ -684,15 +769,11 @@ class AppLifecycleMixin:
             _log_debug("Toggle translation already in progress, ignoring call.")
             return
 
-        # Cancel an in-progress local OCR ready-wait without starting workers.
-        if self._is_waiting_for_paddleocr_start() and not self.is_running:
-            self._cancel_paddleocr_start_wait(reason="user_cancel")
-            return
-
         self.toggle_in_progress = True
 
         if self.is_running:
             _log_debug("Stopping translation process requested by user.")
+            self._set_async_submissions_frozen(True)
             self.is_running = False
             stop_capture_refresh = getattr(
                 self,
@@ -785,69 +866,10 @@ class AppLifecycleMixin:
                     _log_debug("Start aborted due to failed pre-start validation checks.")
                     return
 
-                # Local PaddleOCR must be ready before worker threads start.
-                selected_ocr = None
-                try:
-                    selected_ocr = self.get_ocr_model_setting()
-                except Exception:
-                    selected_ocr = None
-                if selected_ocr == "paddleocr":
-                    settings = None
-                    try:
-                        settings_getter = getattr(self, "get_current_paddleocr_settings", None)
-                        if callable(settings_getter):
-                            settings = settings_getter()
-                    except Exception as settings_error:
-                        _log_debug(
-                            "PaddleOCR start wait settings unavailable: "
-                            f"{type(settings_error).__name__}"
-                        )
-                        settings = None
-
-                    if settings is None:
-                        _log_debug(
-                            "PaddleOCR start aborted because matching settings "
-                            "could not be captured"
-                        )
-                        self.start_stop_btn.config(
-                            text=self.ui_lang.get_label("start_btn", "Start"),
-                            state=tk.NORMAL,
-                        )
-                        self.status_label.config(
-                            text=self.ui_lang.get_label(
-                                "status_paddleocr_loading_failed",
-                                "Status: Local OCR loading failed",
-                            )
-                        )
-                        return
-
-                    ready = False
-                    ready_checker = getattr(self, "is_paddleocr_ready_for_settings", None)
-                    if callable(ready_checker) and settings is not None:
-                        try:
-                            ready = bool(ready_checker(settings))
-                        except Exception:
-                            ready = False
-
-                    if not ready:
-                        ensure = getattr(self, "ensure_paddleocr_ready_if_selected", None)
-                        if callable(ensure):
-                            try:
-                                ensure("start requested")
-                            except Exception as ensure_error:
-                                _log_debug(
-                                    "PaddleOCR ensure on start failed: "
-                                    f"{type(ensure_error).__name__}"
-                                )
-                        generation = int(getattr(self, "_paddleocr_prewarm_generation", 0) or 0)
-                        self._begin_paddleocr_start_wait(settings, generation)
-                        return
-
                 self._start_translation_workers()
 
             finally:
-                # Release lock if start failed/deferred before threads were launched.
-                if not self.is_running and not self._is_waiting_for_paddleocr_start():
+                if not self.is_running:
                     self.toggle_in_progress = False
 
     def _validate_area_coords(self, area_coordinates, area_type_str):
@@ -878,8 +900,6 @@ class AppLifecycleMixin:
     def on_closing(self):
         _log_debug("Main window close requested. Initiating shutdown...")
         self._app_is_closing = True
-        if self._is_waiting_for_paddleocr_start():
-            self._clear_paddleocr_start_wait(reason="app closing")
         if getattr(self, "runtime_metrics_refresh_after_id", None):
             try:
                 self.root.after_cancel(self.runtime_metrics_refresh_after_id)
@@ -910,6 +930,7 @@ class AppLifecycleMixin:
                 )
 
         self._stop_translation_for_app_exit()
+        self._wait_for_app_exit_futures()
 
         # # Force end any remaining sessions when application closes
         # if hasattr(self, 'translation_handler'):

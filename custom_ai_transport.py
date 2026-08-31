@@ -42,6 +42,14 @@ def _log_debug(message):
 
 
 class CustomAITransportMixin:
+    @staticmethod
+    def _request_headers(profile):
+        headers = {"Content-Type": "application/json"}
+        api_key = str(profile.get("api_key") or "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
     def _get_http_client(self, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         if latency_mode == CUSTOM_AI_LATENCY_MODE_NONE and self._owns_http_client:
@@ -925,10 +933,7 @@ class CustomAITransportMixin:
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile, request_kind=request_kind)
-        headers = {
-            "Authorization": f"Bearer {profile.get('api_key', '')}",
-            "Content-Type": "application/json",
-        }
+        headers = self._request_headers(profile)
         headers = self._xai_chat_prompt_cache_headers(
             profile,
             headers,
@@ -1118,10 +1123,7 @@ class CustomAITransportMixin:
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile, request_kind=request_kind)
-        headers = {
-            "Authorization": f"Bearer {profile.get('api_key', '')}",
-            "Content-Type": "application/json",
-        }
+        headers = self._request_headers(profile)
         headers = self._xai_chat_prompt_cache_headers(
             profile,
             headers,
@@ -1231,10 +1233,7 @@ class CustomAITransportMixin:
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = http_client or self._get_http_client(latency_mode)
         self._raise_if_rate_limited(profile, request_kind=request_kind)
-        headers = headers or {
-            "Authorization": f"Bearer {profile.get('api_key', '')}",
-            "Content-Type": "application/json",
-        }
+        headers = headers or self._request_headers(profile)
         api_key = profile.get("api_key", "")
         request_payload = self.build_responses_payload_from_chat_payload(profile, payload, stream=True)
         request_payload = self._with_responses_prompt_cache_key(

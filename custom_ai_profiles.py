@@ -46,8 +46,17 @@ def _create_default_credential_store(*args, **kwargs):
 class CustomAIProfileManager:
     """Persist and manage user-defined OpenAI-compatible AI endpoint profiles."""
 
-    def __init__(self, path="custom_ai_profiles.json", credential_store=None):
-        self.path = Path(path)
+    def __init__(
+        self,
+        path="custom_ai_profiles.json",
+        credential_store=None,
+        *,
+        base_dir=None,
+    ):
+        profile_path = Path(path)
+        if base_dir is not None and not profile_path.is_absolute():
+            profile_path = Path(base_dir) / profile_path
+        self.path = profile_path
         self.credential_store = credential_store or _create_default_credential_store(CUSTOM_AI_CREDENTIAL_SERVICE)
         self._data_lock = threading.RLock()
         self._transaction_lock = threading.RLock()
@@ -446,13 +455,12 @@ class CustomAIProfileManager:
     ):
         if kind is not None:
             self._validate_kind(kind)
-        if not str(api_key or ""):
-            raise ValueError("API key is required")
+        api_key = str(api_key or "")
         profile = {
             "id": str(uuid.uuid4()),
             "name": str(name).strip(),
             "base_url": str(base_url).strip(),
-            "api_key": str(api_key),
+            "api_key": api_key,
             "model": str(model).strip(),
             "enabled": bool(enabled),
             "translation_failover_enabled": bool(translation_failover_enabled),
@@ -467,12 +475,13 @@ class CustomAIProfileManager:
         self._validate_profile(profile)
         with self._transaction_lock:
             staged_data = self._snapshot_data()
-            try:
-                self._store_profile_api_key(profile, str(api_key), "write")
-            except CredentialStoreError as error:
-                raise CredentialStoreError(
-                    self._credential_failure_message("write", profile.get("id"))
-                ) from error
+            if api_key:
+                try:
+                    self._store_profile_api_key(profile, api_key, "write")
+                except CredentialStoreError as error:
+                    raise CredentialStoreError(
+                        self._credential_failure_message("write", profile.get("id"))
+                    ) from error
             staged_data["profiles"].append(profile)
             for active_kind in ACTIVE_PROFILE_KINDS:
                 active_key = self._active_key(active_kind)
@@ -485,8 +494,6 @@ class CustomAIProfileManager:
             return self.get_profile(profile["id"])
 
     def update_profile(self, profile_id, **updates):
-        if "api_key" in updates and not str(updates.get("api_key") or ""):
-            raise ValueError("API key is required")
         with self._transaction_lock:
             staged_data = self._snapshot_data()
             staged_profile = next(
@@ -550,23 +557,30 @@ class CustomAIProfileManager:
             )
             self._validate_profile(staged_profile)
 
-            staged_new_credential = "api_key" in updates
-            if staged_new_credential:
-                staged_profile["api_key_ref"] = self._versioned_credential_ref(
-                    profile_id
-                )
+            api_key_updated = "api_key" in updates
+            staged_new_credential = False
+            if api_key_updated:
+                new_api_key = str(updates.get("api_key") or "")
                 staged_profile.pop("credential_ref", None)
-                try:
-                    self._store_profile_api_key(
-                        staged_profile,
-                        str(updates.get("api_key") or ""),
-                        "write",
+                if new_api_key:
+                    staged_profile["api_key_ref"] = self._versioned_credential_ref(
+                        profile_id
                     )
-                except CredentialStoreError as error:
-                    # Staged snapshot is discarded; published memory/disk stay intact.
-                    raise CredentialStoreError(
-                        self._credential_failure_message("write", profile_id)
-                    ) from error
+                    try:
+                        self._store_profile_api_key(
+                            staged_profile,
+                            new_api_key,
+                            "write",
+                        )
+                    except CredentialStoreError as error:
+                        # Staged snapshot is discarded; published memory/disk stay intact.
+                        raise CredentialStoreError(
+                            self._credential_failure_message("write", profile_id)
+                        ) from error
+                    staged_new_credential = True
+                else:
+                    staged_profile.pop("api_key_ref", None)
+                    staged_profile["api_key"] = ""
 
             if not self._save_staged_data(staged_data):
                 if staged_new_credential:
@@ -574,7 +588,7 @@ class CustomAIProfileManager:
                 raise RuntimeError("Failed to persist Custom AI profile update")
 
             self._publish_data(staged_data)
-            if staged_new_credential and previous_ref:
+            if api_key_updated and previous_ref:
                 self._delete_profile_api_key({"api_key_ref": previous_ref})
             return self.get_profile(profile_id)
 
@@ -607,7 +621,5 @@ class CustomAIProfileManager:
             raise ValueError("Profile name is required")
         if not profile.get("base_url"):
             raise ValueError("API URL is required")
-        if not profile.get("api_key") and not profile.get("api_key_ref"):
-            raise ValueError("API key is required")
         if not profile.get("model"):
             raise ValueError("Model name is required")

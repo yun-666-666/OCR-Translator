@@ -730,6 +730,8 @@ def _api_ocr_text_is_stable_repeat(ocr_result, last_processed_subtitle):
 def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
     """Start API-based OCR processing for a screenshot using the currently selected provider."""
     try:
+        if getattr(app, "_async_submissions_frozen", False):
+            return
         ocr_start_time = time.monotonic()
         keep_linebreaks = None
         if isinstance(capture_snapshot, CaptureUISnapshot):
@@ -887,7 +889,7 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
             app.active_ocr_inflight_keys.add(ocr_cache_key)
         _set_metric_gauge(app, "active_ocr_calls", len(app.active_ocr_calls))
         try:
-            app.ocr_thread_pool.submit(
+            future = app.ocr_thread_pool.submit(
                 process_api_ocr_async,
                 app,
                 None,
@@ -903,6 +905,9 @@ def run_api_ocr(app, screenshot_pil, capture_snapshot=None):
                 screenshot_pil,
                 image_decision,
             )
+            tracker = getattr(app, "track_async_future", None)
+            if callable(tracker):
+                tracker(future, "ocr")
         except Exception:
             app.active_ocr_calls.discard(sequence_number)
             if ocr_cache_key is not None and hasattr(app, 'active_ocr_inflight_keys'):
@@ -1152,6 +1157,8 @@ def start_async_translation(
 ):
     """Start async translation processing to eliminate queue bottlenecks."""
     try:
+        if getattr(app, "_async_submissions_frozen", False):
+            return
         app.initialize_async_translation_infrastructure()
 
         if requested_at_monotonic is None:

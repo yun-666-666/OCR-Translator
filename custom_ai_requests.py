@@ -538,10 +538,7 @@ class CustomAIRequestsMixin:
     def fetch_models(self, profile, latency_mode=CUSTOM_AI_LATENCY_MODE_SAFE):
         latency_mode = normalize_custom_ai_latency_mode(latency_mode)
         http_client = self._get_http_client(latency_mode)
-        headers = {
-            "Authorization": f"Bearer {profile.get('api_key', '')}",
-            "Content-Type": "application/json",
-        }
+        headers = self._request_headers(profile)
         errors = []
         cache_store = self._successful_responses_urls if self._uses_responses_api(profile) else self._successful_models_urls
         cache_key, urls, cached_url = self._ordered_candidates(

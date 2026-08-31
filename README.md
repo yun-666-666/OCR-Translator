@@ -10,18 +10,20 @@ Game-Changing Translator is a Windows desktop OCR translation tool for text that
 
 ## Overview
 
-The current project is centered on two active paths:
+The authoritative project baseline is the RapidOCR branch. Its active paths are:
 
-- **PaddleOCR local OCR** for fast on-device text recognition.
+- **RapidOCR local OCR** as the default, fast on-device recognition engine.
+- **PaddleOCR local OCR** as an optional advanced engine with configurable models.
 - **Custom AI profiles** for OpenAI-compatible translation endpoints, with optional Custom AI OCR for image-based providers.
 
-Older built-in provider modules and historical resources may still exist in the repository for compatibility and migration context, but new runtime work should treat PaddleOCR plus Custom AI profiles as the supported path. Legacy local OCR support has been removed from the active UI, configuration, dependencies, and runtime routing.
+Later machine-specific local translation experiments are not part of this baseline. Custom AI remains the supported integration point for local or remote OpenAI-compatible translation services.
 
 ## Core Features
 
 - Region-based screen capture for OCR input and translated overlay output
 - Real-time OCR and translation loop with stale-result protection
-- Local PaddleOCR backend with configurable language, model size, device, score threshold, and detection limits
+- RapidOCR default backend with a configurable minimum confidence score
+- Optional PaddleOCR backend with configurable language, OCR version, model size, device, score threshold, upscale, detection limits, and text-line orientation
 - Custom AI OCR image payloads using WebP, PNG, or JPEG
 - Custom AI translation through OpenAI-compatible provider profiles
 - Unified translation cache to reduce repeated API calls
@@ -37,7 +39,7 @@ Older built-in provider modules and historical resources may still exist in the 
 - Windows 10 or Windows 11
 - Python 3.9-3.12 when running from source
 
-The bundled application does not require a separate OCR engine installation. Source users should install the Python dependencies and configure PaddleOCR or Custom AI from the app settings.
+The bundled application does not require a separate OCR engine installation. Source installations use RapidOCR by default; `requirements.txt` also installs the supported PaddleOCR CPU stack.
 
 ### Setup From Source
 
@@ -51,7 +53,7 @@ The bundled application does not require a separate OCR engine installation. Sou
 2. Install required Python packages:
 
    ```bash
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
 
 3. Run the application:
@@ -65,16 +67,29 @@ The bundled application does not require a separate OCR engine installation. Sou
 1. Launch the application.
 2. Select the OCR source area.
 3. Select the translation output area.
-4. In Settings, choose PaddleOCR for local OCR or configure a Custom AI OCR profile.
-5. Configure a Custom AI translation profile for your OpenAI-compatible endpoint.
-6. Click **Start** to begin translating.
-7. Use the configured hotkey to pause or resume translation while another app is focused.
+4. Keep RapidOCR selected for the fastest default local OCR path, or select PaddleOCR for its advanced controls.
+5. Configure a Custom AI translation profile. Local endpoints may leave API Key blank; remote services normally require one.
+6. Choose the endpoint protocol: **Chat Completions** or **Responses API**.
+7. Click **Start** to begin translating.
+8. Use the configured hotkey to pause or resume translation while another app is focused.
+
+PaddleOCR is initialized only when it is actually selected and used; it is not automatically preloaded at application startup. For CUDA acceleration, replace the CPU `paddlepaddle` package with the `paddlepaddle-gpu` build that matches your CUDA environment, following PaddlePaddle's official installation matrix.
 
 ## Configuration and Privacy
 
 Do not commit real API keys, personal provider profiles, debug logs, runtime caches, or generated local configuration. The runtime config file `ocr_translator_config.ini`, API logs, debug logs, cache files, and local backup folders are intentionally ignored by Git.
 
-Use `ocr_translator_config.example.ini` as a clean publishable template. Custom provider settings belong in Custom AI profiles, and the active translation cache implementation lives in `unified_translation_cache.py`.
+Use `ocr_translator_config.example.ini` as a clean publishable template. Relative Custom AI profile paths, `custom_prompt.txt`, and the translation cache resolve from the application/project root, so shortcut and console launches use the same files.
+
+## Development and Tests
+
+Install the runtime dependencies, add `pytest` to the development environment, and run the canonical suite from the repository root:
+
+```bash
+python -m pytest
+```
+
+`pytest` is a development-only test runner; the application does not need it to start or translate.
 
 ## Documentation
 

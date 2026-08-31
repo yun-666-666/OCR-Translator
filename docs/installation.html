@@ -1,561 +1,70 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="author" content="Tomasz Kamiński" />
-    <title>Game-Changing Translator Installation Guide</title>
-    <style type="text/css">
-        /* Base styling */
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Game-Changing Translator Installation</title>
+  <style>
+    body { max-width: 920px; margin: 2rem auto; padding: 0 1rem; font: 16px/1.55 system-ui, sans-serif; color: #1f2937; }
+    h1, h2, h3 { color: #0f3d5e; }
+    code, pre { background: #f3f4f6; border-radius: 6px; }
+    code { padding: .12rem .3rem; }
+    pre { padding: 1rem; overflow-x: auto; }
+    .note { border-left: 4px solid #2563eb; padding: .7rem 1rem; background: #eff6ff; }
+    .warning { border-left: 4px solid #d97706; padding: .7rem 1rem; background: #fffbeb; }
+  </style>
+</head>
+<body>
+  <h1>Installation Guide</h1>
 
-        /* Avoid page breaks inside the most common attributes, especially for exports (i.e. PDF) */
-        td, h1, h2, h3, h4, h5, p, ul, ol, li {
-            page-break-inside: avoid;
-        }
+  <p>This guide describes the current authoritative RapidOCR-enabled baseline. Later machine-specific local translation-model experiments are not part of the main project.</p>
 
-        /* Make all images responsive - fit within browser window width */
-        img {
-            max-width: 100%;
-            height: auto;
-            display: block;
-            margin: 0 0 20px 0; /* Left-aligned with bottom margin */
-        }
+  <h2>Supported runtime</h2>
+  <ul>
+    <li><strong>RapidOCR</strong> is the default and recommended local OCR engine.</li>
+    <li><strong>PaddleOCR</strong> is an optional advanced local engine with language/model, OCR version, size, device, score, upscale, detection and orientation controls.</li>
+    <li><strong>Custom AI</strong> supports local or remote OpenAI-compatible OCR/translation endpoints through Chat Completions or Responses API.</li>
+  </ul>
 
-        /* Heading styles */
-        h1, h2, h3, h4, h5 {
-            margin-top: 1.5em;
-            margin-bottom: 0.5em;
-            color: #111;
-        }
+  <h2>Requirements</h2>
+  <ul>
+    <li>Windows 10 or Windows 11</li>
+    <li>Python 3.9 through 3.12 for source installations</li>
+    <li>A Custom AI endpoint for translation</li>
+  </ul>
 
-        h1 {
-            font-size: 2.2em;
-            border-bottom: 2px solid #eaecef;
-            padding-bottom: 0.3em;
-        }
+  <h2>Install from source</h2>
+  <pre><code>git clone https://github.com/yun-666-666/OCR-Translator.git
+cd OCR-Translator
+python -m pip install -r requirements.txt
+python main.py</code></pre>
 
-        h2 {
-            font-size: 1.8em;
-            border-bottom: 1px solid #eaecef;
-            padding-bottom: 0.3em;
-        }
+  <p><code>requirements.txt</code> includes RapidOCR and the pinned PaddleOCR CPU stack. PaddleOCR is not preloaded at application startup; selecting it and starting OCR Preview or translation performs the first lazy initialization.</p>
 
-        h3 {
-            font-size: 1.4em;
-        }
+  <h3>PaddleOCR GPU installation</h3>
+  <p>The default dependency is CPU <code>paddlepaddle</code>. For CUDA acceleration, remove that CPU package and install the <code>paddlepaddle-gpu</code> build that exactly matches the machine's CUDA environment, following PaddlePaddle's official installation matrix. Keep the pinned <code>paddleocr</code> and <code>paddlex</code> versions from this repository.</p>
 
-        h4 {
-            font-size: 1.2em;
-        }
+  <div class="warning">Do not guess a PaddlePaddle GPU wheel. An incompatible CUDA build can prevent PaddleOCR from importing or can fail during model initialization.</div>
 
-        /* Table styling */
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin: 20px 0;
-            overflow: auto;
-        }
+  <h2>First configuration</h2>
+  <ol>
+    <li>Select the source capture area and translated overlay area.</li>
+    <li>Keep RapidOCR selected for the fast default path. Select PaddleOCR only when its advanced controls are needed.</li>
+    <li>Create a Custom AI translation profile with base URL and model.</li>
+    <li>Choose Chat Completions or Responses API to match the endpoint.</li>
+    <li>Enter an API Key for authenticated providers. Leave it blank for an unauthenticated local endpoint; the application then omits the Authorization header.</li>
+    <li>Test the profile, then click Start.</li>
+  </ol>
 
-        table th, table td {
-            border: 1px solid #ddd;
-            padding: 12px 16px;
-            text-align: left;
-        }
+  <h2>Persistent files</h2>
+  <p>The main INI configuration uses the application's stable configuration directory. Relative Custom AI profile paths, <code>custom_prompt.txt</code>, and the translation cache resolve from the application/project root, not the shell's current working directory.</p>
 
-        table th {
-            background-color: #f6f8fa;
-            font-weight: 600;
-        }
+  <h2>Development tests</h2>
+  <p>Install <code>pytest</code> only in a development environment, then run:</p>
+  <pre><code>python -m pytest</code></pre>
+  <p><code>pytest</code> is not required for normal application startup or translation.</p>
 
-        table tr:nth-child(2n) {
-            background-color: #f8f8f8;
-        }
-
-        /* List styling */
-        ol, ul {
-            padding-left: 2em;
-        }
-
-        li {
-            margin: 0.3em 0;
-        }
-
-        /* Code styling */
-        code {
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-            padding: 0.2em 0.4em;
-            margin: 0;
-            font-size: 0.9em;
-            background-color: rgba(27, 31, 35, 0.05);
-            border-radius: 3px;
-        }
-
-        /* Link styling */
-        a {
-            color: #0366d6;
-            text-decoration: none;
-        }
-
-        a:hover {
-            text-decoration: underline;
-        }
-
-        /* Blockquote styling */
-        blockquote {
-            padding: 0 1em;
-            color: #6a737d;
-            border-left: 0.25em solid #dfe2e5;
-            margin: 0 0 16px 0;
-        }
-
-        /* Horizontal rule styling */
-        hr {
-            border: none;
-            border-top: 1px solid #eaecef;
-            margin: 24px 0;
-        }
-
-        /* Flag styling */
-        .flag-container {
-            position: fixed;
-            top: 8px;
-            right: 8px;
-            z-index: 1000;
-            background: rgba(255, 255, 255, 0.9);
-            border-radius: 4px;
-            padding: 8px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-        }
-
-        .flag-container img {
-            width: 48px;
-            height: auto;
-            display: block;
-            margin: 0;
-        }
-    </style>
-  </head>
-  <body>
-    <div class="flag-container">
-      <img src="screenshots/united-kingdom-flag-icon.svg" alt="British Flag" title="English" />
-    </div>
-    <h1 id="installation-guide">Installation Guide</h1>
-    <p>Copyright © 2025 Tomasz Kamiński<br>
-    <em>Last Updated: 19 February 2026</em></p>
-
-    <p>This guide provides detailed instructions for installing and setting up Game-Changing Translator on your system.</p>
-
-    <h2 id="table-of-contents">Table of Contents</h2>
-    <ol>
-      <li><a href="#system-requirements">System Requirements</a></li>
-      <li><a href="#installation-method-1-compiled-version-recommended-for-most-users">Installation Method 1: Compiled Version (Recommended for Most Users)</a>
-        <ul>
-          <li><a href="#choose-your-version">Choose Your Version</a></li>
-          <li><a href="#installation-steps">Installation Steps</a></li>
-          <li><a href="#whats-included">What's Included</a></li>
-          <li><a href="#no-additional-setup-required">No Additional Setup Required</a></li>
-        </ul>
-      </li>
-      <li><a href="#installation-method-2-python-source-version-for-developers">Installation Method 2: Python Source Version (For Developers)</a>
-        <ul>
-          <li><a href="#prerequisites">Prerequisites</a></li>
-          <li><a href="#step-1-configure-ocr">Step 1: Configure OCR</a></li>
-          <li><a href="#step-2-install-python-and-dependencies">Step 2: Install Python and Dependencies</a></li>
-          <li><a href="#step-3-run-the-application">Step 3: Run the Application</a></li>
-        </ul>
-      </li>
-      <li><a href="#translation-service-configuration-both-installation-methods">Custom AI and Legacy Service Configuration (Both Installation Methods)</a></li>
-      <li><a href="#version-comparison">Version Comparison</a></li>
-      <li><a href="#troubleshooting">Troubleshooting</a></li>
-      <li><a href="#which-version-should-i-choose">Which Version Should I Choose?</a></li>
-    </ol>
-
-    <h2 id="system-requirements">System Requirements</h2>
-    <ul>
-      <li>Windows 10 or newer (64-bit)</li>
-      <li>4GB RAM minimum (8GB recommended)</li>
-      <li><strong>For compiled version</strong>: 1-4GB free disk space (depending on version chosen)</li>
-      <li><strong>For Python version</strong>: 500MB free disk space</li>
-      <li>Additional space for legacy MarianMT models if using offline translation (~500MB per language pair)</li>
-      <li>Internet connection (for Custom AI/OpenAI-compatible translation services and initial legacy MarianMT model downloads)</li>
-    </ul>
-
-    <h2 id="installation-method-1-compiled-version-recommended-for-most-users">Installation Method 1: Compiled Version (Recommended for Most Users)</h2>
-    <p>The compiled version provides the easiest installation experience with no need to install Python or dependencies. Simply download, extract, and run.</p>
-
-    <h3 id="choose-your-version">Choose Your Version</h3>
-    <p>Game-Changing Translator is available in multiple versions to suit different needs and hardware configurations:</p>
-
-    <h4 id="version-370-cpu-only-260mb-latest"><strong>Version 3.9.5 - CPU-Only</strong> (~260MB) <em>[Latest Version]</em></h4>
-    <ul>
-      <li><strong>Best for</strong>: All users seeking the latest features with the Custom AI translation + Custom AI OCR workflow</li>
-      <li><strong>Requirements</strong>: Any modern CPU</li>
-      <li><strong>Download size</strong>: ~260MB compressed (1 file)</li>
-      <li><strong>Note</strong>: Legacy MarianMT offline translation remains in the package for compatibility, but the current online workflow is centered on Custom AI profiles</li>
-    </ul>
-
-    <h4 id="version-2-legacy-versions">Version 2 - Legacy Versions</h4>
-    <p>Version 2 remains available for users who prefer the previous generation of the application:</p>
-
-    <h5 id="gpu-supported-version-135gb"><strong>Version 2 - GPU-Supported</strong> (~1.35GB)</h5>
-    <ul>
-      <li><strong>Best for</strong>: Users with NVIDIA GPUs who want faster MarianMT translation performance</li>
-      <li><strong>Requirements</strong>: NVIDIA GPU with CUDA support</li>
-      <li><strong>Benefits</strong>: Significantly faster offline neural translation processing</li>
-      <li><strong>Download size</strong>: ~1.35GB compressed (3 files)</li>
-    </ul>
-
-    <h5 id="cpu-only-version-188mb"><strong>Version 2 - CPU-Only</strong> (~188MB)</h5>
-    <ul>
-      <li><strong>Best for</strong>: Users without dedicated GPUs or those prioritizing smaller download size</li>
-      <li><strong>Requirements</strong>: Any modern CPU</li>
-      <li><strong>Benefits</strong>: Smaller download, works on all systems</li>
-      <li><strong>Download size</strong>: ~188MB compressed (2 files)</li>
-    </ul>
-
-    <h3 id="installation-steps">Installation Steps</h3>
-    <ol>
-      <li>
-        <p><strong>Download the required files</strong> for your chosen version:</p>
-        <ul>
-          <li><strong>For Version 3.9.5 (Latest):</strong> Download the file:
-            <ul>
-              <li><code>GameChangingTranslator_CPU-only_v3.9.5.exe</code></li>
-            </ul>
-          </li>
-          <li><strong>For Version 2 GPU:</strong> Download ALL 3 files:
-            <ul>
-              <li><code>GameChangingTranslator_GPU-enabled_v2.7z.001</code></li>
-              <li><code>GameChangingTranslator_GPU-enabled_v2.7z.002</code></li>
-              <li><code>GameChangingTranslator_GPU-enabled_v2.exe</code></li>
-            </ul>
-          </li>
-          <li><strong>For Version 2 CPU:</strong> Download BOTH files:
-            <ul>
-              <li><code>GameChangingTranslator_CPU-only_v2.7z.001</code></li>
-              <li><code>GameChangingTranslator_CPU-only_v2.exe</code></li>
-            </ul>
-          </li>
-        </ul>
-      </li>
-      <li>
-        <p><strong>Run the installer</strong>:</p>
-        <ul>
-          <li>Double-click the <code>.exe</code> file you downloaded.</li>
-          <li>Choose your installation directory when prompted.</li>
-          <li>The installer will extract all necessary files automatically.</li>
-        </ul>
-      </li>
-      <li>
-        <p><strong>Configure OCR</strong>:</p>
-        <ul>
-          <li>Use the bundled PaddleOCR path, or configure a Custom AI OCR profile.</li>
-          <li>Select PaddleOCR for local OCR or Custom AI OCR for API-based recognition.</li>
-          <li>Leave the PaddleOCR source directory at the bundled default unless you use a custom checkout.</li>
-          <li>Set the PaddleOCR language, model size, and device fields in Settings.</li>
-        </ul>
-      </li>
-      <li>
-        <p><strong>Run the application</strong>:</p>
-        <ul>
-          <li>Navigate to the extracted folder.</li>
-          <li>Double-click <code>GameChangingTranslator.exe</code>.</li>
-          <li>The application will start immediately.</li>
-        </ul>
-      </li>
-      <li>
-        <p><strong>First-time setup</strong>:</p>
-        <ul>
-          <li>Verify the PaddleOCR settings in the Settings tab (should auto-detect).</li>
-          <li>Select source and target translation areas.</li>
-          <li>Configure your preferred translation method.</li>
-          <li>You're ready to translate!</li>
-        </ul>
-      </li>
-    </ol>
-
-    <h3 id="whats-included">What's Included</h3>
-    <p>The compiled version includes everything you need:</p>
-    <ul>
-      <li>GameChangingTranslator executable</li>
-      <li>All Python libraries and dependencies</li>
-      <li>Pre-configured settings</li>
-      <li>Documentation and user manual</li>
-      <li>Resource files for all supported languages</li>
-    </ul>
-
-    <h3 id="no-additional-setup-required">No Additional Setup Required</h3>
-    <p>Unlike the Python version, the compiled version requires no separate OCR engine installation. All Python dependencies, translation libraries, and neural network frameworks are bundled and ready to use.</p>
-
-    <hr>
-
-    <h2 id="installation-method-2-python-source-version-for-developers">Installation Method 2: Python Source Version (For Developers)</h2>
-    <p>This method is recommended for developers who want to modify the application or prefer running from source code.</p>
-
-    <h3 id="prerequisites">Prerequisites</h3>
-    <ul>
-      <li>Python 3.9-3.12</li>
-      <li>Git (optional, for cloning the repository)</li>
-    </ul>
-
-    <h3 id="step-1-configure-ocr">Step 1: Configure OCR</h3>
-    <p>Game-Changing Translator supports local PaddleOCR and Custom AI OCR. Configure the OCR path you want to use:</p>
-    <ol>
-      <li>
-        <p>Use the bundled/local PaddleOCR source directory, or install the Python dependencies with <code>pip install -r requirements.txt</code>.</p>
-        <ul>
-          <li>Select PaddleOCR for local OCR or Custom AI OCR for API-based recognition.</li>
-          <li>Set the PaddleOCR language, model size, and device fields in Settings.</li>
-        </ul>
-      </li>
-      <li>
-        <p>Keep the default PaddleOCR source directory unless you have a custom PaddleOCR checkout.</p>
-        <ul>
-          <li>If you use a custom checkout, update the PaddleOCR source directory in Settings.</li>
-        </ul>
-      </li>
-      <li>
-        <p>Verify setup by launching the app and using the OCR Preview button while PaddleOCR is selected:</p>
-        <pre><code>python main.py</code></pre>
-      </li>
-    </ol>
-
-    <h3 id="step-2-install-python-and-dependencies">Step 2: Install Python and Dependencies</h3>
-    <ol>
-      <li>
-        <p>If you don't have Python installed:</p>
-        <ul>
-          <li>Download Python from <a href="https://www.python.org/downloads/">python.org</a>.</li>
-          <li>Make sure to check "Add Python to PATH" during installation.</li>
-        </ul>
-      </li>
-      <li>
-        <p>Clone or download this repository:</p>
-        <pre><code>git clone https://github.com/tomkam1702/OCR-Translator.git
-cd OCR-Translator</code></pre>
-      </li>
-      <li>
-        <p>Install required Python packages:</p>
-        <pre><code>pip install -r requirements.txt</code></pre>
-        <p>This will install:</p>
-        <ul>
-          <li>Core dependencies (numpy, opencv, paddleocr, Pillow, pyautogui)</li>
-          <li>Custom AI/OpenAI-compatible endpoint support through the Requests HTTP client</li>
-          <li>PySide6 RTL overlay support and keyboard hotkey support</li>
-          <li>Keyboard hotkey support</li>
-        </ul>
-      </li>
-    </ol>
-
-    <h3 id="step-3-run-the-application">Step 3: Run the Application</h3>
-    <ol>
-      <li>
-        <p>From the project directory, run:</p>
-        <pre><code>python main.py</code></pre>
-      </li>
-      <li>
-        <p>The application will start and display the main interface.</p>
-      </li>
-      <li>
-        <p>If running for the first time, you'll need to:</p>
-        <ul>
-          <li>Verify the PaddleOCR settings in the Settings tab</li>
-          <li>Select source and target translation areas</li>
-          <li>Configure your preferred translation method</li>
-        </ul>
-      </li>
-    </ol>
-
-    <hr>
-
-    <h2 id="translation-service-configuration-both-installation-methods">Custom AI and Legacy Service Configuration (Both Installation Methods)</h2>
-    <p>The current runtime path uses Custom AI profiles with OpenAI-compatible endpoints for online OCR and translation. Configure the base URL, API key, and model in the application's Custom AI profile settings. The Google, DeepL, and MarianMT notes below are legacy references for users who explicitly re-enable those paths in a fork.</p>
-
-    <h3 id="google-cloud-translation-api-optional">Legacy Google Cloud Translation API (Optional):</h3>
-    <ol>
-      <li>Create a Google Cloud account and project.</li>
-      <li>Enable the Cloud Translation API.</li>
-      <li>Create an API key:
-        <ul>
-          <li>Go to Google Cloud Console → APIs & Services → Credentials.</li>
-          <li>Click "Create credentials" → "API key".</li>
-        </ul>
-      </li>
-      <li>Copy your API key only if you are using a legacy Google Translate path.</li>
-    </ol>
-
-    <h3 id="deepl-api-optional">Legacy DeepL API (Optional):</h3>
-    <ol>
-      <li>Create a DeepL account at <a href="https://www.deepl.com/pro-api">deepl.com/pro-api</a>.</li>
-      <li>Subscribe to a plan (including the free plan).</li>
-      <li>Get your API key from the account dashboard.</li>
-      <li>Copy your API key only if you are using a legacy DeepL path.</li>
-    </ol>
-
-    <h3 id="marianmt-offline-translation">Legacy MarianMT (Offline Translation):</h3>
-    <p>This legacy option requires no configuration as the models are downloaded automatically when first used. However, note that:</p>
-    <ul>
-      <li>Models are ~500MB each.</li>
-      <li>First-time translation with a new language pair will take time to download the model.</li>
-      <li>A fast internet connection is recommended for the initial download.</li>
-      <li><strong>GPU version processes translations significantly faster</strong> if you have a compatible NVIDIA GPU.</li>
-    </ul>
-
-    <hr>
-
-    <h2 id="version-comparison">Version Comparison</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Feature</th>
-          <th>Version 3.9.5 (CPU)</th>
-          <th>Version 2 (GPU)</th>
-          <th>Version 2 (CPU)</th>
-          <th>Python Source</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td><strong>Installation Complexity</strong></td>
-          <td>Easiest</td>
-          <td>Easiest</td>
-          <td>Easiest</td>
-          <td>Moderate</td>
-        </tr>
-        <tr>
-          <td><strong>Download Size</strong></td>
-          <td>~260MB</td>
-          <td>~1.35GB</td>
-          <td>~188MB</td>
-          <td>~50MB</td>
-        </tr>
-        <tr>
-          <td><strong>Python Required</strong></td>
-          <td>No</td>
-          <td>No</td>
-          <td>No</td>
-          <td>Yes</td>
-        </tr>
-        <tr>
-          <td><strong>Dependencies</strong></td>
-          <td>All included</td>
-          <td>All included</td>
-          <td>All included</td>
-          <td>Manual install</td>
-        </tr>
-        <tr>
-          <td><strong>Custom AI Integration</strong></td>
-          <td>Current path</td>
-          <td>Basic</td>
-          <td>Basic</td>
-          <td>Available with dependencies</td>
-        </tr>
-        <tr>
-          <td><strong>MarianMT Performance</strong></td>
-          <td>Standard (CPU)</td>
-          <td>Fastest (GPU)</td>
-          <td>Standard (CPU)</td>
-          <td>Depends on setup</td>
-        </tr>
-        <tr>
-          <td><strong>API Cost Monitoring</strong></td>
-          <td>Comprehensive</td>
-          <td>Basic</td>
-          <td>Basic</td>
-          <td>Comprehensive (if updated)</td>
-        </tr>
-        <tr>
-          <td><strong>Customization</strong></td>
-          <td>Limited</td>
-          <td>Limited</td>
-          <td>Limited</td>
-          <td>Full access</td>
-        </tr>
-        <tr>
-          <td><strong>Updates</strong></td>
-          <td>Manual download</td>
-          <td>Manual download</td>
-          <td>Manual download</td>
-          <td>Git pull</td>
-        </tr>
-      </tbody>
-    </table>
-
-    <hr>
-
-    <h2 id="troubleshooting">Troubleshooting</h2>
-    <p>If you encounter issues during installation:</p>
-
-    <h3 id="for-compiled-versions">For Compiled Versions:</h3>
-    <ul>
-      <li><strong>Application won't start</strong>: Ensure you have Visual C++ Redistributable installed.</li>
-      <li><strong>PaddleOCR not found</strong>: Verify the path in Settings matches your installation location.</li>
-      <li><strong>GPU version slow</strong>: Check if NVIDIA drivers are up to date and CUDA is working.</li>
-      <li><strong>Antivirus warnings</strong>: Add the application folder to your antivirus exclusions.</li>
-    </ul>
-
-    <h3 id="for-python-source-version">For Python Source Version:</h3>
-    <ul>
-      <li><strong>Python dependency errors</strong>: Make sure you're using Python 3.9-3.12 and try reinstalling dependencies.</li>
-      <li><strong>Import errors</strong>: Verify all packages installed correctly with <code>pip list</code>.</li>
-    </ul>
-
-    <h3 id="common-issues-all-versions">Common Issues (All Versions):</h3>
-    <ul>
-      <li><strong>Translation API errors</strong>: Check your Custom AI base URL, API key, model, and internet connection.</li>
-      <li><strong>Legacy MarianMT errors</strong>: Ensure you have sufficient disk space and a stable internet connection for model download.</li>
-      <li><strong>OCR not working</strong>: Verify PaddleOCR installation and path configuration.</li>
-    </ul>
-
-    <p>For more help, see the <a href="troubleshooting.md">Troubleshooting Guide</a>.</p>
-
-    <hr>
-
-    <h2 id="which-version-should-i-choose">Which Version Should I Choose?</h2>
-
-    <h3 id="choose-version-35-if">Choose <strong>Version 3.9.5 - CPU-Only</strong> if:</h3>
-    <ul>
-      <li>You want the latest features and improvements.</li>
-      <li>You prefer Custom AI/OpenAI-compatible endpoints for online translation.</li>
-      <li>You need comprehensive API cost tracking and monitoring.</li>
-      <li>You want the smallest download size for a modern feature set.</li>
-      <li>You primarily use Custom AI profiles for online OCR and translation.</li>
-      <li>You don't mind leaving legacy MarianMT as a fallback/reference path rather than the primary translation method.</li>
-    </ul>
-
-    <h3 id="choose-version-2-gpu-if">Choose <strong>Version 2 - GPU-Supported</strong> if:</h3>
-    <ul>
-      <li>You have an NVIDIA GPU with CUDA support.</li>
-      <li>You frequently use MarianMT offline translation as your primary method.</li>
-      <li>You want the absolute best performance for neural translation.</li>
-      <li>You don't mind the larger download size for maximum MarianMT performance.</li>
-    </ul>
-
-    <h3 id="choose-version-2-cpu-if">Choose <strong>Version 2 - CPU-Only</strong> if:</h3>
-    <ul>
-      <li>You prefer the previous generation interface.</li>
-      <li>You don't have a dedicated GPU but want Version 2 features.</li>
-      <li>You primarily use API-based translation services but prefer Version 2.</li>
-      <li>You want maximum compatibility with Version 2 workflows.</li>
-    </ul>
-
-    <h3 id="choose-python-source-version-if">Choose <strong>Python Source Version</strong> if:</h3>
-    <ul>
-      <li>You're a developer who wants to modify the application.</li>
-      <li>You prefer having full control over dependencies.</li>
-      <li>You want to contribute to the project.</li>
-      <li>You're comfortable with Python development environments.</li>
-    </ul>
-
-    <p>For most users, <strong>Version 3.9.5 - CPU-Only</strong> provides the best balance of modern Custom AI features, translation quality, ease-of-use, and download size. Users who heavily rely on legacy MarianMT offline translation and have compatible NVIDIA hardware may prefer Version 2 - GPU-Supported for maximum offline performance.</p>
-
-  </body>
+  <h2>Troubleshooting</h2>
+  <p>See <a href="troubleshooting.md">Troubleshooting Guide</a> for OCR initialization, local endpoint, authentication, memory and shutdown guidance.</p>
+</body>
 </html>

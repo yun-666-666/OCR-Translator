@@ -15,6 +15,69 @@ from logger import log_debug, log_debug_coalesced, summarize_text_for_log
 
 PADDLEOCR_MODEL_CODE = "paddleocr"
 PADDLEOCR_DISPLAY_NAME = "PaddleOCR PP-OCRv6 (offline)"
+PADDLEOCR_AUTO_LANG = "auto"
+PADDLEOCR_SUPPORTED_VERSIONS = (
+    "PP-OCRv3",
+    "PP-OCRv4",
+    "PP-OCRv5",
+    "PP-OCRv6",
+)
+PADDLEOCR_MODEL_SIZES = ("tiny", "small", "medium")
+PADDLEOCR_DEVICE_OPTIONS = ("cpu", "gpu", "gpu:0")
+PADDLEOCR_TEXT_DET_LIMIT_TYPES = ("max", "min")
+
+# Kept in sync with PaddleOCR 3.x's public language groups.  The UI exposes
+# PaddleOCR language codes directly so a saved value has one unambiguous
+# runtime meaning.
+_PADDLEOCR_LATIN_LANGS = frozenset({
+    "af", "az", "bs", "ca", "cs", "cy", "da", "de", "es", "et",
+    "eu", "fi", "fr", "french", "ga", "german", "gl", "hr", "hu",
+    "id", "is", "it", "la", "lb", "lt", "lv", "mi", "ms", "mt",
+    "nl", "no", "oc", "pl", "pt", "qu", "rm", "ro", "rs_latin",
+    "sk", "sl", "sq", "sv", "sw", "tl", "tr", "uz", "vi",
+})
+_PADDLEOCR_ARABIC_LANGS = frozenset({"ar", "fa", "ug", "ur", "ps", "ku", "sd", "bal"})
+_PADDLEOCR_ESLAV_LANGS = frozenset({"ru", "be", "uk"})
+_PADDLEOCR_CYRILLIC_LANGS = frozenset({
+    "ru", "rs_cyrillic", "be", "bg", "uk", "mn", "kk", "ky", "tg",
+    "mk", "tt", "cv", "ba", "mo", "os",
+})
+_PADDLEOCR_DEVANAGARI_LANGS = frozenset({
+    "hi", "mr", "ne", "bh", "mai", "bho", "new", "gom", "sa",
+})
+_PADDLEOCR_SPECIFIC_LANGS = frozenset({
+    "ch", "en", "korean", "japan", "chinese_cht", "te", "ka", "ta",
+})
+_PADDLEOCR_V6_LANGS = frozenset({"ch", "chinese_cht", "en", "japan"}) | _PADDLEOCR_LATIN_LANGS
+_PADDLEOCR_V5_LANGS = (
+    _PADDLEOCR_V6_LANGS
+    | _PADDLEOCR_ARABIC_LANGS
+    | _PADDLEOCR_ESLAV_LANGS
+    | _PADDLEOCR_CYRILLIC_LANGS
+    | _PADDLEOCR_DEVANAGARI_LANGS
+    | frozenset({"korean", "th", "el", "te", "ta"})
+)
+_PADDLEOCR_V3_LANGS = (
+    _PADDLEOCR_LATIN_LANGS
+    | _PADDLEOCR_ARABIC_LANGS
+    | _PADDLEOCR_CYRILLIC_LANGS
+    | _PADDLEOCR_DEVANAGARI_LANGS
+    | _PADDLEOCR_SPECIFIC_LANGS
+)
+PADDLEOCR_LANGUAGE_OPTIONS = (PADDLEOCR_AUTO_LANG,) + tuple(sorted(
+    _PADDLEOCR_V3_LANGS | _PADDLEOCR_V5_LANGS
+))
+
+_PADDLEOCR_LANG_ALIASES = {
+    "zh": "ch",
+    "zh-cn": "ch",
+    "zh-hans": "ch",
+    "zh-tw": "chinese_cht",
+    "zh-hant": "chinese_cht",
+    "ja": "japan",
+    "jp": "japan",
+    "ko": "korean",
+}
 
 # Content-free, aggregated subtitle fast-path diagnostics.
 # These counters never store OCR text, pixels, paths, or absolute coordinates.
@@ -204,7 +267,7 @@ def _record_phase_metrics(phase_metrics, **values):
 @dataclass(frozen=True)
 class PaddleOCRSettings:
     source_dir: str = "PaddleOCR-3.7.0"
-    lang: str = "en"
+    lang: str = PADDLEOCR_AUTO_LANG
     ocr_version: str = "PP-OCRv6"
     model_size: str = "tiny"
     device: str = "cpu"
@@ -235,12 +298,118 @@ def _normalize_model_size(model_size):
     return "tiny"
 
 
+def _normalize_paddleocr_lang(lang):
+    normalized = str(lang or PADDLEOCR_AUTO_LANG).strip().lower().replace("_", "-")
+    normalized = _PADDLEOCR_LANG_ALIASES.get(normalized, normalized)
+    return normalized or PADDLEOCR_AUTO_LANG
+
+
+def _normalize_paddleocr_version(ocr_version):
+    normalized = str(ocr_version or "PP-OCRv6").strip().lower()
+    for supported in PADDLEOCR_SUPPORTED_VERSIONS:
+        if normalized == supported.lower():
+            return supported
+    return str(ocr_version or "PP-OCRv6").strip() or "PP-OCRv6"
+
+
 def resolve_ppocrv6_model_names(model_size):
     normalized = _normalize_model_size(model_size)
     return (
         f"PP-OCRv6_{normalized}_det",
         f"PP-OCRv6_{normalized}_rec",
     )
+
+
+def _resolve_official_language_model_names(lang, ocr_version):
+    if ocr_version == "PP-OCRv6":
+        if lang not in _PADDLEOCR_V6_LANGS:
+            return None, None
+        return "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"
+    if ocr_version == "PP-OCRv5":
+        if lang in {"ch", "chinese_cht", "japan"}:
+            rec_model_name = "PP-OCRv5_server_rec"
+        elif lang == "en":
+            rec_model_name = "en_PP-OCRv5_mobile_rec"
+        elif lang in _PADDLEOCR_LATIN_LANGS:
+            rec_model_name = "latin_PP-OCRv5_mobile_rec"
+        elif lang in _PADDLEOCR_ESLAV_LANGS:
+            rec_model_name = "eslav_PP-OCRv5_mobile_rec"
+        elif lang in _PADDLEOCR_ARABIC_LANGS:
+            rec_model_name = "arabic_PP-OCRv5_mobile_rec"
+        elif lang in _PADDLEOCR_CYRILLIC_LANGS:
+            rec_model_name = "cyrillic_PP-OCRv5_mobile_rec"
+        elif lang in _PADDLEOCR_DEVANAGARI_LANGS:
+            rec_model_name = "devanagari_PP-OCRv5_mobile_rec"
+        elif lang in {"korean", "th", "el", "te", "ta"}:
+            rec_model_name = f"{lang}_PP-OCRv5_mobile_rec"
+        else:
+            return None, None
+        return "PP-OCRv5_server_det", rec_model_name
+    if ocr_version == "PP-OCRv4":
+        if lang == "ch":
+            return "PP-OCRv4_mobile_det", "PP-OCRv4_mobile_rec"
+        if lang == "en":
+            return "PP-OCRv4_mobile_det", "en_PP-OCRv4_mobile_rec"
+        return None, None
+
+    if lang in _PADDLEOCR_LATIN_LANGS:
+        rec_lang = "latin"
+    elif lang in _PADDLEOCR_ARABIC_LANGS:
+        rec_lang = "arabic"
+    elif lang in _PADDLEOCR_CYRILLIC_LANGS:
+        rec_lang = "cyrillic"
+    elif lang in _PADDLEOCR_DEVANAGARI_LANGS:
+        rec_lang = "devanagari"
+    elif lang in _PADDLEOCR_SPECIFIC_LANGS:
+        rec_lang = lang
+    else:
+        return None, None
+    rec_model_name = (
+        "PP-OCRv3_mobile_rec"
+        if rec_lang == "ch"
+        else f"{rec_lang}_PP-OCRv3_mobile_rec"
+    )
+    return "PP-OCRv3_mobile_det", rec_model_name
+
+
+def resolve_paddleocr_model_selection(settings):
+    """Validate settings and return (det, rec, use_language_selector)."""
+    settings = normalize_paddleocr_settings(settings)
+    if settings.ocr_version not in PADDLEOCR_SUPPORTED_VERSIONS:
+        raise ValueError(
+            "Unsupported PaddleOCR version "
+            f"{settings.ocr_version!r}; choose one of {', '.join(PADDLEOCR_SUPPORTED_VERSIONS)}"
+        )
+    if settings.text_det_limit_type not in PADDLEOCR_TEXT_DET_LIMIT_TYPES:
+        raise ValueError(
+            "Unsupported PaddleOCR detection limit type "
+            f"{settings.text_det_limit_type!r}; choose max or min"
+        )
+    if settings.lang == PADDLEOCR_AUTO_LANG:
+        if settings.ocr_version != "PP-OCRv6":
+            raise ValueError(
+                "PaddleOCR language 'auto' is only available with PP-OCRv6; "
+                "select a concrete PaddleOCR language code for older versions"
+            )
+        det_model_name, rec_model_name = resolve_ppocrv6_model_names(settings.model_size)
+        return det_model_name, rec_model_name, False
+    if settings.lang not in PADDLEOCR_LANGUAGE_OPTIONS:
+        raise ValueError(f"Unsupported PaddleOCR language code: {settings.lang!r}")
+    if settings.model_size != "medium":
+        raise ValueError(
+            "Language-specific PaddleOCR selection requires model size 'medium'. "
+            "Use language 'auto' with PP-OCRv6 for tiny or small models."
+        )
+    det_model_name, rec_model_name = _resolve_official_language_model_names(
+        settings.lang,
+        settings.ocr_version,
+    )
+    if not det_model_name or not rec_model_name:
+        raise ValueError(
+            "No PaddleOCR models are available for "
+            f"language={settings.lang!r}, version={settings.ocr_version!r}"
+        )
+    return det_model_name, rec_model_name, True
 
 
 def _coerce_float(value, default, min_value=None, max_value=None):
@@ -274,8 +443,8 @@ def normalize_paddleocr_settings(settings):
         settings = PaddleOCRSettings(**dict(settings))
     return PaddleOCRSettings(
         source_dir=str(settings.source_dir or "PaddleOCR-3.7.0").strip() or "PaddleOCR-3.7.0",
-        lang=str(settings.lang or "en").strip() or "en",
-        ocr_version=str(settings.ocr_version or "PP-OCRv6").strip() or "PP-OCRv6",
+        lang=_normalize_paddleocr_lang(settings.lang),
+        ocr_version=_normalize_paddleocr_version(settings.ocr_version),
         model_size=_normalize_model_size(settings.model_size),
         device=str(settings.device or "cpu").strip() or "cpu",
         min_score=_coerce_float(settings.min_score, 0.45, 0.0, 1.0),
@@ -351,15 +520,14 @@ def _build_paddleocr_engine(settings, phase_metrics=None, clock=None):
     import_started = clock()
     PaddleOCR = _import_paddleocr(settings)
     import_duration = _elapsed_seconds(import_started, clock)
-    det_model_name, rec_model_name = resolve_ppocrv6_model_names(settings.model_size)
+    det_model_name, rec_model_name, use_language_selector = (
+        resolve_paddleocr_model_selection(settings)
+    )
     probe_started = clock()
     det_files_before = _probe_ppocrv6_model_files(det_model_name)
     rec_files_before = _probe_ppocrv6_model_files(rec_model_name)
     probe_duration = _elapsed_seconds(probe_started, clock)
     kwargs = {
-        "ocr_version": settings.ocr_version,
-        "text_detection_model_name": det_model_name,
-        "text_recognition_model_name": rec_model_name,
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
         "use_textline_orientation": settings.use_textline_orientation,
@@ -367,13 +535,20 @@ def _build_paddleocr_engine(settings, phase_metrics=None, clock=None):
         "text_det_limit_type": settings.text_det_limit_type,
         "text_rec_score_thresh": settings.min_score,
     }
+    if use_language_selector:
+        kwargs["lang"] = settings.lang
+        kwargs["ocr_version"] = settings.ocr_version
+    else:
+        kwargs["text_detection_model_name"] = det_model_name
+        kwargs["text_recognition_model_name"] = rec_model_name
     if settings.device:
         kwargs["device"] = settings.device
         if str(settings.device).strip().lower().split(":", 1)[0] == "cpu":
             kwargs["enable_mkldnn"] = False
     log_debug(
         "Initializing PaddleOCR "
-        f"version={settings.ocr_version} det={det_model_name} rec={rec_model_name} "
+        f"version={settings.ocr_version} lang={settings.lang} "
+        f"det={det_model_name} rec={rec_model_name} "
         f"device={settings.device} min_score={settings.min_score}"
     )
     construct_started = clock()
@@ -451,7 +626,9 @@ def _build_paddleocr_text_recognition_engine(settings, phase_metrics=None, clock
     import_started = clock()
     TextRecognition = _import_text_recognition(settings)
     import_duration = _elapsed_seconds(import_started, clock)
-    _det_model_name, rec_model_name = resolve_ppocrv6_model_names(settings.model_size)
+    _det_model_name, rec_model_name, _use_language_selector = (
+        resolve_paddleocr_model_selection(settings)
+    )
     probe_started = clock()
     files_before = _probe_ppocrv6_model_files(rec_model_name)
     probe_duration = _elapsed_seconds(probe_started, clock)

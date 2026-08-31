@@ -7,7 +7,10 @@ from custom_ai import (
     CUSTOM_AI_REASONING_EFFORT_MEDIUM,
     CUSTOM_AI_REASONING_EFFORT_NONE,
     CUSTOM_AI_REASONING_EFFORT_ULTRA,
+    CUSTOM_AI_WIRE_API_CHAT_COMPLETIONS,
+    CUSTOM_AI_WIRE_API_RESPONSES,
     normalize_custom_ai_reasoning_effort,
+    normalize_custom_ai_wire_api,
 )
 from paddle_ocr_backend import PADDLEOCR_DISPLAY_NAME, PADDLEOCR_MODEL_CODE
 from rapid_ocr_backend import RAPIDOCR_DISPLAY_NAME, RAPIDOCR_MODEL_CODE
@@ -19,6 +22,19 @@ CUSTOM_AI_REASONING_EFFORT_LABEL_KEYS = (
     (CUSTOM_AI_REASONING_EFFORT_MEDIUM, "custom_ai_reasoning_effort_medium", "Medium"),
     (CUSTOM_AI_REASONING_EFFORT_HIGH, "custom_ai_reasoning_effort_high", "High"),
     (CUSTOM_AI_REASONING_EFFORT_ULTRA, "custom_ai_reasoning_effort_ultra", "Ultra"),
+)
+
+CUSTOM_AI_WIRE_API_LABEL_KEYS = (
+    (
+        CUSTOM_AI_WIRE_API_CHAT_COMPLETIONS,
+        "custom_ai_wire_api_chat_completions",
+        "Chat Completions",
+    ),
+    (
+        CUSTOM_AI_WIRE_API_RESPONSES,
+        "custom_ai_wire_api_responses",
+        "Responses API",
+    ),
 )
 
 
@@ -130,6 +146,30 @@ def _reasoning_effort_value_from_display(app, display_value):
     return normalize_custom_ai_reasoning_effort(raw_value)
 
 
+def custom_ai_wire_api_display_value(app, wire_api):
+    normalized = normalize_custom_ai_wire_api(wire_api)
+    ui_lang = getattr(app, "ui_lang", None)
+    for value, label_key, fallback in CUSTOM_AI_WIRE_API_LABEL_KEYS:
+        if value == normalized:
+            return ui_lang.get_label(label_key, fallback) if ui_lang is not None else fallback
+    return "Chat Completions"
+
+
+def custom_ai_wire_api_display_values(app):
+    return [
+        custom_ai_wire_api_display_value(app, wire_api)
+        for wire_api, _label_key, _fallback in CUSTOM_AI_WIRE_API_LABEL_KEYS
+    ]
+
+
+def custom_ai_wire_api_value_from_display(app, display_value):
+    raw_value = str(display_value or "").strip()
+    for wire_api, _label_key, _fallback in CUSTOM_AI_WIRE_API_LABEL_KEYS:
+        if raw_value == custom_ai_wire_api_display_value(app, wire_api):
+            return wire_api
+    return normalize_custom_ai_wire_api(raw_value)
+
+
 def build_custom_ai_profile_values_from_form(app):
     values = {
         "name": _read_var(app, "ai_profile_name_var", strip=True),
@@ -151,6 +191,12 @@ def build_custom_ai_profile_values_from_form(app):
         structured_output_mode = str(selected_profile.get("structured_output_mode") or "").strip()
         if structured_output_mode:
             values["structured_output_mode"] = structured_output_mode
+    wire_api_var = getattr(app, "ai_profile_wire_api_var", None)
+    if wire_api_var is not None:
+        values["wire_api"] = custom_ai_wire_api_value_from_display(
+            app,
+            wire_api_var.get(),
+        )
     reasoning_var = getattr(app, "ai_profile_reasoning_effort_var", None)
     if reasoning_var is not None:
         values["reasoning_effort"] = _reasoning_effort_value_from_display(

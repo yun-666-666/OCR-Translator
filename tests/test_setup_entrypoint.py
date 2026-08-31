@@ -1,6 +1,7 @@
 import importlib
 import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 
@@ -42,9 +43,20 @@ class SetupConfigurationTests(unittest.TestCase):
 
         for requirement in {
             "mss>=9.0.0",
+            "paddlepaddle==3.3.1",
+            "paddleocr==3.7.0",
+            "paddlex==3.7.2",
             "PySide6==6.7.3",
             "keyboard>=0.13.5",
             "python-bidi>=0.4.2",
             "arabic-reshaper>=3.0.0",
         }:
             self.assertIn(requirement, install_requires)
+
+        requirements = {
+            line.strip()
+            for line in Path("requirements.txt").read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertEqual(install_requires, requirements)
+        self.assertNotIn("paddlepaddle-gpu", "\n".join(requirements).lower())

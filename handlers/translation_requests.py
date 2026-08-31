@@ -1734,11 +1734,16 @@ class TranslationRequestsMixin:
         """
         if identity is not None:
             self._release_custom_ai_race_profile(identity)
+        with self._custom_race_state_lock:
+            self._custom_race_futures.discard(future)
+            self._custom_race_state_lock.notify_all()
         if future.cancelled():
+            self._close_custom_ai_provider_if_safe()
             return
         try:
             exc = future.exception()
         except Exception:
+            self._close_custom_ai_provider_if_safe()
             return
         if exc is not None:
             if isinstance(exc, concurrent.futures.CancelledError):
@@ -1750,6 +1755,7 @@ class TranslationRequestsMixin:
                 request_kind="translation",
                 request_sequence=request_sequence,
             )
+            self._close_custom_ai_provider_if_safe()
             return
         available = getattr(
             self.custom_ai_provider,
@@ -1762,6 +1768,61 @@ class TranslationRequestsMixin:
                 request_kind="translation",
                 request_sequence=request_sequence,
             )
+        self._close_custom_ai_provider_if_safe()
+
+    def _reserve_custom_ai_race_candidates(self, candidates, timeout_seconds=None):
+        identities = [
+            (candidate, self._custom_ai_race_profile_identity(candidate))
+            for candidate in candidates
+        ]
+        try:
+            wait_seconds = max(0.0, float(timeout_seconds or 0.0))
+        except (TypeError, ValueError):
+            wait_seconds = 0.0
+        deadline = time.monotonic() + wait_seconds
+
+        with self._custom_race_state_lock:
+            while True:
+                if self._custom_race_submissions_frozen:
+                    return []
+                remaining_budget = max(
+                    0,
+                    int(self._custom_race_candidate_limit)
+                    - len(self._custom_race_inflight_profiles),
+                )
+                reserved = [
+                    (candidate, identity)
+                    for candidate, identity in identities
+                    if identity not in self._custom_race_inflight_profiles
+                ][:remaining_budget]
+                if reserved:
+                    self._custom_race_inflight_profiles.update(
+                        identity for _candidate, identity in reserved
+                    )
+                    return reserved
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return []
+                self._custom_race_state_lock.wait(timeout=remaining)
+
+    def _track_custom_ai_race_future(
+        self,
+        future,
+        profile,
+        request_sequence,
+        identity,
+    ):
+        with self._custom_race_state_lock:
+            self._custom_race_futures.add(future)
+        future.add_done_callback(
+            lambda settled_future: self._settle_custom_ai_race_health(
+                settled_future,
+                profile,
+                request_sequence,
+                identity=identity,
+            )
+        )
 
     def _custom_ai_translate_race(
         self,
@@ -1780,9 +1841,18 @@ class TranslationRequestsMixin:
         candidates = self._get_custom_ai_race_profiles(
             active_profile,
             force_no_reasoning=force_no_reasoning,
+            include_busy=True,
         )
-        if len(candidates) <= 1:
-            candidate = candidates[0] if candidates else active_profile
+        reserved_candidates = self._reserve_custom_ai_race_candidates(
+            candidates,
+            timeout_seconds=timeout_seconds,
+        )
+        if not reserved_candidates:
+            raise TimeoutError(
+                "Custom AI race capacity remained busy until the request deadline"
+            )
+        if len(reserved_candidates) == 1:
+            candidate, identity = reserved_candidates[0]
             request_sequence = self._begin_custom_ai_profile_request(
                 candidate,
                 "translation",
@@ -1816,6 +1886,8 @@ class TranslationRequestsMixin:
                     f"{candidate.get('name', 'Custom AI')}: "
                     f"{error_text}"
                 ) from None
+            finally:
+                self._release_custom_ai_race_profile(identity)
             available = getattr(
                 self.custom_ai_provider,
                 "mark_profile_available",
@@ -1842,91 +1914,74 @@ class TranslationRequestsMixin:
                 candidate,
             )
 
-        executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=len(candidates),
-            thread_name_prefix="CustomAIRace",
-        )
         future_to_profile = {}
-        shutdown_started = False
         errors = []
-        try:
-            for candidate in candidates:
-                identity = self._custom_ai_race_profile_identity(candidate)
-                request_sequence = self._begin_custom_ai_profile_request(
+        for index, (candidate, identity) in enumerate(reserved_candidates):
+            request_sequence = self._begin_custom_ai_profile_request(
+                candidate,
+                "translation",
+            )
+            try:
+                future = self._custom_race_executor.submit(
+                    self.custom_ai_provider.translate,
                     candidate,
-                    "translation",
+                    text,
+                    source_lang,
+                    target_lang,
+                    custom_prompt=custom_prompt,
+                    context=context,
+                    keep_linebreaks=keep_linebreaks,
+                    latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                    timeout_seconds=timeout_seconds,
                 )
-                with self._custom_race_state_lock:
-                    self._custom_race_inflight_profiles.add(identity)
-                try:
-                    future = executor.submit(
-                        self.custom_ai_provider.translate,
-                        candidate,
-                        text,
-                        source_lang,
-                        target_lang,
-                        custom_prompt=custom_prompt,
-                        context=context,
-                        keep_linebreaks=keep_linebreaks,
-                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
-                        timeout_seconds=timeout_seconds,
-                    )
-                except Exception:
-                    self._release_custom_ai_race_profile(identity)
-                    raise
-                future_to_profile[future] = (candidate, request_sequence)
-                future.add_done_callback(
-                    lambda settled_future,
-                    race_profile=candidate,
-                    race_sequence=request_sequence,
-                    race_identity=identity: (
-                        self._settle_custom_ai_race_health(
-                            settled_future,
-                            race_profile,
-                            race_sequence,
-                            identity=race_identity,
-                        )
-                    )
-                )
+            except Exception:
+                for _candidate, unsubmitted_identity in reserved_candidates[index:]:
+                    self._release_custom_ai_race_profile(unsubmitted_identity)
+                raise
+            future_to_profile[future] = (candidate, request_sequence)
+            self._track_custom_ai_race_future(
+                future,
+                candidate,
+                request_sequence,
+                identity,
+            )
 
-            for future in concurrent.futures.as_completed(future_to_profile):
-                candidate, _request_sequence = future_to_profile[future]
-                try:
-                    translated, usage, duration = future.result()
-                except Exception as e:
-                    error_text = self._sanitize_custom_ai_profile_error(
-                        e,
-                        candidate,
-                    )
-                    errors.append(
-                        f"{candidate.get('name', 'Custom AI')}: "
-                        f"{error_text}"
-                    )
-                    continue
-                _log_debug(
-                    "LATENCY: custom_ai race winner "
-                    f"profile={candidate.get('name', 'Custom AI')} "
-                    f"duration={duration:.3f}s candidates={len(candidates)}"
-                )
-                self._note_custom_ai_race_winner(candidate)
-                executor.shutdown(wait=False, cancel_futures=True)
-                shutdown_started = True
-                return (
-                    translated,
-                    usage,
-                    duration,
-                    self._cache_params_for_profile(
-                        candidate,
-                        custom_prompt=custom_prompt,
-                        keep_linebreaks=keep_linebreaks,
-                        context=context,
-                        latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
-                    ),
+        for future in concurrent.futures.as_completed(future_to_profile):
+            candidate, _request_sequence = future_to_profile[future]
+            try:
+                translated, usage, duration = future.result()
+            except Exception as e:
+                error_text = self._sanitize_custom_ai_profile_error(
+                    e,
                     candidate,
                 )
-        finally:
-            if not shutdown_started:
-                executor.shutdown(wait=False, cancel_futures=True)
+                errors.append(
+                    f"{candidate.get('name', 'Custom AI')}: "
+                    f"{error_text}"
+                )
+                continue
+            _log_debug(
+                "LATENCY: custom_ai race winner "
+                f"profile={candidate.get('name', 'Custom AI')} "
+                f"duration={duration:.3f}s candidates={len(reserved_candidates)}"
+            )
+            self._note_custom_ai_race_winner(candidate)
+            for losing_future in future_to_profile:
+                if losing_future is not future:
+                    losing_future.cancel()
+            return (
+                translated,
+                usage,
+                duration,
+                self._cache_params_for_profile(
+                    candidate,
+                    custom_prompt=custom_prompt,
+                    keep_linebreaks=keep_linebreaks,
+                    context=context,
+                    latency_mode=CUSTOM_AI_LATENCY_MODE_RACE,
+                ),
+                candidate,
+            )
 
         raise ValueError("All Custom AI race endpoints failed. Tried: " + "; ".join(errors))
 
@@ -1934,6 +1989,7 @@ class TranslationRequestsMixin:
         self,
         active_profile,
         force_no_reasoning=None,
+        include_busy=False,
     ):
         active_profile = self._translation_request_profile(
             active_profile,
@@ -1995,7 +2051,7 @@ class TranslationRequestsMixin:
             if self._custom_ai_race_profile_identity(candidate)
             not in busy_profiles
         ]
-        return idle_candidates or eligible_candidates
+        return eligible_candidates if include_busy else idle_candidates
 
     def _custom_ai_race_signature(self, profile):
         profile = profile if isinstance(profile, dict) else {}
@@ -2051,6 +2107,7 @@ class TranslationRequestsMixin:
     def _release_custom_ai_race_profile(self, identity):
         with self._custom_race_state_lock:
             self._custom_race_inflight_profiles.discard(identity)
+            self._custom_race_state_lock.notify_all()
 
     def _cache_params_for_profile(
         self,

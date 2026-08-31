@@ -11,6 +11,7 @@ import threading
 import time
 import types
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -788,6 +789,71 @@ class LatencyOcrCacheTests(unittest.TestCase):
 
 
 class LatencyShutdownTests(unittest.TestCase):
+    def test_real_async_futures_remain_tracked_until_completion(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.translation_handler = None
+        future = Future()
+
+        app.track_async_future(future, "translation")
+        self.assertEqual(
+            app.get_pending_async_future_counts(),
+            {"ocr": 0, "translation": 1},
+        )
+
+        future.set_result("done")
+        self.assertEqual(
+            app.get_pending_async_future_counts(),
+            {"ocr": 0, "translation": 0},
+        )
+
+    def test_app_exit_freezes_submissions_without_clearing_active_sets(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.is_running = True
+        app.threads = []
+        app.active_ocr_calls = {3}
+        app.active_ocr_inflight_keys = {"ocr-key"}
+        app.active_translation_calls = {4}
+        app.translation_handler = types.SimpleNamespace(
+            set_race_submissions_frozen=Mock(),
+            request_end_ocr_session=Mock(),
+            request_end_translation_session=Mock(),
+        )
+
+        app._stop_translation_for_app_exit()
+
+        self.assertTrue(app._async_submissions_frozen)
+        self.assertEqual(app.active_ocr_calls, {3})
+        self.assertEqual(app.active_ocr_inflight_keys, {"ocr-key"})
+        self.assertEqual(app.active_translation_calls, {4})
+        app.translation_handler.set_race_submissions_frozen.assert_called_once_with(
+            True
+        )
+
+    def test_bounded_app_exit_wait_reports_real_remaining_futures(self):
+        import app_logic
+
+        app = object.__new__(app_logic.GameChangingTranslator)
+        app.translation_handler = types.SimpleNamespace(
+            get_pending_race_future_count=lambda: 1,
+        )
+        app._ocr_futures = {Future()}
+        app._translation_futures = {Future()}
+        app._async_future_lock = threading.Lock()
+        app._async_submissions_frozen = True
+
+        with patch.object(app_logic, "log_debug") as log_debug:
+            completed = app._wait_for_app_exit_futures(timeout_seconds=0.0)
+
+        self.assertFalse(completed)
+        message = log_debug.call_args.args[0]
+        self.assertIn("OCR futures=1", message)
+        self.assertIn("translation futures=1", message)
+        self.assertIn("race futures=1", message)
+
     def test_worker_ui_callback_is_dropped_after_shutdown(self):
         worker_threads = import_worker_threads_for_tests()
         root = types.SimpleNamespace(after=Mock())

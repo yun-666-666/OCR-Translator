@@ -349,7 +349,7 @@ def _coerce_bool(value, default=False):
 def get_paddleocr_settings_from_app(app):
     return PaddleOCRSettings(
         source_dir=str(_read_app_var(app, "paddleocr_source_dir_var", "PaddleOCR-3.7.0") or "PaddleOCR-3.7.0"),
-        lang=str(_read_app_var(app, "paddleocr_lang_var", "en") or "en"),
+        lang=str(_read_app_var(app, "paddleocr_lang_var", "auto") or "auto"),
         ocr_version=str(_read_app_var(app, "paddleocr_ocr_version_var", "PP-OCRv6") or "PP-OCRv6"),
         model_size=str(_read_app_var(app, "paddleocr_model_size_var", "tiny") or "tiny"),
         device=str(_read_app_var(app, "paddleocr_device_var", "cpu") or "cpu"),
@@ -711,21 +711,6 @@ def process_local_ocr_frame(
                 _read_app_var(app, "keep_linebreaks_var", False),
                 False,
             )
-        wait_for_prewarm = getattr(
-            app,
-            "wait_for_paddleocr_prewarm",
-            None,
-        )
-        if callable(wait_for_prewarm):
-            wait_started = time.monotonic()
-            wait_ready = bool(wait_for_prewarm(settings, timeout=20.0))
-            waited_s = max(0.0, time.monotonic() - wait_started)
-            note_first_wait = getattr(app, "note_paddleocr_first_ocr_wait", None)
-            if callable(note_first_wait):
-                try:
-                    note_first_wait(settings, waited_s, wait_ready)
-                except Exception:
-                    pass
         ocr_cleaned_text, _lines = _recognize_subtitle_with_paddleocr(
             screenshot_pil,
             settings,

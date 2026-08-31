@@ -19,7 +19,6 @@ from gui_builder import (
     create_settings_tab,
 )
 from logger import set_debug_logging_enabled
-from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
 from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 
 DEFAULT_CUSTOM_PROMPT = (
@@ -82,8 +81,6 @@ class AppConfigurationMixin:
                     selected_ocr = self.get_ocr_model_setting()
                     if selected_ocr == RAPIDOCR_MODEL_CODE:
                         self.ensure_rapidocr_ready_if_selected("settings saved")
-                    elif selected_ocr == PADDLEOCR_MODEL_CODE:
-                        self.ensure_paddleocr_ready_if_selected("settings saved")
                 except Exception as e:
                     _log_debug(f"Local OCR prewarm after settings save failed: {e}")
             return saved

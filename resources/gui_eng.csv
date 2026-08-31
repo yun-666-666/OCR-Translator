@@ -45,6 +45,9 @@ ai_optimization_mode_quality,Quality first
 custom_ai_submit_interval_label,AI translation minimum interval (ms):
 ai_profile_structured_output_label,Structured output
 ai_profile_reasoning_effort_label,Reasoning effort
+ai_profile_wire_api_label,API protocol
+custom_ai_wire_api_chat_completions,Chat Completions
+custom_ai_wire_api_responses,Responses API
 custom_ai_reasoning_effort_low,Low
 custom_ai_reasoning_effort_none,None
 custom_ai_reasoning_effort_medium,Medium
@@ -54,6 +57,16 @@ scan_interval_label,Scan Interval (ms):
 clear_timeout_label,Clear Translation Timeout (s):
 stability_threshold_label,Text Stability Threshold:
 paddleocr_min_score_label,PaddleOCR minimum score:
+paddleocr_source_dir_label,PaddleOCR source directory:
+paddleocr_browse_btn,Browse
+paddleocr_lang_label,PaddleOCR language:
+paddleocr_version_label,PaddleOCR version:
+paddleocr_model_size_label,PaddleOCR model size:
+paddleocr_device_label,PaddleOCR device:
+paddleocr_upscale_label,PaddleOCR image upscale:
+paddleocr_det_limit_label,PaddleOCR detection side limit:
+paddleocr_det_limit_type_label,PaddleOCR detection limit type:
+paddleocr_textline_orientation_label,PaddleOCR text-line orientation:
 rapidocr_min_score_label,RapidOCR minimum score:
 ocr_debugging_label,OCR Debugging:
 show_debug_checkbox,Show debug images/text

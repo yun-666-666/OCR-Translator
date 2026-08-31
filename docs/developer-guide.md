@@ -2,13 +2,13 @@
 
 > **ARCHIVED / LEGACY DOCUMENT** — Large parts of this guide describe removed Gemini, OpenAI, DeepL, Google Translate, and MarianMT provider modules. Treat those sections as historical only.
 >
-> **Current live path (authoritative):** PaddleOCR or Custom AI OCR → unified translation cache → Custom AI translation profiles (OpenAI-compatible endpoints) → PySide overlay display. See `tests/test_live_path_inventory.py` and `tests/test_custom_ai_startup.py` for the inventory contract.
+> **Current live path (authoritative):** RapidOCR (default), PaddleOCR (advanced local OCR), or Custom AI OCR → unified translation cache → Custom AI translation profiles (OpenAI-compatible Chat Completions or Responses API) → PySide overlay display. Later machine-specific local translation-model experiments are outside this baseline. See `tests/test_live_path_inventory.py` and `tests/test_custom_ai_startup.py` for the inventory contract.
 
 This guide provides information for developers who want to understand or modify the Game-Changing Translator application.
 
 > **IMPORTANT NOTE**: This project is considered complete. I won't be accepting pull requests, feature enhancements, or implementing new features that someone else has coded. You are welcome to fork the repository and develop it further as your own project. The code is shared under the GPL licence for others to use, update, and modify as they wish, but I consider my work on it complete and won't be actively engaged in future development.
 
-> **Current runtime note**: This fork routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is either local PaddleOCR or Custom AI OCR. Dedicated legacy provider modules and provider-only CSVs for Gemini, OpenAI, DeepL, and MarianMT have been removed from the live tree; remaining adapter stubs in `handlers/translation_results.py` are inert and must not be treated as a supported path.
+> **Current runtime note**: This fork routes translation through `custom_ai` profiles backed by OpenAI-compatible endpoints. OCR is local RapidOCR/PaddleOCR or Custom AI OCR. Dedicated legacy provider modules and provider-only CSVs for Gemini, OpenAI, DeepL, and MarianMT have been removed from the live tree; remaining adapter stubs in `handlers/translation_results.py` are inert and must not be treated as a supported path.
 
 ## Architecture Overview
 
@@ -34,7 +34,7 @@ Game-Changing Translator follows a modular design with the following key compone
    - *(archived)* `LLMProviderBase`, `GeminiProvider`, `OpenAIProvider` — removed; do not reintroduce without an explicit product decision
 
 4. **Live OCR path**
-   - Local OCR via `paddle_ocr_backend.py`; API OCR via Custom AI OCR profiles
+   - Default local OCR via `rapid_ocr_backend.py`, advanced local OCR via `paddle_ocr_backend.py`, and API OCR via Custom AI OCR profiles
    - *(archived)* `OCRProviderBase`, `GeminiOCRProvider`, `OpenAIOCRProvider` — removed
 
 5. **Worker Threads (`worker_threads.py`)**
@@ -318,9 +318,11 @@ Translation Request
 
 ### Custom AI Provider Runtime
 
-The current runtime translation provider is `custom_ai.py`. `TranslationHandler` resolves the active Custom AI profile, builds cache and in-flight keys from profile ID, canonical endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, custom prompt, line-break mode, and context, then sends requests through `CustomAIProvider`.
+The current runtime translation provider is `custom_ai.py`. `TranslationHandler` resolves the active Custom AI profile, builds cache and in-flight keys from profile ID, canonical endpoint, model, credential scope, wire API, reasoning effort, structured-output contract, custom prompt, line-break mode, and context, then sends requests through `CustomAIProvider`. API keys are optional for unauthenticated local endpoints; the transport emits an Authorization header only when a key exists.
 
-`CustomAIProvider` supports OpenAI-compatible Chat Completions and Responses APIs, optional streaming latency mode, race/adaptive latency behavior, structured-output fallback, reasoning-effort fallback, request-level timeout overrides, and Custom AI OCR payloads with WebP, PNG, or JPEG MIME metadata.
+`CustomAIProvider` supports OpenAI-compatible Chat Completions and Responses APIs, optional streaming latency mode, globally bounded race/adaptive latency behavior, structured-output fallback, reasoning-effort fallback, request-level timeout overrides, and Custom AI OCR payloads with WebP, PNG, or JPEG MIME metadata. Relative profile paths, `custom_prompt.txt`, and cache files resolve from the application/project root.
+
+PaddleOCR is lazy-loaded only when selected and used. Do not reintroduce startup or settings-save prewarming; RapidOCR remains the lightweight default. The source dependency contract pins the CPU Paddle stack in `requirements.txt`; GPU environments replace only PaddlePaddle with the matching official `paddlepaddle-gpu` build.
 
 ### Legacy LLM Provider Architecture
 

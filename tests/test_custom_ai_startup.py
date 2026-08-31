@@ -352,8 +352,12 @@ class StartupOptimizationTests(unittest.TestCase):
         self.assertIn("paddleocr_min_score_label", gui_builder_source)
         self.assertIn("paddleocr_min_score_spinbox", gui_builder_source)
         self.assertIn("paddleocr_min_score_var", gui_builder_source)
-        self.assertIn("paddleocr_min_score_label, show=is_paddleocr", ui_handler_source)
-        self.assertIn("paddleocr_min_score_spinbox, show=is_paddleocr", ui_handler_source)
+        self.assertIn("'paddleocr_min_score_label'", ui_handler_source)
+        self.assertIn("'paddleocr_min_score_spinbox'", ui_handler_source)
+        self.assertIn(
+            "manage_grid(getattr(self.app, widget_name, None), show=is_paddleocr)",
+            ui_handler_source,
+        )
         self.assertIn("rapidocr_min_score_label", gui_builder_source)
         self.assertIn("rapidocr_min_score_spinbox", gui_builder_source)
         self.assertIn("rapidocr_min_score_var", gui_builder_source)
@@ -476,6 +480,15 @@ class StartupOptimizationTests(unittest.TestCase):
 
         requirements = Path("requirements.txt").read_text(encoding="utf-8-sig").lower()
         self.assertIn("onnxruntime==1.28.0", requirements)
+
+    def test_app_anchors_relative_custom_ai_profile_path_to_base_dir(self):
+        app_logic_source = Path("app_logic.py").read_text(encoding="utf-8-sig")
+
+        self.assertLess(
+            app_logic_source.index("self.base_dir ="),
+            app_logic_source.index("self.custom_ai_profiles = CustomAIProfileManager("),
+        )
+        self.assertIn("base_dir=self.base_dir", app_logic_source)
 
     def test_missing_custom_prompt_loads_optimized_default_prompt(self):
         import app_logic

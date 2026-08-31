@@ -1,7 +1,8 @@
 """Settings-tab construction extracted from gui_builder."""
 
+import os
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from custom_ai import CUSTOM_AI_REASONING_EFFORT_LOW
 from gui_builder import (
@@ -18,10 +19,22 @@ from gui_builder import (
     resolve_ocr_model_display_selection,
     run_profile_network_task_async,
 )
-from gui_profile_controls import persist_translation_failover_choice
+from gui_profile_controls import (
+    custom_ai_wire_api_display_value,
+    custom_ai_wire_api_display_values,
+    persist_translation_failover_choice,
+)
 from logger import log_debug
 from modern_ui import SquareIconButton
-from paddle_ocr_backend import PADDLEOCR_MODEL_CODE
+from paddle_ocr_backend import (
+    PADDLEOCR_AUTO_LANG,
+    PADDLEOCR_DEVICE_OPTIONS,
+    PADDLEOCR_LANGUAGE_OPTIONS,
+    PADDLEOCR_MODEL_CODE,
+    PADDLEOCR_MODEL_SIZES,
+    PADDLEOCR_SUPPORTED_VERSIONS,
+    PADDLEOCR_TEXT_DET_LIMIT_TYPES,
+)
 from rapid_ocr_backend import RAPIDOCR_MODEL_CODE
 from ui_elements import create_scrollable_tab
 
@@ -65,6 +78,8 @@ def create_settings_tab(app):
     validate_timeout = frame.register(lambda P: validate_int_range(P, 0, 60))
     validate_stability = frame.register(lambda P: validate_int_range(P, 0, 5))
     validate_paddleocr_min_score = frame.register(lambda P: validate_float_range(P, 0.0, 1.0))
+    validate_paddleocr_upscale = frame.register(lambda P: validate_float_range(P, 1.0, 4.0))
+    validate_paddleocr_det_limit = frame.register(lambda P: validate_int_range(P, 128, 4096))
     validate_font_size = frame.register(lambda P: validate_int_range(P, 8, 72))
     validate_outline_width = frame.register(lambda P: validate_int_range(P, 0, 6))
 
@@ -234,6 +249,9 @@ def create_settings_tab(app):
     app.ai_profile_url_var = tk.StringVar()
     app.ai_profile_key_var = tk.StringVar()
     app.ai_profile_model_var = tk.StringVar()
+    app.ai_profile_wire_api_var = tk.StringVar(
+        value=custom_ai_wire_api_display_value(app, "chat_completions")
+    )
     app.ai_profile_structured_output_mode_var = tk.StringVar(value="auto")
     app.ai_profile_reasoning_effort_var = tk.StringVar(
         value=_reasoning_effort_display_value(app, CUSTOM_AI_REASONING_EFFORT_LOW)
@@ -294,6 +312,9 @@ def create_settings_tab(app):
             app.ai_profile_url_var.set("")
             app.ai_profile_key_var.set("")
             app.ai_profile_model_var.set("")
+            app.ai_profile_wire_api_var.set(
+                custom_ai_wire_api_display_value(app, "chat_completions")
+            )
             app.ai_profile_structured_output_mode_var.set("auto")
             app.ai_profile_reasoning_effort_var.set(
                 _reasoning_effort_display_value(
@@ -315,6 +336,12 @@ def create_settings_tab(app):
         app.ai_profile_url_var.set(profile.get("base_url", ""))
         app.ai_profile_key_var.set(profile.get("api_key", ""))
         app.ai_profile_model_var.set(profile.get("model", ""))
+        app.ai_profile_wire_api_var.set(
+            custom_ai_wire_api_display_value(
+                app,
+                profile.get("wire_api", "chat_completions"),
+            )
+        )
         structured_output_mode = str(
             profile.get("structured_output_mode") or "auto"
         ).strip().lower()
@@ -406,8 +433,6 @@ def create_settings_tab(app):
             values = build_profile_from_form()
             if not values["base_url"]:
                 raise ValueError("API URL is required")
-            if not values["api_key"]:
-                raise ValueError("API key is required")
         except Exception as e:
             messagebox.showerror(app.ui_lang.get_label("model_list_failed_title", "Model List Failed"), str(e), parent=app.root)
             return
@@ -498,11 +523,30 @@ def create_settings_tab(app):
 
     ttk.Label(
         app.ai_profiles_frame,
+        text=app.ui_lang.get_label("ai_profile_wire_api_label", "API protocol"),
+    ).grid(row=4, column=0, padx=5, pady=3, sticky="w")
+    app.ai_profile_wire_api_combobox = ttk.Combobox(
+        app.ai_profiles_frame,
+        textvariable=app.ai_profile_wire_api_var,
+        values=custom_ai_wire_api_display_values(app),
+        state="readonly",
+        width=20,
+    )
+    app.ai_profile_wire_api_combobox.grid(
+        row=4,
+        column=1,
+        padx=5,
+        pady=3,
+        sticky="w",
+    )
+
+    ttk.Label(
+        app.ai_profiles_frame,
         text=app.ui_lang.get_label(
             "ai_profile_structured_output_label",
             "Structured output",
         ),
-    ).grid(row=4, column=0, padx=5, pady=3, sticky="w")
+    ).grid(row=5, column=0, padx=5, pady=3, sticky="w")
     app.ai_profile_structured_output_combobox = ttk.Combobox(
         app.ai_profiles_frame,
         textvariable=app.ai_profile_structured_output_mode_var,
@@ -511,7 +555,7 @@ def create_settings_tab(app):
         width=12,
     )
     app.ai_profile_structured_output_combobox.grid(
-        row=4,
+        row=5,
         column=1,
         padx=5,
         pady=3,
@@ -524,7 +568,7 @@ def create_settings_tab(app):
             "ai_profile_reasoning_effort_label",
             "Reasoning effort",
         ),
-    ).grid(row=5, column=0, padx=5, pady=3, sticky="w")
+    ).grid(row=6, column=0, padx=5, pady=3, sticky="w")
     app.ai_profile_reasoning_effort_combobox = ttk.Combobox(
         app.ai_profiles_frame,
         textvariable=app.ai_profile_reasoning_effort_var,
@@ -533,7 +577,7 @@ def create_settings_tab(app):
         width=12,
     )
     app.ai_profile_reasoning_effort_combobox.grid(
-        row=5,
+        row=6,
         column=1,
         padx=5,
         pady=3,
@@ -541,7 +585,7 @@ def create_settings_tab(app):
     )
 
     profile_buttons = ttk.Frame(app.ai_profiles_frame, padding=(10, 8))
-    profile_buttons.grid(row=0, column=2, rowspan=7, padx=(10, 8), pady=6, sticky="nsew")
+    profile_buttons.grid(row=0, column=2, rowspan=8, padx=(10, 8), pady=6, sticky="nsew")
     ttk.Button(
         profile_buttons,
         text=app.ui_lang.get_label("add_btn", "Add"),
@@ -893,6 +937,286 @@ def create_settings_tab(app):
         except (ValueError, tk.TclError): app.stability_var.set(0)
         app.save_settings()
     app.stability_spinbox.bind("<FocusOut>", on_stability_focus_out)
+    current_row += 1
+
+    def save_paddleocr_selection():
+        app.save_settings()
+
+    app.paddleocr_source_dir_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "paddleocr_source_dir_label",
+            "PaddleOCR source directory:",
+        ),
+    )
+    app.paddleocr_source_dir_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_source_dir_frame = ttk.Frame(frame)
+    app.paddleocr_source_dir_frame.grid(
+        row=current_row, column=1, columnspan=2, padx=5, pady=5, sticky="ew"
+    )
+    app.paddleocr_source_dir_entry = ttk.Entry(
+        app.paddleocr_source_dir_frame,
+        textvariable=app.paddleocr_source_dir_var,
+        width=28,
+    )
+    app.paddleocr_source_dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def browse_paddleocr_source_dir():
+        configured = os.path.abspath(
+            os.path.expanduser(app.paddleocr_source_dir_var.get().strip())
+        )
+        initial_dir = configured if os.path.isdir(configured) else app.base_dir
+        selected = filedialog.askdirectory(parent=app.root, initialdir=initial_dir)
+        if selected:
+            app.paddleocr_source_dir_var.set(selected)
+            save_paddleocr_selection()
+
+    app.paddleocr_source_dir_button = ttk.Button(
+        app.paddleocr_source_dir_frame,
+        text=app.ui_lang.get_label("paddleocr_browse_btn", "Browse"),
+        command=browse_paddleocr_source_dir,
+    )
+    app.paddleocr_source_dir_button.pack(side=tk.LEFT, padx=(6, 0))
+
+    def normalize_paddleocr_source_dir(_event):
+        value = app.paddleocr_source_dir_var.get().strip() or "PaddleOCR-3.7.0"
+        app.paddleocr_source_dir_var.set(value)
+        save_paddleocr_selection()
+
+    app.paddleocr_source_dir_entry.bind("<FocusOut>", normalize_paddleocr_source_dir)
+    current_row += 1
+
+    app.paddleocr_lang_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("paddleocr_lang_label", "PaddleOCR language:"),
+    )
+    app.paddleocr_lang_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_lang_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.paddleocr_lang_var,
+        values=PADDLEOCR_LANGUAGE_OPTIONS,
+        width=18,
+        state="readonly",
+    )
+    app.paddleocr_lang_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+
+    def on_paddleocr_lang_changed(_event):
+        if app.paddleocr_lang_var.get() != PADDLEOCR_AUTO_LANG:
+            app.paddleocr_model_size_var.set("medium")
+        save_paddleocr_selection()
+
+    app.paddleocr_lang_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_paddleocr_lang_changed),
+    )
+    current_row += 1
+
+    app.paddleocr_ocr_version_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("paddleocr_version_label", "PaddleOCR version:"),
+    )
+    app.paddleocr_ocr_version_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_ocr_version_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.paddleocr_ocr_version_var,
+        values=PADDLEOCR_SUPPORTED_VERSIONS,
+        width=18,
+        state="readonly",
+    )
+    app.paddleocr_ocr_version_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+
+    def on_paddleocr_version_changed(_event):
+        if app.paddleocr_ocr_version_var.get() != "PP-OCRv6":
+            if app.paddleocr_lang_var.get() == PADDLEOCR_AUTO_LANG:
+                app.paddleocr_lang_var.set("en")
+            app.paddleocr_model_size_var.set("medium")
+        save_paddleocr_selection()
+
+    app.paddleocr_ocr_version_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_paddleocr_version_changed),
+    )
+    current_row += 1
+
+    app.paddleocr_model_size_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("paddleocr_model_size_label", "PaddleOCR model size:"),
+    )
+    app.paddleocr_model_size_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_model_size_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.paddleocr_model_size_var,
+        values=PADDLEOCR_MODEL_SIZES,
+        width=18,
+        state="readonly",
+    )
+    app.paddleocr_model_size_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+
+    def on_paddleocr_model_size_changed(_event):
+        if app.paddleocr_model_size_var.get() in {"tiny", "small"}:
+            app.paddleocr_lang_var.set(PADDLEOCR_AUTO_LANG)
+            app.paddleocr_ocr_version_var.set("PP-OCRv6")
+        save_paddleocr_selection()
+
+    app.paddleocr_model_size_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(on_paddleocr_model_size_changed),
+    )
+    current_row += 1
+
+    app.paddleocr_device_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("paddleocr_device_label", "PaddleOCR device:"),
+    )
+    app.paddleocr_device_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_device_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.paddleocr_device_var,
+        values=PADDLEOCR_DEVICE_OPTIONS,
+        width=18,
+    )
+    app.paddleocr_device_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_device_combobox.bind("<FocusOut>", lambda _event: save_paddleocr_selection())
+    app.paddleocr_device_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(lambda _event: save_paddleocr_selection()),
+    )
+    current_row += 1
+
+    app.paddleocr_upscale_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label("paddleocr_upscale_label", "PaddleOCR image upscale:"),
+    )
+    app.paddleocr_upscale_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_upscale_spinbox = ttk.Spinbox(
+        frame,
+        from_=1.0,
+        to=4.0,
+        increment=0.25,
+        textvariable=app.paddleocr_upscale_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_paddleocr_upscale, "%P"),
+    )
+    app.paddleocr_upscale_spinbox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+
+    def on_paddleocr_upscale_focus_out(_event):
+        try:
+            value = max(1.0, min(4.0, float(app.paddleocr_upscale_var.get())))
+            app.paddleocr_upscale_var.set(f"{value:.2f}".rstrip("0").rstrip("."))
+        except (ValueError, tk.TclError):
+            app.paddleocr_upscale_var.set("1.0")
+        save_paddleocr_selection()
+
+    app.paddleocr_upscale_spinbox.bind("<FocusOut>", on_paddleocr_upscale_focus_out)
+    current_row += 1
+
+    app.paddleocr_text_det_limit_side_len_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "paddleocr_det_limit_label",
+            "PaddleOCR detection side limit:",
+        ),
+    )
+    app.paddleocr_text_det_limit_side_len_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_text_det_limit_side_len_spinbox = ttk.Spinbox(
+        frame,
+        from_=128,
+        to=4096,
+        increment=32,
+        textvariable=app.paddleocr_text_det_limit_side_len_var,
+        width=10,
+        validate="key",
+        validatecommand=(validate_paddleocr_det_limit, "%P"),
+    )
+    app.paddleocr_text_det_limit_side_len_spinbox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+
+    def on_paddleocr_det_limit_focus_out(_event):
+        try:
+            value = max(
+                128,
+                min(4096, int(app.paddleocr_text_det_limit_side_len_var.get())),
+            )
+            app.paddleocr_text_det_limit_side_len_var.set(str(value))
+        except (ValueError, tk.TclError):
+            app.paddleocr_text_det_limit_side_len_var.set("960")
+        save_paddleocr_selection()
+
+    app.paddleocr_text_det_limit_side_len_spinbox.bind(
+        "<FocusOut>", on_paddleocr_det_limit_focus_out
+    )
+    current_row += 1
+
+    app.paddleocr_text_det_limit_type_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "paddleocr_det_limit_type_label",
+            "PaddleOCR detection limit type:",
+        ),
+    )
+    app.paddleocr_text_det_limit_type_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_text_det_limit_type_combobox = ttk.Combobox(
+        frame,
+        textvariable=app.paddleocr_text_det_limit_type_var,
+        values=PADDLEOCR_TEXT_DET_LIMIT_TYPES,
+        width=18,
+        state="readonly",
+    )
+    app.paddleocr_text_det_limit_type_combobox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_text_det_limit_type_combobox.bind(
+        "<<ComboboxSelected>>",
+        create_combobox_handler_wrapper(lambda _event: save_paddleocr_selection()),
+    )
+    current_row += 1
+
+    app.paddleocr_textline_orientation_label = ttk.Label(
+        frame,
+        text=app.ui_lang.get_label(
+            "paddleocr_textline_orientation_label",
+            "PaddleOCR text-line orientation:",
+        ),
+    )
+    app.paddleocr_textline_orientation_label.grid(
+        row=current_row, column=0, padx=5, pady=5, sticky="w"
+    )
+    app.paddleocr_textline_orientation_checkbox = ttk.Checkbutton(
+        frame,
+        variable=app.paddleocr_use_textline_orientation_var,
+        command=save_paddleocr_selection,
+    )
+    app.paddleocr_textline_orientation_checkbox.grid(
+        row=current_row, column=1, padx=5, pady=5, sticky="w"
+    )
     current_row += 1
 
     app.paddleocr_min_score_label = ttk.Label(

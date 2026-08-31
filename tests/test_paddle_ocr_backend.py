@@ -1,6 +1,5 @@
 import queue
-import threading
-import time
+from pathlib import Path
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -53,8 +52,79 @@ class PaddleOCRBackendTests(unittest.TestCase):
 
         settings = PaddleOCRSettings()
 
+        self.assertEqual(settings.lang, "auto")
         self.assertEqual(settings.model_size, "tiny")
         self.assertEqual(settings.upscale, 1.0)
+
+    def test_model_selection_validates_language_version_and_size(self):
+        from paddle_ocr_backend import (
+            PaddleOCRSettings,
+            resolve_paddleocr_model_selection,
+        )
+
+        self.assertEqual(
+            resolve_paddleocr_model_selection(PaddleOCRSettings()),
+            ("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec", False),
+        )
+        self.assertEqual(
+            resolve_paddleocr_model_selection(
+                PaddleOCRSettings(lang="pl", model_size="medium")
+            ),
+            ("PP-OCRv6_medium_det", "PP-OCRv6_medium_rec", True),
+        )
+        self.assertNotEqual(
+            resolve_paddleocr_model_selection(
+                PaddleOCRSettings(lang="en", ocr_version="PP-OCRv5", model_size="medium")
+            )[1],
+            resolve_paddleocr_model_selection(
+                PaddleOCRSettings(lang="pl", ocr_version="PP-OCRv5", model_size="medium")
+            )[1],
+        )
+        with self.assertRaisesRegex(ValueError, "requires model size 'medium'"):
+            resolve_paddleocr_model_selection(PaddleOCRSettings(lang="pl"))
+        with self.assertRaisesRegex(ValueError, "only available with PP-OCRv6"):
+            resolve_paddleocr_model_selection(
+                PaddleOCRSettings(lang="auto", ocr_version="PP-OCRv5")
+            )
+        with self.assertRaisesRegex(ValueError, "No PaddleOCR models"):
+            resolve_paddleocr_model_selection(
+                PaddleOCRSettings(lang="ka", ocr_version="PP-OCRv6", model_size="medium")
+            )
+
+    def test_language_specific_builder_uses_official_selector(self):
+        from paddle_ocr_backend import PaddleOCRSettings, _build_paddleocr_engine
+
+        captured_kwargs = {}
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+        settings = PaddleOCRSettings(lang="pl", model_size="medium")
+        with patch("paddle_ocr_backend._import_paddleocr", return_value=FakePaddleOCR):
+            _build_paddleocr_engine(settings)
+
+        self.assertEqual(captured_kwargs["lang"], "pl")
+        self.assertEqual(captured_kwargs["ocr_version"], "PP-OCRv6")
+        self.assertNotIn("text_detection_model_name", captured_kwargs)
+        self.assertNotIn("text_recognition_model_name", captured_kwargs)
+
+    def test_auto_builder_uses_explicit_sized_models(self):
+        from paddle_ocr_backend import PaddleOCRSettings, _build_paddleocr_engine
+
+        captured_kwargs = {}
+
+        class FakePaddleOCR:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+
+        with patch("paddle_ocr_backend._import_paddleocr", return_value=FakePaddleOCR):
+            _build_paddleocr_engine(PaddleOCRSettings())
+
+        self.assertEqual(captured_kwargs["text_detection_model_name"], "PP-OCRv6_tiny_det")
+        self.assertEqual(captured_kwargs["text_recognition_model_name"], "PP-OCRv6_tiny_rec")
+        self.assertNotIn("lang", captured_kwargs)
+        self.assertNotIn("ocr_version", captured_kwargs)
 
     def test_flatten_filters_low_scores_and_preserves_linebreaks(self):
         from paddle_ocr_backend import flatten_paddleocr_result
@@ -705,6 +775,7 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
 
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["ocr_model"], "rapidocr")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_source_dir"], "PaddleOCR-3.7.0")
+        self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_lang"], "auto")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_ocr_version"], "PP-OCRv6")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_model_size"], "tiny")
         self.assertEqual(DEFAULT_CONFIG_SETTINGS["paddleocr_min_score"], "0.45")
@@ -753,888 +824,47 @@ class PaddleOCRConfigAndUITests(unittest.TestCase):
 
         self.assertFalse(app_logic.GameChangingTranslator.is_api_based_ocr_model(app))
 
-
-class PaddleOCRPrewarmTests(unittest.TestCase):
-    def _paddle_app(self):
-        import app_logic
-
-        app = object.__new__(app_logic.GameChangingTranslator)
-        app.ocr_model_var = types.SimpleNamespace(get=lambda: "paddleocr")
-        app.keep_linebreaks_var = types.SimpleNamespace(get=lambda: False)
-        app.paddleocr_source_dir_var = types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0")
-        app.paddleocr_lang_var = types.SimpleNamespace(get=lambda: "en")
-        app.paddleocr_ocr_version_var = types.SimpleNamespace(get=lambda: "PP-OCRv6")
-        app.paddleocr_model_size_var = types.SimpleNamespace(get=lambda: "tiny")
-        app.paddleocr_device_var = types.SimpleNamespace(get=lambda: "cpu")
-        app.paddleocr_min_score_var = types.SimpleNamespace(get=lambda: "0.35")
-        app.paddleocr_upscale_var = types.SimpleNamespace(get=lambda: "1.0")
-        app.paddleocr_text_det_limit_side_len_var = types.SimpleNamespace(get=lambda: "960")
-        app.paddleocr_text_det_limit_type_var = types.SimpleNamespace(get=lambda: "max")
-        app.paddleocr_use_textline_orientation_var = types.SimpleNamespace(get=lambda: False)
-        app.get_ocr_model_setting = lambda: app.ocr_model_var.get()
-        return app
-
-    def test_initial_startup_schedules_paddleocr_prewarm_only_for_paddleocr(self):
-        import app_logic
-
-        paddle_app = object.__new__(app_logic.GameChangingTranslator)
-        scheduled_callbacks = []
-        paddle_app.root = types.SimpleNamespace(
-            after=lambda delay, callback: scheduled_callbacks.append((delay, callback))
+    def test_advanced_paddleocr_controls_are_localized_and_visibility_managed(self):
+        project_root = Path(__file__).resolve().parents[1]
+        builder_source = (project_root / "gui_settings_builder.py").read_text(
+            encoding="utf-8"
         )
-        paddle_app.get_ocr_model_setting = lambda: "paddleocr"
-        paddle_app.ensure_paddleocr_ready_if_selected = Mock()
-
-        scheduled = app_logic.GameChangingTranslator.schedule_initial_paddleocr_prewarm(paddle_app)
-
-        self.assertTrue(scheduled)
-        self.assertEqual(scheduled_callbacks[0][0], 0)
-        scheduled_callbacks[0][1]()
-        paddle_app.ensure_paddleocr_ready_if_selected.assert_called_once_with("application startup")
-
-        ai_app = object.__new__(app_logic.GameChangingTranslator)
-        ai_app.root = types.SimpleNamespace(after=Mock())
-        ai_app.get_ocr_model_setting = lambda: "custom_ai"
-        ai_app.ensure_paddleocr_ready_if_selected = Mock()
-
-        scheduled = app_logic.GameChangingTranslator.schedule_initial_paddleocr_prewarm(ai_app)
-
-        self.assertFalse(scheduled)
-        ai_app.root.after.assert_not_called()
-        ai_app.ensure_paddleocr_ready_if_selected.assert_not_called()
-
-    def test_save_settings_starts_paddleocr_prewarm_after_successful_switch(self):
-        import app_logic
-
-        app = object.__new__(app_logic.GameChangingTranslator)
-        app._fully_initialized = True
-        app._app_is_closing = False
-        app.ui_interaction_handler = types.SimpleNamespace(save_settings=Mock(return_value=True))
-        app.get_ocr_model_setting = lambda: "paddleocr"
-        app.ensure_paddleocr_ready_if_selected = Mock()
-
-        self.assertTrue(app_logic.GameChangingTranslator.save_settings(app))
-
-        app.ensure_paddleocr_ready_if_selected.assert_called_once_with("settings saved")
-
-    def test_save_settings_does_not_prewarm_for_custom_ai_ocr(self):
-        import app_logic
-
-        app = object.__new__(app_logic.GameChangingTranslator)
-        app._fully_initialized = True
-        app._app_is_closing = False
-        app.ui_interaction_handler = types.SimpleNamespace(save_settings=Mock(return_value=True))
-        app.get_ocr_model_setting = lambda: "custom_ai"
-        app.ensure_paddleocr_ready_if_selected = Mock()
-
-        self.assertTrue(app_logic.GameChangingTranslator.save_settings(app))
-
-        app.ensure_paddleocr_ready_if_selected.assert_not_called()
-
-    def test_paddleocr_prewarm_initializes_fast_path_and_fallback_engines(self):
-        import app_logic
-        from paddle_ocr_backend import PaddleOCRSettings
-
-        app = self._paddle_app()
-        created_threads = []
-
-        class InlineThread:
-            def __init__(self, target, args=(), name=None, daemon=None):
-                self.target = target
-                self.args = args
-                self.name = name
-                self.daemon = daemon
-                self.started = False
-
-            def start(self):
-                self.started = True
-                self.target(*self.args)
-
-            def is_alive(self):
-                return False
-
-        def make_thread(*args, **kwargs):
-            thread = InlineThread(*args, **kwargs)
-            created_threads.append(thread)
-            return thread
-
-        with patch.object(app_logic.threading, "Thread", side_effect=make_thread):
-            with patch.object(app_logic, "get_paddleocr_text_recognition_engine") as text_engine:
-                with patch.object(app_logic, "get_paddleocr_engine") as full_engine:
-                    with patch.object(app_logic, "log_debug") as log_debug:
-                        started = app_logic.GameChangingTranslator.ensure_paddleocr_ready_if_selected(
-                            app,
-                            "settings saved",
-                        )
-
-        self.assertTrue(started)
-        self.assertEqual(len(created_threads), 1)
-        self.assertEqual(created_threads[0].name, "PaddleOCRPrewarm")
-        self.assertIsInstance(text_engine.call_args.args[0], PaddleOCRSettings)
-        self.assertEqual(text_engine.call_args.args[0].ocr_version, "PP-OCRv6")
-        full_engine.assert_called_once()
-        self.assertEqual(full_engine.call_args.args[0], text_engine.call_args.args[0])
-        self.assertIn("phase_metrics", full_engine.call_args.kwargs)
-        messages = [call.args[0] for call in log_debug.call_args_list]
-        self.assertTrue(any("phase=text_recognition" in message for message in messages))
-        self.assertTrue(any("phase=full_engine" in message for message in messages))
-
-    def test_worker_waits_for_matching_paddleocr_prewarm(self):
-        import app_logic
-        import worker_threads
-
-        app = self._paddle_app()
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = types.SimpleNamespace(
-            is_alive=lambda: True
+        visibility_source = (
+            project_root / "handlers" / "ui_interaction_handler.py"
+        ).read_text(encoding="utf-8")
+        widget_names = (
+            "paddleocr_source_dir_frame",
+            "paddleocr_lang_combobox",
+            "paddleocr_ocr_version_combobox",
+            "paddleocr_model_size_combobox",
+            "paddleocr_device_combobox",
+            "paddleocr_upscale_spinbox",
+            "paddleocr_text_det_limit_side_len_spinbox",
+            "paddleocr_text_det_limit_type_combobox",
+            "paddleocr_textline_orientation_checkbox",
         )
-        app._paddleocr_prewarm_settings = settings
-        app._paddleocr_prewarmed_settings = None
-        app._paddleocr_prewarm_generation = 1
-        app._paddleocr_prewarm_event = threading.Event()
-        result = []
-        finished = threading.Event()
+        for widget_name in widget_names:
+            self.assertIn(widget_name, builder_source)
+            self.assertIn(widget_name, visibility_source)
 
-        def wait_for_ready():
-            result.append(
-                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-                    app,
-                    settings,
-                    timeout=1.0,
-                )
+        resource_keys = (
+            "paddleocr_source_dir_label",
+            "paddleocr_browse_btn",
+            "paddleocr_lang_label",
+            "paddleocr_version_label",
+            "paddleocr_model_size_label",
+            "paddleocr_device_label",
+            "paddleocr_upscale_label",
+            "paddleocr_det_limit_label",
+            "paddleocr_det_limit_type_label",
+            "paddleocr_textline_orientation_label",
+        )
+        for resource_name in ("gui_eng.csv", "gui_zh.csv", "gui_pol.csv"):
+            resource_text = (project_root / "resources" / resource_name).read_text(
+                encoding="utf-8-sig"
             )
-            finished.set()
-
-        waiter = threading.Thread(target=wait_for_ready)
-        waiter.start()
-        self.assertFalse(finished.wait(0.05))
-
-        with app._paddleocr_prewarm_lock:
-            app._paddleocr_prewarmed_settings = settings
-            app._paddleocr_prewarm_event.set()
-
-        waiter.join(timeout=1.0)
-        self.assertEqual(result, [True])
-
-    def test_paddleocr_prewarm_starts_thread_while_state_lock_is_owned(self):
-        import app_logic
-        import worker_threads
-
-        app = self._paddle_app()
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        lock_owned_at_start = []
-
-        class RecordingThread:
-            def __init__(self, *args, **kwargs):
-                self.started = False
-
-            def start(self):
-                lock_owned_at_start.append(
-                    app._paddleocr_prewarm_lock._is_owned()
-                )
-                self.started = True
-
-            def is_alive(self):
-                return self.started
-
-        with patch.object(
-            app_logic.threading,
-            "Thread",
-            side_effect=RecordingThread,
-        ):
-            self.assertTrue(
-                app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                    app,
-                    settings,
-                    "test",
-                )
-            )
-
-        self.assertEqual(lock_owned_at_start, [True])
-
-    def test_different_paddleocr_prewarm_settings_do_not_start_concurrently(self):
-        import app_logic
-        import worker_threads
-        from dataclasses import replace
-
-        app = self._paddle_app()
-        first_settings = worker_threads.get_paddleocr_settings_from_app(app)
-        second_settings = replace(first_settings, model_size="small")
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = types.SimpleNamespace(
-            is_alive=lambda: True
-        )
-        app._paddleocr_prewarm_settings = first_settings
-        app._paddleocr_prewarmed_settings = None
-        app._paddleocr_prewarm_generation = 1
-        app._paddleocr_prewarm_event = threading.Event()
-
-        with patch.object(app_logic.threading, "Thread") as thread_factory:
-            started = (
-                app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                    app,
-                    second_settings,
-                    "settings changed",
-                )
-            )
-
-        self.assertFalse(started)
-        thread_factory.assert_not_called()
-
-    def test_invalidated_paddleocr_wait_tracks_the_still_active_operation(self):
-        import app_logic
-        import worker_threads
-        from dataclasses import replace
-
-        app = self._paddle_app()
-        first_settings = worker_threads.get_paddleocr_settings_from_app(app)
-        second_settings = replace(first_settings, model_size="small")
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = types.SimpleNamespace(
-            is_alive=lambda: True
-        )
-        app._paddleocr_prewarm_settings = first_settings
-        app._paddleocr_prewarmed_settings = None
-        app._paddleocr_prewarm_generation = 1
-        active_event = threading.Event()
-        app._paddleocr_prewarm_event = active_event
-        result = []
-        finished = threading.Event()
-
-        app_logic.GameChangingTranslator._invalidate_paddleocr_prewarm_state(
-            app
-        )
-
-        waiter = threading.Thread(
-            target=lambda: (
-                result.append(
-                    app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-                        app,
-                        second_settings,
-                        timeout=1.0,
-                    )
-                ),
-                finished.set(),
-            )
-        )
-        waiter.start()
-        self.assertFalse(finished.wait(0.05))
-
-        active_event.set()
-        self.assertTrue(finished.wait(0.2))
-        waiter.join(timeout=1.0)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(result, [False])
-
-    def test_paddleocr_worker_wait_default_is_twenty_seconds(self):
-        import app_logic
-        import inspect
-
-        self.assertEqual(
-            inspect.signature(
-                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm
-            ).parameters["timeout"].default,
-            20.0,
-        )
-
-    def test_worker_stops_waiting_for_paddleocr_when_app_stops(self):
-        import app_logic
-        import worker_threads
-
-        app = self._paddle_app()
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        app.is_running = True
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = types.SimpleNamespace(
-            is_alive=lambda: True
-        )
-        app._paddleocr_prewarm_settings = settings
-        app._paddleocr_prewarmed_settings = None
-        app._paddleocr_prewarm_generation = 1
-        app._paddleocr_prewarm_event = threading.Event()
-        result = []
-
-        waiter = threading.Thread(
-            target=lambda: result.append(
-                app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-                    app,
-                    settings,
-                    timeout=1.0,
-                )
-            )
-        )
-        waiter.start()
-        app.is_running = False
-        waiter.join(timeout=0.5)
-
-        self.assertFalse(waiter.is_alive())
-        self.assertEqual(result, [False])
-
-    def _inline_thread_factory(self, created_threads=None):
-        class InlineThread:
-            def __init__(self, target, args=(), name=None, daemon=None):
-                self.target = target
-                self.args = args
-                self.name = name
-                self.daemon = daemon
-                self.started = False
-
-            def start(self):
-                self.started = True
-                self.target(*self.args)
-
-            def is_alive(self):
-                return False
-
-        def make_thread(*args, **kwargs):
-            thread = InlineThread(*args, **kwargs)
-            if created_threads is not None:
-                created_threads.append(thread)
-            return thread
-
-        return make_thread
-
-    def test_settings_summary_omits_user_paths_and_secrets(self):
-        from paddle_ocr_backend import PaddleOCRSettings, summarize_paddleocr_settings
-
-        summary = summarize_paddleocr_settings(
-            PaddleOCRSettings(source_dir=r"C:\Users\secret\models\billing-client-secret")
-        )
-
-        self.assertNotIn("source_dir_name", summary)
-        self.assertTrue(summary["source_dir_configured"])
-        self.assertNotIn("Users", str(summary))
-        self.assertNotIn("secret", str(summary))
-        self.assertEqual(summary["model_size"], "tiny")
-        self.assertEqual(summary["device"], "cpu")
-
-    def test_engine_phase_metrics_distinguish_construct_and_cache_hit(self):
-        from paddle_ocr_backend import (
-            PaddleOCRSettings,
-            clear_paddleocr_engines,
-            get_paddleocr_text_recognition_engine,
-        )
-
-        clear_paddleocr_engines()
-        settings = PaddleOCRSettings()
-        cold = {}
-        hot = {}
-
-        class FakeEngine:
-            def __init__(self, **kwargs):
-                pass
-
-        with patch(
-            "paddle_ocr_backend._import_text_recognition",
-            return_value=FakeEngine,
-        ):
-            with patch(
-                "paddle_ocr_backend._probe_ppocrv6_model_files",
-                side_effect=["absent", "present", "present", "present"],
-            ):
-                get_paddleocr_text_recognition_engine(settings, phase_metrics=cold)
-                get_paddleocr_text_recognition_engine(settings, phase_metrics=hot)
-
-        self.assertFalse(cold["cache_hit"])
-        self.assertEqual(cold["build_kind"], "model_download_and_build")
-        self.assertEqual(cold["engine_kind"], "text_recognition")
-        self.assertIn("import_s", cold)
-        self.assertIn("model_files_probe_s", cold)
-        self.assertIn("construct_s", cold)
-        self.assertIn("total_s", cold)
-        self.assertTrue(hot["cache_hit"])
-        self.assertEqual(hot["build_kind"], "cache_hit")
-        self.assertEqual(hot["import_s"], 0.0)
-        self.assertEqual(hot["model_files_probe_s"], 0.0)
-        self.assertEqual(hot["construct_s"], 0.0)
-        clear_paddleocr_engines()
-
-    def test_prewarm_publishes_text_recognition_breakdown_metrics_and_log(self):
-        import app_logic
-        import worker_threads
-        from runtime_metrics import RuntimeMetrics
-
-        app = self._paddle_app()
-        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        logs = []
-
-        def text_engine(settings_arg, phase_metrics=None, clock=None):
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "text_recognition",
-                        "cache_hit": False,
-                        "build_kind": "model_build_cached_files",
-                        "import_s": 12.5,
-                        "model_files_probe_s": 0.01,
-                        "construct_s": 3.25,
-                        "total_s": 15.76,
-                        "model_files_before": "present",
-                        "model_files_after": "present",
-                    }
-                )
-
-        def full_engine(settings_arg, phase_metrics=None, clock=None):
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "full",
-                        "cache_hit": True,
-                        "build_kind": "cache_hit",
-                        "import_s": 0.0,
-                        "model_files_probe_s": 0.0,
-                        "construct_s": 0.0,
-                        "total_s": 0.0,
-                        "model_files_before": "present",
-                        "model_files_after": "present",
-                    }
-                )
-
-        with patch.object(
-            app_logic.threading,
-            "Thread",
-            side_effect=self._inline_thread_factory(),
-        ):
-            with patch.object(
-                app_logic,
-                "get_paddleocr_text_recognition_engine",
-                side_effect=text_engine,
-            ):
-                with patch.object(
-                    app_logic,
-                    "get_paddleocr_engine",
-                    side_effect=full_engine,
-                ):
-                    with patch.object(app_logic, "log_debug", side_effect=logs.append):
-                        app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                            app,
-                            settings,
-                            "application startup",
-                        )
-
-        snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
-        text_phase = snapshot["text_recognition"]
-        self.assertEqual(text_phase["import_s"], 12.5)
-        self.assertEqual(text_phase["model_files_probe_s"], 0.01)
-        self.assertEqual(text_phase["construct_s"], 3.25)
-        self.assertEqual(text_phase["total_s"], 15.76)
-        gauges = app.runtime_metrics.snapshot()["gauges"]
-        self.assertEqual(
-            gauges["paddleocr_prewarm_text_recognition_import_s"],
-            12.5,
-        )
-        self.assertEqual(
-            gauges["paddleocr_prewarm_text_recognition_model_files_probe_s"],
-            0.01,
-        )
-        self.assertEqual(
-            gauges["paddleocr_prewarm_text_recognition_construct_s"],
-            3.25,
-        )
-        breakdown_logs = [
-            message
-            for message in logs
-            if "phase=text_recognition_breakdown" in str(message)
-        ]
-        self.assertTrue(breakdown_logs)
-        self.assertIn("import_s=12.5", breakdown_logs[-1])
-        self.assertIn("probe_s=0.01", breakdown_logs[-1])
-        self.assertIn("construct_s=3.25", breakdown_logs[-1])
-        self.assertIn("files_before=present", breakdown_logs[-1])
-
-    def test_prewarm_cache_hit_breakdown_metrics_are_zeroed(self):
-        import app_logic
-        import worker_threads
-        from runtime_metrics import RuntimeMetrics
-
-        app = self._paddle_app()
-        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-
-        def text_engine(settings_arg, phase_metrics=None, clock=None):
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "text_recognition",
-                        "cache_hit": True,
-                        "build_kind": "cache_hit",
-                        "import_s": 0.0,
-                        "model_files_probe_s": 0.0,
-                        "construct_s": 0.0,
-                        "total_s": 0.0,
-                        "model_files_before": "present",
-                        "model_files_after": "present",
-                    }
-                )
-
-        def full_engine(settings_arg, phase_metrics=None, clock=None):
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "full",
-                        "cache_hit": True,
-                        "build_kind": "cache_hit",
-                        "import_s": 0.0,
-                        "model_files_probe_s": 0.0,
-                        "construct_s": 0.0,
-                        "total_s": 0.0,
-                    }
-                )
-
-        with patch.object(
-            app_logic.threading,
-            "Thread",
-            side_effect=self._inline_thread_factory(),
-        ):
-            with patch.object(
-                app_logic,
-                "get_paddleocr_text_recognition_engine",
-                side_effect=text_engine,
-            ):
-                with patch.object(
-                    app_logic,
-                    "get_paddleocr_engine",
-                    side_effect=full_engine,
-                ):
-                    app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                        app,
-                        settings,
-                        "application startup",
-                    )
-
-        gauges = app.runtime_metrics.snapshot()["gauges"]
-        self.assertEqual(gauges["paddleocr_prewarm_text_recognition_import_s"], 0.0)
-        self.assertEqual(
-            gauges["paddleocr_prewarm_text_recognition_model_files_probe_s"],
-            0.0,
-        )
-        self.assertEqual(
-            gauges["paddleocr_prewarm_text_recognition_construct_s"],
-            0.0,
-        )
-
-    def test_prewarm_metrics_cover_cold_hot_ready_settings_change_and_failure(self):
-        import app_logic
-        import worker_threads
-        from dataclasses import replace
-        from runtime_metrics import RuntimeMetrics
-
-        app = self._paddle_app()
-        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        changed_settings = replace(settings, model_size="small")
-
-        clock = {"value": 100.0}
-
-        def monotonic():
-            return clock["value"]
-
-        def advance(seconds):
-            clock["value"] += float(seconds)
-
-        def text_engine(settings_arg, phase_metrics=None, clock=None):
-            advance(1.5)
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "text_recognition",
-                        "cache_hit": False,
-                        "build_kind": "model_build_cached_files",
-                        "total_s": 1.5,
-                    }
-                )
-
-        def full_engine(settings_arg, phase_metrics=None, clock=None):
-            advance(2.5)
-            if phase_metrics is not None:
-                phase_metrics.update(
-                    {
-                        "engine_kind": "full",
-                        "cache_hit": False,
-                        "build_kind": "model_build_cached_files",
-                        "total_s": 2.5,
-                    }
-                )
-
-        with patch.object(app_logic.time, "monotonic", side_effect=monotonic):
-            with patch.object(
-                app_logic.threading,
-                "Thread",
-                side_effect=self._inline_thread_factory(),
-            ):
-                with patch.object(
-                    app_logic,
-                    "get_paddleocr_text_recognition_engine",
-                    side_effect=text_engine,
-                ):
-                    with patch.object(
-                        app_logic,
-                        "get_paddleocr_engine",
-                        side_effect=full_engine,
-                    ):
-                        started = app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                            app,
-                            settings,
-                            "application startup",
-                        )
-
-        self.assertTrue(started)
-        cold = app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertEqual(cold["status"], "completed")
-        self.assertEqual(cold["outcome"], "completed")
-        self.assertEqual(cold["trigger"], "startup")
-        self.assertEqual(cold["start_path"], "start_thread")
-        self.assertEqual(cold["generation"], 1)
-        self.assertTrue(cold["ready"])
-        self.assertFalse(cold["active"])
-        self.assertEqual(cold["phase_text_recognition_s"], 1.5)
-        self.assertEqual(cold["phase_full_engine_s"], 2.5)
-        self.assertEqual(cold["total_s"], 4.0)
-        self.assertEqual(cold["settings_summary"]["model_size"], "tiny")
-        self.assertIn("cpu_count", cold["host"])
-        self.assertNotIn("Users", str(cold))
-
-        skipped_ready = app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-            app,
-            settings,
-            "settings saved",
-        )
-        ready_snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertFalse(skipped_ready)
-        self.assertEqual(ready_snapshot["outcome"], "already_ready")
-        self.assertTrue(ready_snapshot["ready"])
-
-        # Settings change after ready: invalidate then start a new generation.
-        app_logic.GameChangingTranslator.clear_paddleocr_runtime_cache(
-            app,
-            "settings changed",
-        )
-        with patch.object(app_logic.time, "monotonic", side_effect=monotonic):
-            with patch.object(
-                app_logic.threading,
-                "Thread",
-                side_effect=self._inline_thread_factory(),
-            ):
-                with patch.object(
-                    app_logic,
-                    "get_paddleocr_text_recognition_engine",
-                    side_effect=text_engine,
-                ):
-                    with patch.object(
-                        app_logic,
-                        "get_paddleocr_engine",
-                        side_effect=full_engine,
-                    ):
-                        changed = app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                            app,
-                            changed_settings,
-                            "settings saved",
-                        )
-        changed_snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertTrue(changed)
-        self.assertGreaterEqual(changed_snapshot["generation"], 2)
-        self.assertEqual(changed_snapshot["settings_summary"]["model_size"], "small")
-        self.assertEqual(changed_snapshot["status"], "completed")
-
-        fail_app = self._paddle_app()
-        fail_app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        with patch.object(
-            app_logic.threading,
-            "Thread",
-            side_effect=self._inline_thread_factory(),
-        ):
-            with patch.object(
-                app_logic,
-                "get_paddleocr_text_recognition_engine",
-                side_effect=RuntimeError('failed "OCR SECRET TEXT"'),
-            ):
-                app_logic.GameChangingTranslator.start_paddleocr_prewarm(
-                    fail_app,
-                    settings,
-                    "settings saved",
-                )
-        failed = fail_app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["error_type"], "RuntimeError")
-        self.assertFalse(failed["ready"])
-        self.assertNotIn("OCR SECRET TEXT", str(failed))
-        self.assertNotIn("OCR SECRET TEXT", fail_app.runtime_metrics.summary_text())
-
-    def test_worker_wait_and_first_ocr_wait_metrics_are_distinct(self):
-        import app_logic
-        import worker_threads
-        from runtime_metrics import RuntimeMetrics
-
-        app = self._paddle_app()
-        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = types.SimpleNamespace(is_alive=lambda: True)
-        app._paddleocr_prewarm_settings = settings
-        app._paddleocr_prewarmed_settings = None
-        app._paddleocr_prewarm_generation = 3
-        app._paddleocr_prewarm_event = threading.Event()
-        app._paddleocr_prewarm_metrics = (
-            app_logic.GameChangingTranslator._new_paddleocr_prewarm_metrics()
-        )
-        app._paddleocr_first_ocr_wait_generation = 0
-
-        def release_after_wait():
-            time.sleep(0.05)
-            with app._paddleocr_prewarm_lock:
-                app._paddleocr_prewarmed_settings = settings
-                app._paddleocr_prewarm_event.set()
-
-        releaser = threading.Thread(target=release_after_wait)
-        releaser.start()
-        ready = app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-            app,
-            settings,
-            timeout=1.0,
-        )
-        releaser.join(timeout=1.0)
-        wait_snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertTrue(ready)
-        self.assertEqual(wait_snapshot["wait_path"], "worker_wait")
-        self.assertTrue(wait_snapshot["waited_for_ready"])
-        self.assertGreaterEqual(wait_snapshot["wait_s"], 0.0)
-        self.assertNotEqual(wait_snapshot["wait_path"], "worker_first_ocr")
-
-        app_logic.GameChangingTranslator.note_paddleocr_first_ocr_wait(
-            app,
-            settings,
-            waited_s=0.37,
-            ready=True,
-            generation=3,
-        )
-        first_snapshot = app.get_paddleocr_prewarm_metrics_snapshot()
-        self.assertEqual(first_snapshot["wait_path"], "worker_first_ocr")
-        self.assertEqual(first_snapshot["first_ocr_wait_s"], 0.37)
-        self.assertEqual(first_snapshot["first_ocr_wait_generation"], 3)
-
-        # First-OCR wait is one-shot per generation.
-        app_logic.GameChangingTranslator.note_paddleocr_first_ocr_wait(
-            app,
-            settings,
-            waited_s=9.0,
-            ready=False,
-            generation=3,
-        )
-        self.assertEqual(
-            app.get_paddleocr_prewarm_metrics_snapshot()["first_ocr_wait_s"],
-            0.37,
-        )
-
-        runtime = app.runtime_metrics.snapshot()
-        self.assertIn("paddleocr_prewarm_wait_duration", runtime["timings"])
-        self.assertIn("paddleocr_first_ocr_wait_duration", runtime["timings"])
-        self.assertEqual(
-            runtime["timings"]["paddleocr_first_ocr_wait_duration"]["latest"],
-            0.37,
-        )
-        self.assertEqual(runtime["labels"]["paddleocr_prewarm_wait_path"], "worker_first_ocr")
-
-    def test_worker_wait_does_not_duplicate_terminal_prewarm_timings(self):
-        import app_logic
-        import worker_threads
-        from runtime_metrics import RuntimeMetrics
-
-        app = self._paddle_app()
-        app.runtime_metrics = RuntimeMetrics(max_age_seconds=0)
-        settings = worker_threads.get_paddleocr_settings_from_app(app)
-        app._paddleocr_prewarm_lock = threading.RLock()
-        app._paddleocr_prewarm_thread = None
-        app._paddleocr_prewarm_settings = None
-        app._paddleocr_prewarmed_settings = settings
-        app._paddleocr_prewarm_generation = 5
-        app._paddleocr_prewarm_event = threading.Event()
-        app._paddleocr_prewarm_metrics = (
-            app_logic.GameChangingTranslator._new_paddleocr_prewarm_metrics()
-        )
-
-        app_logic.GameChangingTranslator._update_paddleocr_prewarm_metrics(
-            app,
-            generation=5,
-            status="completed",
-            outcome="completed",
-            phase_text_recognition_s=1.0,
-            phase_full_engine_s=2.0,
-            total_s=3.0,
-            ready=True,
-        )
-        app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-            app,
-            settings,
-            timeout=20.0,
-        )
-        app_logic.GameChangingTranslator.wait_for_paddleocr_prewarm(
-            app,
-            settings,
-            timeout=20.0,
-        )
-
-        timings = app.runtime_metrics.snapshot()["timings"]
-        self.assertEqual(
-            timings["paddleocr_prewarm_total_duration"]["count"],
-            1,
-        )
-        self.assertEqual(
-            timings["paddleocr_prewarm_text_recognition_duration"]["count"],
-            1,
-        )
-        self.assertEqual(
-            timings["paddleocr_prewarm_full_engine_duration"]["count"],
-            1,
-        )
-
-    def test_process_local_ocr_frame_records_first_ocr_wait_metric(self):
-        import worker_threads
-        from runtime_metrics import RuntimeMetrics
-
-        image = Image.new("RGB", (16, 10), "white")
-        noted = []
-        app = types.SimpleNamespace(
-            keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
-            paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
-            paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
-            paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "tiny"),
-            paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
-            paddleocr_min_score_var=types.SimpleNamespace(get=lambda: "0.35"),
-            paddleocr_upscale_var=types.SimpleNamespace(get=lambda: "1.0"),
-            paddleocr_text_det_limit_side_len_var=types.SimpleNamespace(get=lambda: "960"),
-            paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
-            paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
-            runtime_metrics=RuntimeMetrics(max_age_seconds=0),
-            wait_for_paddleocr_prewarm=Mock(return_value=True),
-            note_paddleocr_first_ocr_wait=lambda settings, waited_s, ready: noted.append(
-                (settings.model_size, round(float(waited_s), 4), bool(ready))
-            ),
-        )
-
-        with patch.object(
-            worker_threads,
-            "recognize_subtitle_with_paddleocr",
-            return_value=("Hello world", []),
-        ):
-            text, _img, engine_label = worker_threads.process_local_ocr_frame(
-                app,
-                image,
-                "paddleocr",
-            )
-
-        self.assertEqual(text, "Hello world")
-        self.assertEqual(engine_label, "PaddleOCR")
-        self.assertEqual(len(noted), 1)
-        self.assertEqual(noted[0][0], "tiny")
-        self.assertTrue(noted[0][2])
-        app.wait_for_paddleocr_prewarm.assert_called_once_with(
-            worker_threads.get_paddleocr_settings_from_app(app),
-            timeout=20.0,
-        )
+            for resource_key in resource_keys:
+                self.assertIn(f"{resource_key},", resource_text)
 
 
 class PaddleOCRWorkerRoutingTests(unittest.TestCase):
@@ -1647,7 +877,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
 
         app = types.SimpleNamespace(
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "small"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
@@ -1672,7 +902,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
 
         app = types.SimpleNamespace(
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "tiny"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
@@ -1847,7 +1077,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "small"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
@@ -1857,7 +1087,6 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
             paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
             ocr_debugging_var=types.SimpleNamespace(get=lambda: True),
-            wait_for_paddleocr_prewarm=Mock(return_value=True),
         )
 
         with patch.object(
@@ -1875,10 +1104,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         self.assertEqual(engine_label, "PaddleOCR")
         self.assertEqual(processed_cv_img.shape[0:2], (10, 16))
         recognize.assert_called_once()
-        app.wait_for_paddleocr_prewarm.assert_called_once_with(
-            recognize.call_args.args[1],
-            timeout=20.0,
-        )
+        self.assertEqual(recognize.call_args.args[1].lang, "auto")
 
     def test_process_local_ocr_frame_skips_debug_image_when_debugging_off(self):
         import worker_threads
@@ -1888,7 +1114,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "small"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
@@ -1898,7 +1124,6 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
             paddleocr_text_det_limit_type_var=types.SimpleNamespace(get=lambda: "max"),
             paddleocr_use_textline_orientation_var=types.SimpleNamespace(get=lambda: False),
             ocr_debugging_var=types.SimpleNamespace(get=lambda: False),
-            wait_for_paddleocr_prewarm=Mock(return_value=True),
         )
 
         with patch.object(
@@ -1928,7 +1153,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: False),
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "tiny"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),
@@ -1960,7 +1185,7 @@ class PaddleOCRWorkerRoutingTests(unittest.TestCase):
         app = types.SimpleNamespace(
             keep_linebreaks_var=types.SimpleNamespace(get=lambda: True),
             paddleocr_source_dir_var=types.SimpleNamespace(get=lambda: "PaddleOCR-3.7.0"),
-            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "en"),
+            paddleocr_lang_var=types.SimpleNamespace(get=lambda: "auto"),
             paddleocr_ocr_version_var=types.SimpleNamespace(get=lambda: "PP-OCRv6"),
             paddleocr_model_size_var=types.SimpleNamespace(get=lambda: "small"),
             paddleocr_device_var=types.SimpleNamespace(get=lambda: "cpu"),

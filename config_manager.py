@@ -255,7 +255,7 @@ DEFAULT_CONFIG_SETTINGS = {
     'ocr_model': 'rapidocr',
     'rapidocr_min_score': '0.45',
     'paddleocr_source_dir': 'PaddleOCR-3.7.0',
-    'paddleocr_lang': 'en',
+    'paddleocr_lang': 'auto',
     'paddleocr_ocr_version': 'PP-OCRv6',
     'paddleocr_model_size': 'tiny',
     'paddleocr_device': 'cpu',
@@ -403,6 +403,18 @@ def load_app_config():
         )
         settings_changed = True
         log_debug("Config: Migrated legacy keep_linebreaks to translation_line_layout")
+
+    if (
+        str(config_settings.get('paddleocr_lang', '')).strip().lower() == 'en'
+        and str(config_settings.get('paddleocr_ocr_version', '')).strip() == 'PP-OCRv6'
+        and str(config_settings.get('paddleocr_model_size', '')).strip().lower() == 'tiny'
+    ):
+        config_settings['paddleocr_lang'] = 'auto'
+        settings_changed = True
+        log_debug(
+            "Config: Migrated legacy ignored PaddleOCR language 'en' to 'auto' "
+            "for the PP-OCRv6 tiny model"
+        )
 
     # Obsolete keys check (add 'source_lang', 'target_lang', 'ocr_lang' if you are sure to remove them)
     obsolete_keys = ['api_key', 'gpu_enabled', 'spell_check_enabled', 'word_segmentation_enabled',

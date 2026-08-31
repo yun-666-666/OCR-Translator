@@ -11,6 +11,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class LivePathInventoryTests(unittest.TestCase):
+    def test_unwired_rust_overlay_experiment_is_removed(self):
+        self.assertFalse((PROJECT_ROOT / "rust_overlay_manager.py").exists())
+
     def test_legacy_provider_source_inventory_is_removed(self):
         legacy_paths = (
             "marian_mt_translator.py",

@@ -15,6 +15,16 @@ Read [ATTRIBUTION.md](ATTRIBUTION.md) before redistributing a modified version o
 3. Preserve the GPL licence, `LICENSE`, `ATTRIBUTION.md`, and all original-author notices.
 4. Explain user-visible changes and validation in the pull request.
 
+## Development checks
+
+The authoritative test tree is `tests/`. Install `pytest` in the development environment and run the canonical command from the repository root:
+
+```bash
+python -m pytest
+```
+
+Do not add duplicate `test_*.py` modules at the repository root. `pytest` is not a runtime dependency and is not required for normal application use.
+
 ## AI-assisted work
 
 This fork credits GPT as the primary AI collaborator, with Claude and Grok as collaborating assistants. AI-assisted contributions must still be reviewed, tested, and submitted under the project licence.

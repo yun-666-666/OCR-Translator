@@ -104,6 +104,10 @@ from app_lifecycle import AppLifecycleMixin
 class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifecycleMixin):
     def __init__(self, root):
         self.root = root
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            self.base_dir = os.path.dirname(sys.executable)
+        else:
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.root.title("Game-Changing Translator")
         self.root.geometry("750x480")
         self.root.minsize(650, 430)
@@ -217,6 +221,10 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             max_workers=6,
             thread_name_prefix="Translation"
         )
+        self._async_future_lock = threading.Lock()
+        self._ocr_futures = set()
+        self._translation_futures = set()
+        self._async_submissions_frozen = False
         log_debug("Initialized thread pools for OCR and translation processing")
         self._paddleocr_prewarm_lock = threading.RLock()
         self._paddleocr_prewarm_thread = None
@@ -321,7 +329,13 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         # Define translation model names and values earlier
         # Initialize with default values, will be updated with localized versions
         self.translation_model_names = {'custom_ai': 'Custom AI Translation'}
-        self.custom_ai_profiles = CustomAIProfileManager(self.config['Settings'].get('custom_ai_profiles_file', 'custom_ai_profiles.json'))
+        self.custom_ai_profiles = CustomAIProfileManager(
+            self.config['Settings'].get(
+                'custom_ai_profiles_file',
+                'custom_ai_profiles.json',
+            ),
+            base_dir=self.base_dir,
+        )
 
         # Update with localized names after UI language is loaded
         self.update_translation_model_names()
@@ -359,7 +373,7 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
             value=self.config['Settings'].get('paddleocr_source_dir', 'PaddleOCR-3.7.0')
         )
         self.paddleocr_lang_var = tk.StringVar(
-            value=self.config['Settings'].get('paddleocr_lang', 'en')
+            value=self.config['Settings'].get('paddleocr_lang', 'auto')
         )
         self.paddleocr_ocr_version_var = tk.StringVar(
             value=self.config['Settings'].get('paddleocr_ocr_version', 'PP-OCRv6')
@@ -442,10 +456,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
 
         self.ocr_model_display_var.set(initial_ocr_display_name)
 
-        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-            self.base_dir = os.path.dirname(sys.executable)
-        else:
-            self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.custom_ai_translation_cache_file = os.path.join(
             self.base_dir,
             "custom_ai_translation_cache.sqlite3",
@@ -673,7 +683,6 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
     def clear_paddleocr_runtime_cache(self, reason="runtime settings changed"):
         """Release cached PaddleOCR engine instances after settings or lifecycle changes."""
         try:
-            self._invalidate_paddleocr_prewarm_state()
             clear_paddleocr_engines()
             log_debug(f"PaddleOCR runtime cache cleared ({reason})")
         except Exception as e:
@@ -1037,10 +1046,9 @@ class GameChangingTranslator(AppCaptureOcrMixin, AppConfigurationMixin, AppLifec
         )
 
     def schedule_initial_ui_readiness(self):
-        """Prepare overlays before starting background OCR initialization."""
+        """Prepare overlays and the default RapidOCR runtime after UI startup."""
         self.root.after(50, self.load_initial_overlay_areas)
         self.root.after(200, self.schedule_initial_rapidocr_prewarm)
-        self.root.after(250, self.schedule_initial_paddleocr_prewarm)
 
     def schedule_initial_rapidocr_prewarm(self):
         """Warm the fixed RapidOCR engine without blocking the Tk thread."""

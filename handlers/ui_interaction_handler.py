@@ -180,10 +180,30 @@ class UIInteractionHandler:
                 show=show_ai_optimization,
             )
 
-        if hasattr(self.app, 'paddleocr_min_score_label'):
-            manage_grid(self.app.paddleocr_min_score_label, show=is_paddleocr)
-        if hasattr(self.app, 'paddleocr_min_score_spinbox'):
-            manage_grid(self.app.paddleocr_min_score_spinbox, show=is_paddleocr)
+        paddleocr_widget_names = (
+            'paddleocr_source_dir_label',
+            'paddleocr_source_dir_frame',
+            'paddleocr_lang_label',
+            'paddleocr_lang_combobox',
+            'paddleocr_ocr_version_label',
+            'paddleocr_ocr_version_combobox',
+            'paddleocr_model_size_label',
+            'paddleocr_model_size_combobox',
+            'paddleocr_device_label',
+            'paddleocr_device_combobox',
+            'paddleocr_upscale_label',
+            'paddleocr_upscale_spinbox',
+            'paddleocr_text_det_limit_side_len_label',
+            'paddleocr_text_det_limit_side_len_spinbox',
+            'paddleocr_text_det_limit_type_label',
+            'paddleocr_text_det_limit_type_combobox',
+            'paddleocr_textline_orientation_label',
+            'paddleocr_textline_orientation_checkbox',
+            'paddleocr_min_score_label',
+            'paddleocr_min_score_spinbox',
+        )
+        for widget_name in paddleocr_widget_names:
+            manage_grid(getattr(self.app, widget_name, None), show=is_paddleocr)
         if hasattr(self.app, 'rapidocr_min_score_label'):
             manage_grid(self.app.rapidocr_min_score_label, show=is_rapidocr)
         if hasattr(self.app, 'rapidocr_min_score_spinbox'):

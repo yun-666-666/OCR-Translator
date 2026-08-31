@@ -1152,6 +1152,8 @@ def _submit_async_translation_request(
     latency_mode=None,
     request_snapshot=None,
 ):
+    if getattr(app, "_async_submissions_frozen", False):
+        return False
     # A real submit supersedes any older pending request. Instant-cache hits
     # already invalidate pending; without this, completion of an older active
     # call can expedite stale pending text and re-bill remote translation.
@@ -1191,7 +1193,7 @@ def _submit_async_translation_request(
     started_by_sequence[translation_sequence] = submitted_at
 
     try:
-        app.translation_thread_pool.submit(
+        future = app.translation_thread_pool.submit(
             _process_translation_async,
             app,
             text_to_translate,
@@ -1202,6 +1204,9 @@ def _submit_async_translation_request(
             latency_mode,
             request_snapshot,
         )
+        tracker = getattr(app, "track_async_future", None)
+        if callable(tracker):
+            tracker(future, "translation")
     except Exception:
         app.active_translation_calls.discard(translation_sequence)
         app.active_translation_inflight_keys.discard(inflight_key)
@@ -1214,6 +1219,7 @@ def _submit_async_translation_request(
         f"(active calls: {len(app.active_translation_calls)}) "
         f"{summarize_text_for_log(text_to_translate)}"
     )
+    return True
 
 
 def _coalesce_matching_pending_translation_request(

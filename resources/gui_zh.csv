@@ -45,6 +45,9 @@ ai_optimization_mode_quality,质量优先
 custom_ai_submit_interval_label,AI 翻译最小提交间隔（毫秒）：
 ai_profile_structured_output_label,结构化输出
 ai_profile_reasoning_effort_label,思考强度
+ai_profile_wire_api_label,API 协议
+custom_ai_wire_api_chat_completions,Chat Completions
+custom_ai_wire_api_responses,Responses API
 custom_ai_reasoning_effort_low,低
 custom_ai_reasoning_effort_none,无
 custom_ai_reasoning_effort_medium,中
@@ -54,6 +57,16 @@ scan_interval_label,扫描间隔（毫秒）：
 clear_timeout_label,清空翻译超时（秒）：
 stability_threshold_label,文本稳定阈值：
 paddleocr_min_score_label,PaddleOCR 最低分：
+paddleocr_source_dir_label,PaddleOCR 源码目录：
+paddleocr_browse_btn,浏览
+paddleocr_lang_label,PaddleOCR 语言：
+paddleocr_version_label,PaddleOCR 版本：
+paddleocr_model_size_label,PaddleOCR 模型大小：
+paddleocr_device_label,PaddleOCR 设备：
+paddleocr_upscale_label,PaddleOCR 图像放大倍率：
+paddleocr_det_limit_label,PaddleOCR 检测边长限制：
+paddleocr_det_limit_type_label,PaddleOCR 检测限制类型：
+paddleocr_textline_orientation_label,PaddleOCR 文本行方向识别：
 rapidocr_min_score_label,RapidOCR 最低分：
 ocr_debugging_label,OCR 调试：
 show_debug_checkbox,显示调试图像/文本
